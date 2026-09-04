@@ -12,7 +12,7 @@ This document proposes an architecture for a stable, initial version of the new 
 
 SAB is a *de novo* replacement for GO's current standard annotation storage and access patterns. It is intended to be a long-term maintainable backend service that owns Standard Annotation records, exposes them through a stable programmatic API, supports reviewable change-set and direct mutation operations, and can derive GPAD/GPI-style outputs from its database.
 
-SAB is authoritative for Standard Annotation records and their lifecycle (creation, modification, deletion). It stores references to external identifiers, ontology terms, evidence terms, publications, and gene products, but it is explicitly not authoritative for those external resources. External metadata may be cached for display, search, validation, or export support, but those caches are not the source of truth.
+After the bootstrap period and project-approved cutover, SAB is authoritative for Standard Annotation records and their lifecycle (creation, modification, deletion). Until that cutover, the imported GPAD/GPI sources remain authoritative and bootstrap replacement may discard SAB-side annotation records and their history as described below. SAB stores references to external identifiers, ontology terms, evidence terms, publications, and gene products, but it is explicitly not authoritative for those external resources. External metadata may be cached for display, search, validation, or export support, but those caches are not the source of truth.
 
 Primary goals:
 
@@ -23,7 +23,7 @@ Primary goals:
 * Preserve immutable annotation versions and first-class audit events.  
 * Support API-triggered asynchronous GPAD/GPI import and export jobs.  
 * Support semantic validation and reporting.  
-* Prevent new duplicate annotations once an agreed duplicate definition is in place.  
+* Prevent direct creates, direct updates, and accepted create/update change sets from creating duplicate annotations under a defined pairwise policy.
 * Use GitHub OAuth as an identity provider and a simple role/scope model for authorization.  
 * Fit into GO's AWS/container deployment ecosystem.
 
@@ -73,19 +73,21 @@ The database models should be hand-authored using SQLAlchemy and Alembic, inform
 
 A Standard Annotation record should store references to external entities as identifiers, usually CURIEs or provider-specific IDs. Examples include gene product IDs, GO terms, ECO terms, and references such as PMIDs. SAB may cache labels or lookup metadata, but the annotation model itself should remain identifier reference-based.
 
-Existing annotations do not have stable IDs, so SAB must assign them. SAB should use backend-generated UUIDs as annotation identifiers.
+Existing annotations do not have stable IDs, so SAB must assign them. SAB annotation identifiers are backend-generated UUIDs stored as SAB metadata outside the Standard Annotation payload. They should not be added to the core Standard Annotation LinkML schema.
 
 ### Validation
 
-SAB should synchronously enforce structural validity for normal writes: required fields, field types, cardinality, allowed enum-like values, and other LinkML/Pydantic constraints. SAB should not store structurally invalid annotations through normal CRUD, change-set acceptance, or import workflows. Draft or quarantine storage for invalid annotations is not part of the initial design.
+Structural schema validation blocks all writes and all individual import records. SAB should synchronously enforce required fields, field types, cardinality, allowed enum-like values, and other LinkML/Pydantic constraints for direct CRUD and change-set acceptance. Structurally invalid imported records should be rejected and reported individually without failing the whole import. SAB should not store structurally invalid annotations; draft or quarantine storage for invalid annotations is not part of the initial design.
 
-Referential validation against external resources is not an initial design consideration, but it could be added later without major changes to the architecture being proposed now.
+Initially, GORULE-style semantic validation should run asynchronously for reporting and should not block writes. Selection and versioning of the initial ruleset, as well as any future subset of rules that might block synchronously, remain deferred pending domain review. Semantic report infrastructure may proceed independently, but synchronous GORULE enforcement must wait for those decisions.
+
+Except for checking bootstrap GPAD records against the matching GPI metadata supplied with the import, referential validation against external resources is not an initial design consideration. Other referential checks could be added later without major changes to the architecture being proposed now.
 
 ## Data Store and Versioning
 
 SAB should use PostgreSQL as its authoritative data store. The schema should be relational-first. JSONB should be used judiciously for full annotation snapshots and flexible metadata, rather than as the only representation of an annotation.
 
-The main `annotation` table should represent the current state of each annotation. Stable, commonly queried fields should be first-class columns with indexes: annotation ID, subject/gene product ID, object/GO term ID, evidence code, assigned-by value, status, current version, created/updated timestamps, and deletion state. More complex or repeated structures can use child tables where they are important for query or export behavior.
+The main `annotation` table should represent the current state of each annotation. Stable, commonly queried fields should be first-class columns with indexes: annotation ID, `db_object_id`, `ontology_class_id`, `evidence_type`, `assigned_by`, status, current version, created/updated timestamps, deletion state, record origin, and the source import job ID when applicable. More complex or repeated structures can use child tables where they are important for query or export behavior.
 
 Each mutation should create an immutable annotation version. A lightweight `annotation_version` table should store the full LinkML-shaped annotation snapshot, version number, actor, timestamp, and the source of the change. The main `annotation` table stores the current version and query projection; historical versions are stored separately in `annotation_version`.
 
@@ -94,8 +96,22 @@ A proposed table sketch:
 ```
 annotation
   current annotation state, ownership/group fields, indexed query fields, 
-  soft-delete status; multivalued annotation fields needed for querying may be
-  stored in child tables
+  soft-delete status, record origin/import provenance, indexed duplicate base
+  signature; multivalued annotation fields needed for querying may be stored in
+  child tables
+
+annotation_duplicate_reference
+  current-state projection with annotation ID, duplicate base signature, and
+  one distinct canonical reference per row; indexed by base signature and
+  canonical reference for conflict lookup
+
+import_staging_annotation
+  structurally valid annotations prepared by a bootstrap import job and keyed
+  by job ID, isolated from live annotation state until publication
+
+import_staging_annotation_duplicate_reference
+  per-reference duplicate projections prepared for staged annotations and keyed
+  by the same import job ID
 
 annotation_version
   immutable full annotation snapshots, one row per accepted version
@@ -109,8 +125,8 @@ change_set
   base annotation version, preview metadata
 
 audit_event
-  append-only operational history across annotations, change sets, jobs, auth
-  syncs, and admin actions
+  operational history across annotations, change sets, jobs, auth syncs, and
+  admin actions; normally append-only, with a bootstrap replacement exception
 
 job
   records for import/export jobs and other asynchronous work
@@ -139,9 +155,43 @@ authorization_assignment
   roles and scopes such as edit/group, admin/global, or edit/self
 ```
 
-Soft deletion should be used for deletes. Deleting an annotation marks it deleted, creates a new version and audit event, and removes it from normal active queries by default. Rows should not be physically removed as part of normal application behavior.
+Bootstrap imports should load into shared staging tables keyed by import job ID rather than directly into `annotation`. Staged rows are not visible to active queries or duplicate-conflict lookups. They enter the main annotation and projection tables only through the transactional publication process described below.
 
-SAB should disallow inserts, direct updates, and accepted change sets that would create a duplicate active annotation once an agreed duplicate definition is in place. Existing source data may already contain duplicates, and making the full database duplicate-free is a longer-term cleanup goal. The initial write path should therefore focus on not making the problem worse. To support this, SAB should centralize duplicate detection in an application-level policy component that computes a canonical duplicate key or duplicate signature from the validated annotation payload. That key can be stored on the current annotation projection and indexed for lookup before writes. After existing duplicate data has been cleaned up, SAB can add stricter database-level protection, such as a partial unique index over active curated annotations.
+Soft deletion should be used for normal deletes. Deleting an annotation marks it deleted, creates a new version and audit event, and removes it from normal active queries by default. Rows should not be physically removed as part of normal application behavior; pre-cutover bootstrap replacement is the explicit exception.
+
+### Duplicate Annotation Policy
+
+The initial Protein2GO-aligned duplicate policy is a pairwise comparison over exactly these nine Standard Annotation schema slots:
+
+* `db_object_id`
+* `negation`
+* `relation`
+* `ontology_class_id`
+* `evidence_type`
+* `references`
+* `with_or_from`
+* `interacting_taxon_id`
+* `annotation_extensions`
+
+No other fields participate in duplicate comparison. In particular, dates, `assigned_by`, `annotation_properties`, and SAB ownership or audit metadata do not affect duplicate identity.
+
+SAB should canonicalize the nine participating slots after structural schema validation as follows:
+
+* A missing `negation` value is equivalent to `false`.
+* A missing optional list is equivalent to an empty list.
+* Identifiers compare exactly after structural/schema validation. SAB should not normalize CURIE aliases or treat ontology-equivalent identifiers as equal for this policy.
+* Repeated identical elements in a list collapse to one element, and list order is ignored.
+* `with_or_from` and `interacting_taxon_id` are sets and require complete set equality.
+* `annotation_extensions` is a set of `(extension_relation, extension_term)` pairs and requires complete set equality.
+* `references` is a set, but its comparison differs from the other lists: the reference portion matches when the two canonical reference sets have a non-empty intersection.
+
+Two distinct annotations are duplicates exactly when both are active and non-deleted, all eight canonical non-reference components match, and their canonical reference sets overlap. This predicate is symmetric, but it is not necessarily transitive when schema-valid multi-reference annotations occur. For example, annotations with reference sets `{PMID:1}`, `{PMID:1, PMID:2}`, and `{PMID:2}` can form two overlapping duplicate pairs without the first and third annotations being duplicates. SAB must not take a transitive closure of these pairs, infer a global alias-equivalence relation between references, or introduce a conceptual-reference identity table. The schema should continue to support multi-reference annotations without imposing a cardinality of one. Currently, surveyed GPAD data did not contain multi-reference values, so this non-transitivity is an accepted initial risk that should be reviewed if multi-reference source data becomes material.
+
+SAB should centralize this comparison in an application-level policy component. From each validated annotation payload, it should compute a deterministic base signature from the eight canonical non-reference components and store that signature on the indexed current annotation projection. It should also maintain indexed per-reference projection rows, one for each distinct canonical reference. A conflict lookup matches the submitted base signature and any submitted canonical reference against active, non-deleted annotations. The duplicate-conflict peer set for a candidate state is the set of annotation IDs returned by that lookup, excluding the candidate annotation's own ID.
+
+When creating an annotation, SAB should reject the write if the candidate has any duplicate-conflict peer. For an update, SAB should compute the target's peer set before and after the proposed change, excluding the target's own annotation ID from both sets, and reject only when the after set contains at least one peer that was not in the before set. An update that changes only excluded fields, or otherwise preserves without expanding an imported legacy duplicate relationship, is allowed. A soft delete is allowed and removes the annotation's active duplicate conflicts. The same create, update, and delete semantics apply to accepted change sets.
+
+This policy applies globally across active, non-deleted records, independent of source or ownership group. Existing source data may already contain duplicate pairs, and making the full database duplicate-free remains a longer-term cleanup goal. The signature and reference projections must be maintained with the current annotation state under the transaction and locking protocol described below. After legacy duplicate cleanup, SAB could add stricter database-level protection over active per-reference projections.
 
 ## API and Application Layer
 
@@ -162,7 +212,7 @@ PATCH  /annotations/{annotation_id}
 DELETE /annotations/{annotation_id}
   Delete an existing annotation
 
-GET    /annotations?subject=...&ontology_class_id=...&evidence_code=...
+GET    /annotations?db_object_id=...&ontology_class_id=...&evidence_type=...
   List existing annotations with optional filters
 
 GET    /annotations/{annotation_id}/versions
@@ -205,8 +255,9 @@ SAB should support two modification modes:
 ```
 Direct CRUD (described above):
   Client writes directly to an annotation.
-  SAB validates, checks expected version, writes the new current state,
-  creates an immutable version, and records audit events.
+  SAB validates, applies the global create/update duplicate semantics and
+  duplicate-state locking protocol, checks expected version, writes the new
+  current state, creates an immutable version, and records audit events.
 
 Change sets (described in the following section):
   Client proposes an annotation creation, update, or deletion.
@@ -214,7 +265,7 @@ Change sets (described in the following section):
   and allows another client/user to accept or reject it.
 ```
 
-SAB should not prefer one mode globally. Clients can choose the path that fits their workflow. Both modes must share the same underlying validation, versioning, soft-delete, and audit behavior.
+SAB should not prefer one mode globally. Clients can choose the path that fits their workflow. Both modes must share the same underlying validation, pairwise duplicate and locking policy, versioning, soft-delete, and audit behavior.
 
 ### Annotation Comments
 
@@ -237,7 +288,7 @@ Example client-submitted update payload:
   "base_version": 3,
   "patch_format": "application/json-patch+json",
   "patch": [
-    { "op": "replace", "path": "/evidence_code", "value": "ECO:0000269" }
+    { "op": "replace", "path": "/evidence_type", "value": "ECO:0000269" }
   ],
   "reason": "Updated evidence mapping after review."
 }
@@ -257,7 +308,7 @@ Example client-submitted create payload:
 }
 ```
 
-A create change set should carry the full candidate Standard Annotation payload. It does not require an existing `annotation_id` or `base_version`. Preview validates the candidate annotation, checks duplicate policy, determines ownership from token context or submitted SAB metadata as usual, and shows the annotation that would be created. Accepting the change set creates the annotation, assigns the SAB annotation ID, creates version `1`, and records audit events.
+A create change set should carry the full candidate Standard Annotation payload. It does not require an existing `annotation_id` or `base_version`. Preview structurally validates the candidate annotation, determines ownership from token context or submitted SAB metadata as usual, applies the pairwise duplicate policy against current active, non-deleted records, and shows the annotation that would be created or the duplicate conflict that would prevent acceptance. Because database state may change after preview, acceptance must repeat the duplicate check after acquiring the required global shared annotation-write lock and signature lock. Accepting a non-duplicate change set creates the annotation, assigns the backend-generated SAB annotation ID, creates version `1`, and records audit events.
 
 Example client-submitted delete payload:
 
@@ -270,17 +321,23 @@ Example client-submitted delete payload:
 }
 ```
 
-A delete change set should target a specific `annotation_id` and `base_version`, but should not require a patch. Preview shows the current annotation and indicates that it would be soft-deleted. Accepting the change set applies the normal soft-delete behavior only if the annotation is still at the requested base version: mark the annotation deleted, create a new annotation version, and record audit events.
+A delete change set should target a specific `annotation_id` and `base_version`, but should not require a patch. Preview shows the current annotation and indicates that it would be soft-deleted. Soft deletion is always allowed by the duplicate policy and removes the annotation's active duplicate conflicts. Accepting the change set applies the normal soft-delete behavior only if a fresh re-read under the required global shared annotation-write lock and signature lock shows that the annotation is still at the requested base version: mark the annotation deleted, update its duplicate projections, create a new annotation version, and record audit events.
 
 These client-submitted payloads are not complete persisted `change_set` records. When SAB stores a change set, it should add server-derived metadata such as who proposed the change and when it was proposed. The proposer should be derived from the request token, and the proposal timestamp should be assigned using the current server time.
 
-SAB may reject JSON Patch operations whose meaning is unclear for the Standard Annotation data model. In particular, some multivalued fields, such as references or with/from values, are conceptually unordered even if they are represented as JSON arrays. A positional patch such as "remove the first reference" is harder to review and can misrepresent the client's intent, which is usually "remove this specific reference." As an intentionally conservative starting point, SAB should reject positional array operations for fields it treats as unordered. Clients that need to modify one of these fields can use whole-field replacement, providing the complete desired value for the field in a deterministic order.
+SAB may reject JSON Patch operations whose meaning is unclear for the Standard Annotation data model. In particular, some multivalued fields, such as references or with/from values, are conceptually unordered even if they are represented as JSON arrays. A positional patch such as "remove the first reference" is harder to review and can misrepresent the client's intent, which is usually "remove this specific reference." As an intentionally conservative starting point, SAB should reject positional array operations for fields it treats as unordered. Clients that need to modify one of these fields can use whole-field replacement, providing the complete desired value for the field in a deterministic order. Previewing an update change set should validate the patched annotation and compare the target's before and after duplicate-conflict peer sets, excluding the target itself from both. Acceptance must repeat that comparison against freshly read active, non-deleted records after acquiring the required global shared annotation-write lock and signature locks, and reject only if the proposed state adds a peer that was absent before.
 
 ### Concurrency
 
 If an update or delete change set targets a version of an annotation that is no longer the current version, the change set becomes stale; SAB should not apply it to the newer, current version.
 
 Direct CRUD writes should also use optimistic concurrency. A client should identify the version it intends to modify, and SAB should reject stale writes rather than silently overwriting a newer annotation version.
+
+Duplicate checking is vulnerable to a concurrency race: two independent transactions can both find no conflicting annotation and then both write one. SAB must perform writes that involve the same duplicate base signature serially so only one transaction can check and write that state at a time, while allowing unrelated annotation writes to proceed concurrently.
+
+Every annotation create, update, and soft delete, whether direct or performed by accepting a change set, should therefore run in a PostgreSQL `READ COMMITTED` transaction using transaction-scoped advisory locks. The transaction first takes the global annotation-write lock in shared mode, then takes exclusive locks for the affected old and new duplicate base signatures in a consistent order. Writes to dependent records such as comments and proposed change sets need only the shared global lock. Normal writes can share that global lock, while bootstrap publication takes it exclusively so those writes wait during publication.
+
+After acquiring the locks, the transaction should freshly read the annotation version and duplicate conflicts before making the change. `READ COMMITTED` ensures that a transaction which waited for a lock sees the preceding transaction's commit when it performs those reads. The checks, annotation and version writes, duplicate-projection changes, and audit recording must then commit or roll back together; the advisory locks are released when the transaction ends.
 
 ## Authentication, Authorization, and Audit
 
@@ -428,7 +485,7 @@ For example, the `curatorB` example above has two SAB authorization entries. The
 
 ### Audit
 
-Audit should be first-class and append-only. The `audit_event` table should record important actions even when they do not create annotation versions: token creation/revocation, direct writes, soft deletes, change-set proposal/acceptance/rejection/staleness, imports, exports, authorization syncs, and administrative changes. Failed authentication and authorization attempts should be handled through application or security logs rather than stored as first-class database audit events in the initial design.
+Audit should be first-class and normally append-only. The `audit_event` table should record important actions even when they do not create annotation versions: token creation/revocation, direct writes, soft deletes, change-set proposal/acceptance/rejection/staleness, imports, exports, authorization syncs, and administrative changes. The only initial exception is pre-cutover bootstrap replacement, which permanently removes annotation-specific audit events associated with the superseded import while retaining the import job's aggregate audit events and report. Failed authentication and authorization attempts should be handled through application or security logs rather than stored as first-class database audit events in the initial design.
 
 Annotation versions, change sets, and audit events should be linked but distinct:
 
@@ -476,15 +533,27 @@ Job handlers should be idempotent where practical and designed for retry without
 
 Eventually, SAB's PostgreSQL database is the source of truth for Standard Annotations, and GPAD/GPI files can be exported from SAB when needed. In the transition period, GPAD/GPI files can be imported into the database as a means of bootstrapping it.
 
-Until SAB becomes the source of truth for curated annotations, bulk GPAD/GPI import should use a drop-and-reload strategy: replace the current imported curated annotation set with records derived from the source files rather than attempting to merge imported records with existing SAB state. This is acceptable during the bootstrap period because SAB-side annotation changes are not treated as long-term authoritative until the chosen cut-over date. 
+Before cutover, bulk GPAD/GPI import should replace the current imported annotation set in full rather than attempting to merge new source records with existing imported records. This is acceptable during the bootstrap period because SAB-side annotation changes are not treated as long-term authoritative until the chosen cutover date.
 
-Import should parse source files, validate records against the Standard Annotation model, assign annotation IDs, store canonical annotation records, and record source provenance. During this drop-and-reload phase, import should not check imported annotations for duplicates because duplicates may already exist in current source files and identifying them is not the goal of the import. Duplicate detection for imported source data can instead be added through QC reporting. This import-specific behavior should not disable application-layer duplicate checks for direct CRUD operations or accepted create/update change sets. Structurally invalid records should not be stored, but they should not fail the whole import job; they should be rejected and reported at the individual annotation level.
+A bootstrap import must receive the GPAD data and matching GPI metadata as part of its input. An annotation whose annotated entity is absent from the imported GPI metadata should be rejected and reported at record level without failing the whole import. Alternative annotated-entity metadata sources and later reconciliation behavior are deferred.
+
+Only one bootstrap import job may stage or publish at a time. Before staging, the worker should acquire a dedicated PostgreSQL session-level advisory lock for the bootstrap-import process and hold it until the job succeeds or fails; loss of the database session releases the lock. This prevents overlapping jobs from publishing source files out of order without blocking normal annotation reads or writes.
+
+The bootstrap import job should parse the source files, structurally validate each record against the Standard Annotation model, assign backend-generated SAB UUIDs outside the Standard Annotation payload, and load the valid canonical records and their duplicate-signature/reference projections into staging tables keyed by the import job ID. It should also prepare each imported annotation's initial immutable version and source provenance. Structurally invalid records should be rejected and reported individually without failing the whole import. Staging is isolated from live annotation state and acquires neither the global annotation-write lock nor per-signature duplicate locks.
+
+After staging succeeds, a publication transaction should acquire the global annotation-write lock in exclusive mode and permanently delete every annotation from the preceding bootstrap import together with its duplicate projections, immutable annotation versions, comments, targeted change sets, and annotation-specific audit events. The transaction should then insert the staged annotations, their initial immutable versions and duplicate projections, record their import-job provenance, and commit. The aggregate job record, job-level audit events, and import report remain as the durable record that the superseded import occurred. This destructive replacement is an explicit bootstrap-only exception to normal annotation soft deletion and history retention because SAB is not yet the authoritative source.
+
+Publication does not acquire per-signature locks. PostgreSQL readers continue to see the previously committed annotation set while the transaction runs and see the complete replacement after it commits; they never see the intermediate delete-and-insert state. Every ordinary annotation mutation and write to an annotation-specific dependent record acquires the same global annotation-write lock in shared mode, so those writes wait during publication while reads remain available. If publication fails, the transaction rolls back and leaves the previous imported annotation set and all of its associated records intact. The consistent lock order is the global annotation-write lock first and signature locks second when signature locks are required; publication needs only the exclusive global annotation-write lock.
+
+Bootstrap staging and publication perform no duplicate checks or duplicate rejection because duplicate pairs may already exist in current source files; the import job should not scan for duplicates even non-blockingly. This import exception does not apply to direct creates, direct updates, or accepted create/update change sets, which use the global pairwise duplicate policy.
 
 Export should derive GPAD/GPI files from current active SAB records. When an export job starts, SAB should determine the latest version number for each annotation included in the export and then generate the output from those immutable rows in `annotation_version`. This gives the job a stable view of the data even if annotations are edited while the export is running. Export jobs should record enough metadata to make outputs explainable: initiating actor, timestamp, export parameters, schema/model version, code version if available, included annotation versions or a manifest that identifies them, counts, and warnings/errors.
 
 ### QC Reporting
 
-Annotation QC reporting and semantic validation, including GORULE-style checks, should use the asynchronous job model. SAB may run selected blocking validation synchronously during writes, but full QC/report generation should be handled as manually triggered or periodic jobs so that large scans do not block normal API requests. Report jobs should record the rule set version, input selection, snapshot boundary or included annotation versions, counts, findings, warnings/errors, and links to report artifacts.
+Annotation QC reporting and GORULE-style semantic validation should use the asynchronous job model. Initially, these semantic checks are reporting-only and do not block writes. Selection and versioning of the initial ruleset, and the choice of any future rules that should block synchronously, remain deferred pending domain review. Semantic report infrastructure may proceed, but synchronous GORULE enforcement must wait for that decision. Full QC/report generation should be handled as manually triggered or periodic jobs so that large scans do not block normal API requests.
+
+A separate QC process may apply the same pairwise duplicate predicate to bootstrap-imported data; the import job itself performs no duplicate checks or duplicate rejection. QC should report the annotation pairs that satisfy the predicate. Because reference overlap is not necessarily transitive for multi-reference annotations, QC must not claim that connected components of duplicate pairs are equivalence classes. Report jobs should record the applicable rule set or duplicate-policy version, input selection, source import job or included annotation versions, counts, findings, warnings/errors, and links to report artifacts.
 
 ### Ontology Loading
 
@@ -543,17 +612,23 @@ Operational requirements should include:
 
 The target should be boring and supportable: a small Python service stack that GO developers can run locally and operate in AWS with limited specialized DevOps burden.
 
-## Open Questions for Discussion
+## Decision Status and Deferred Inputs
 
-* How should SAB define duplicate annotations? As a baseline, SAB can align with Protein2GO's duplicate-rejection behavior (requires input from Protein2GO developers).  
-* Will SAB always import GPI files as the source of annotated entity metadata? If not, what are alternate sources? How should SAB handle an incoming annotation which references an annotated entity not represented in SAB’s known entities?  
-* Which GORULEs should be enforced synchronously during writes? Which should be deferred to asynchronous QC/reporting jobs? Which are outside the scope of SAB?
+| Decision area | Status | Owner or input needed | Implementation impact |
+| --- | --- | --- | --- |
+| SAB annotation identifiers | Settled for the initial implementation | No further input is needed. | The backend generates UUIDs as SAB metadata outside the Standard Annotation payload; UUID helpers and persistence may proceed. |
+| Pre-cutover bulk GPAD/GPI import | Settled for the bootstrap period | Project leadership must eventually identify the cutover date, but no further input is needed for pre-cutover behavior. | A dedicated advisory lock permits only one bootstrap import job at a time. The job loads and validates staging tables keyed by job ID. One publication transaction then takes the global annotation-write lock exclusively, permanently deletes the preceding import and its annotation-specific dependent records, inserts the staged annotations, versions, and projections, and commits. Reads remain available; annotation writes wait during publication. |
+| Duplicate handling during bootstrap import | Settled for the initial implementation | No further input is needed. | Staging and publication perform no duplicate checks or rejection. Staging takes no duplicate locks; publication takes the global annotation-write lock exclusively but takes no signature locks. A separate QC process may apply the settled pairwise predicate and should report duplicate pairs rather than treating connected components as equivalence classes. |
+| Initial Protein2GO-aligned pairwise duplicate policy | Settled for the initial implementation | No further input is needed. The accepted non-transitivity risk should be reviewed if multi-reference source data becomes material. | Implementation may proceed with indexed base-signature and per-reference projections. Creates reject any peer; updates reject only newly introduced peers and may preserve legacy pairs; soft deletes remove conflicts. Every ordinary annotation mutation uses `READ COMMITTED`, takes the global annotation-write lock in shared mode before ordered signature locks, then freshly re-reads state and peers. |
+| Annotated-entity metadata for bootstrap imports | Settled for bootstrap; alternatives are deferred | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | Bootstrap GPAD imports require matching GPI metadata as part of the input. An annotation whose entity is absent from that GPI metadata is rejected and reported at record level. No alternative source or reconciliation workflow is implied. |
+| Structural validation | Settled for the initial implementation | No further policy input is needed. | Structural schema validation blocks all writes and individual import records. Invalid imported records are isolated and reported instead of failing the whole import. |
+| GORULE-style semantic validation | Settled as initially asynchronous and non-blocking; exact ruleset and future blocking rules are deferred | GO domain reviewers must select and version the initial ruleset and decide whether any future rules should block synchronously. | Semantic reporting infrastructure may proceed. Initially GORULE-style checks do not block writes; synchronous enforcement must wait for the domain decision. |
 
 ## Possible Future Expansion
 
 *These are explicitly not goals for the initial implementation, but they are items that have been discussed as possibilities for the future. They are listed here to ensure that decisions made about the initial design do not preclude them.*
 
-Eventually, the full set of curated annotations in SAB should be duplicate-free. That requires first defining duplicate identity (see Open Questions for Discussion) and then identifying, reviewing, and resolving duplicates already present in imported source data. Until that cleanup is complete, SAB should still reject new writes that would create additional duplicates according to the agreed policy. The Standard Annotation LinkML schema and the duplicate-key policy can also support reports and cleanup tools that identify existing duplicate clusters.
+Eventually, the full set of curated annotations in SAB should have no pairs that satisfy the settled duplicate predicate. Reaching that state requires identifying, reviewing, and resolving duplicate pairs already present in imported source data. During cleanup, creates with any duplicate-conflict peer are rejected, while direct updates and accepted update change sets are rejected only when they introduce a new peer; updates that preserve existing legacy pairs remain allowed, and soft deletes reduce those pairs. Reports and cleanup tools can use the base signature and per-reference projections, but any connected grouping they present for navigation must not be described as an equivalence class because the pairwise predicate is not necessarily transitive.
 
 The initial design is intentionally very conservative about how it handles change sets which target a version of an annotation that is not the current version. It will treat such change sets as stale and not allow them to be applied. A possible future enhancement is to allow some stale change sets to be "fast-forwarded" when the changes made since the original annotation version do not conflict with the proposed patch. Conceptually this would involve determining whether the result of applying the patch current annotation version is equivalent to the result of applying the patch to the original target annotation then applying a patch representing the difference between the current and target versions.
 
