@@ -1,0 +1,45 @@
+services:
+  web:
+    build: .
+    command: uvicorn standard_annotation_backend.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file:
+      - .env
+    environment:
+      SAB_DATABASE_URL: postgresql+psycopg://sab:sab@postgres:5432/sab
+      SAB_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73 # 17.11
+    environment:
+      POSTGRES_DB: sab
+      POSTGRES_PASSWORD: sab
+      POSTGRES_USER: sab
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf # 7.4.11
+
+  worker:
+    build: .
+    command: celery -A standard_annotation_backend.workers.celery_app:celery_app worker --loglevel=INFO
+    env_file:
+      - .env
+    environment:
+      SAB_DATABASE_URL: postgresql+psycopg://sab:sab@postgres:5432/sab
+      SAB_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  postgres-data:

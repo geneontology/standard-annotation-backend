@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "standard-annotation-backend"
+version = "0.1.0"
+description = "Backend service for Standard Annotations"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic",
+    "celery",
+    "fastapi",
+    "linkml-runtime",
+    "psycopg[binary]",
+    "pydantic",
+    "pydantic-settings",
+    "redis",
+    "sqlalchemy",
+    "uvicorn[standard]",
+]
+
+[dependency-groups]
+dev = [
+    "anyio<4.15",
+    "httpx2",
+    "pytest",
+    "ruff",
+    "ty",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/standard_annotation_backend"]
