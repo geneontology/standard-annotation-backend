@@ -1,6 +1,12 @@
 """Configuration loaded from SAB-prefixed environment variables."""
 
+from functools import lru_cache
+from typing import Annotated
+
+from pydantic import StringConstraints
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class Settings(BaseSettings):
@@ -13,10 +19,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = "postgresql+psycopg://sab:sab@localhost:5432/sab"
-    redis_url: str = "redis://localhost:6379/0"
-    application_secret: str = "local-development-secret"
-    environment: str = "development"
+    database_url: NonEmptyString
+    redis_url: NonEmptyString
+    application_secret: NonEmptyString
+    environment: NonEmptyString
 
 
-settings = Settings()
+@lru_cache
+def get_settings() -> Settings:
+    """Load and cache the process runtime settings."""
+    return Settings()
