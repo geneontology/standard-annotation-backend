@@ -9,5 +9,4 @@ settings = get_settings()
 celery_app = Celery(
     "standard_annotation_backend",
     broker=settings.redis_url,
-    backend=settings.redis_url,
 )
