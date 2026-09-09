@@ -17,7 +17,9 @@ dependencies = [
     "pydantic",
     "pydantic-settings",
     "redis",
+    "rich>=15.0.0",
     "sqlalchemy",
+    "structlog>=26.1.0",
     "uvicorn[standard]",
 ]
 

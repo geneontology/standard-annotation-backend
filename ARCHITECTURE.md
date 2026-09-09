@@ -600,6 +600,12 @@ The deployment flow should be simple and mostly automated. When a GitHub PR is m
 
 Database migrations should use Alembic and run as an explicit release step, separate from ordinary application startup. For example, a deployment can run a one-off ECS/Fargate task using the new application image and the command `alembic upgrade head`; only after that task succeeds should the web and worker services be updated to the new image. If the migration fails, the deployment should stop before new application containers are rolled out. Application startup should not silently run migrations in production.
 
+### Operational Logging
+
+`SAB_LOG_FORMAT=console|json` selects log presentation independently of the named deployment environment. Local development uses console output, while production-like deployments use JSON. Structlog's `ProcessorFormatter` provides the single schema and rendering pipeline for both application and standard-library records. Uvicorn access logs use the `http_request` event with nested `http` and `client` fields and do not retain the formatted access-log sentence. Celery's setup signal prevents its default handlers from replacing SAB's logging pipeline.
+
+All records go to stdout for collection by the container runtime. Correlation IDs, request duration, distributed tracing, proxy interpretation, and custom access middleware remain deferred.
+
 Operational requirements should include:
 
 * structured JSON logs  

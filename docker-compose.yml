@@ -1,7 +1,7 @@
 services:
   web:
     build: .
-    command: uvicorn standard_annotation_backend.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn standard_annotation_backend.main:app --host 0.0.0.0 --port 8000 --reload --log-config src/standard_annotation_backend/uvicorn_logging.json
     env_file:
       - .env
     environment:

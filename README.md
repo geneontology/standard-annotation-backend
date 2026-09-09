@@ -22,6 +22,11 @@ while overriding only database and Redis URLs with its internal `postgres` and
 `redis` service DNS addresses. The database and Redis URLs in `.env.example`
 remain for processes run directly on the host.
 
+Set `SAB_LOG_FORMAT=console` for readable local-development logs or
+`SAB_LOG_FORMAT=json` for machine-readable logs in deployed environments. Log
+format selection is independent of `SAB_ENVIRONMENT`; application, Uvicorn,
+and Celery records all use the selected renderer.
+
 Run quality checks and tests:
 
 ```bash
