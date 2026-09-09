@@ -198,6 +198,10 @@ def _shared_processors() -> list[Processor]:
         # Merge context-local values bound for the current request or task.
         # https://www.structlog.org/en/26.1.0/contextvars.html
         structlog.contextvars.merge_contextvars,
+        # Copy nonstandard LogRecord attributes supplied through `extra`.
+        # Running this before canonical fields prevents extras from overriding them.
+        # https://www.structlog.org/en/26.1.0/api.html#structlog.stdlib.ExtraAdder
+        structlog.stdlib.ExtraAdder(),
         # Add the originating logger name under the `logger` key.
         # https://www.structlog.org/en/26.1.0/api.html#structlog.stdlib.add_logger_name
         structlog.stdlib.add_logger_name,
@@ -211,9 +215,6 @@ def _shared_processors() -> list[Processor]:
         # Apply standard percent formatting to remaining positional arguments.
         # https://www.structlog.org/en/26.1.0/api.html#structlog.stdlib.PositionalArgumentsFormatter
         structlog.stdlib.PositionalArgumentsFormatter(),
-        # Copy nonstandard LogRecord attributes supplied through `extra`.
-        # https://www.structlog.org/en/26.1.0/api.html#structlog.stdlib.ExtraAdder
-        structlog.stdlib.ExtraAdder(),
         # Discard Uvicorn's redundant `color_message` extra.
         _drop_color_message,
         # Add an ISO-8601 UTC timestamp to every event.
