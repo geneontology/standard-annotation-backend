@@ -27,6 +27,11 @@ Set `SAB_LOG_FORMAT=console` for readable local-development logs or
 format selection is independent of `SAB_ENVIRONMENT`; application, Uvicorn,
 and Celery records all use the selected renderer.
 
+The Standard Annotation Python models and JSON Schema are loaded from the pinned
+`go-standard-annotation-schema` package. Application startup verifies that
+the packaged JSON Schema has the expected identity and Annotation definition.
+Upgrade the dependency with `uv add go-standard-annotation-schema==<version>`.
+
 Run quality checks and tests:
 
 ```bash

@@ -12,6 +12,7 @@ dependencies = [
     "alembic",
     "celery",
     "fastapi",
+    "go-standard-annotation-schema==0.0.4",
     "linkml-runtime",
     "psycopg[binary]",
     "pydantic",
