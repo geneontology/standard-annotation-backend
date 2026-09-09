@@ -347,6 +347,18 @@ wheels = [
 ]
 
 [[package]]
+name = "go-standard-annotation-schema"
+version = "0.0.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "linkml-runtime" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/05/8f/1c4f6d5ee0397010e0566e93e60dfcb13be55a9b49485ff35d83c3c77cca/go_standard_annotation_schema-0.0.4.tar.gz", hash = "sha256:fdabbbfcac9acf32beb434545d6c82b97baaa3a8f2dd7c3f6de43c280c04ff3d", size = 173704, upload-time = "2026-09-09T19:00:32.876Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/0e/61006a52c040fae6c12c8109a2b39ddea4769b85044fd7becd9e23947882/go_standard_annotation_schema-0.0.4-py3-none-any.whl", hash = "sha256:5a7cb9884a6eecceb05a574157f8ee3ed62e9ab695181a266294f0ae597a9780", size = 31467, upload-time = "2026-09-09T19:00:31.472Z" },
+]
+
+[[package]]
 name = "greenlet"
 version = "3.5.5"
 source = { registry = "https://pypi.org/simple" }
@@ -1188,6 +1200,7 @@ dependencies = [
     { name = "alembic" },
     { name = "celery" },
     { name = "fastapi" },
+    { name = "go-standard-annotation-schema" },
     { name = "linkml-runtime" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -1213,6 +1226,7 @@ requires-dist = [
     { name = "alembic" },
     { name = "celery" },
     { name = "fastapi" },
+    { name = "go-standard-annotation-schema", specifier = "==0.0.4" },
     { name = "linkml-runtime" },
     { name = "psycopg", extras = ["binary"] },
     { name = "pydantic" },

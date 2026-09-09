@@ -58,7 +58,7 @@ SAB should use LinkML as the schema definition language for the core Standard An
 
 The LinkML schema should stay focused on the domain objects. It should not model SAB internals such as users, jobs, audit events, change-set state, database projections, or authorization. Those are application concerns.
 
-The Standard Annotation LinkML schema should be developed in the standalone [`geneontology/go-standard-annotation-schema`](https://github.com/geneontology/go-standard-annotation-schema) repository outside the SAB codebase. SAB should consume Python-based schema artifacts, including Pydantic models, from the versioned PyPI package published by that repository. SAB should consume non-Python artifacts, such as JSON Schema definitions, from GitHub Release assets published by that same repository. SAB should pin the package and release artifact versions it uses rather than treating the SAB repository as the authoritative home for the schema.
+The Standard Annotation LinkML schema should be developed in the standalone [`geneontology/go-standard-annotation-schema`](https://github.com/geneontology/go-standard-annotation-schema) repository outside the SAB codebase. SAB should consume generated artifacts, including Pydantic models and JSON Schema definitions, from a pinned version of the PyPI package published by that repository. Keeping the artifacts together in one versioned package gives SAB a single schema dependency without making the SAB repository the authoritative home for the schema.
 
 Generated LinkML artifacts should be used by SAB where appropriate:
 

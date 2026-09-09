@@ -6,12 +6,22 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from standard_annotation_backend.config import get_settings
+from standard_annotation_backend.domain.schema_artifacts import load_json_schema
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load process settings before accepting API requests."""
-    app.state.settings = get_settings()
+    """Initialize application state before accepting API requests.
+
+    Args:
+        app: FastAPI application whose state is initialized.
+
+    Yields:
+        Control while the application is running.
+    """
+    settings = get_settings()
+    app.state.settings = settings
+    app.state.standard_annotation_json_schema = load_json_schema()
     yield
 
 
