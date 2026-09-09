@@ -16,6 +16,7 @@ def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("SAB_REDIS_URL", "redis://redis:6379/0")
     monkeypatch.setenv("SAB_APPLICATION_SECRET", "test-application-secret")
     monkeypatch.setenv("SAB_ENVIRONMENT", "test")
+    monkeypatch.setenv("SAB_LOG_FORMAT", "console")
     get_settings.cache_clear()
     try:
         yield

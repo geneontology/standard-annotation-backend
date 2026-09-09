@@ -6,9 +6,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from standard_annotation_backend.config import get_settings
-from standard_annotation_backend.logging import configure_logging
-
-configure_logging()
 
 
 @asynccontextmanager

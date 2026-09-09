@@ -21,4 +21,4 @@ USER sab
 
 EXPOSE 8000
 
-CMD ["uvicorn", "standard_annotation_backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "standard_annotation_backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-config", "src/standard_annotation_backend/uvicorn_logging.json"]
