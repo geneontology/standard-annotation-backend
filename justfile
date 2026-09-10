@@ -15,6 +15,7 @@ down:
     docker compose down
 
 # Follow the web application logs.
+[no-exit-message]
 logs:
     docker compose logs -f web
 
