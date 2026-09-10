@@ -23,11 +23,12 @@ logs:
 migrate:
     docker compose run --build --rm web alembic upgrade head
 
-# Run the complete test suite in a disposable container.
-test:
-    docker compose run --build --rm tools uv run --locked pytest
+# Run tests in a temporary container.
+[positional-arguments]
+test *ARGS:
+    docker compose run --build --rm tools uv run --locked pytest "$@"
 
-# Run formatting, lint, and type checks in a disposable container.
+# Run formatting, lint, and type checks in a temporary container.
 check:
     docker compose run --build --rm --no-deps tools sh -c "uv run --locked ruff format --check . && uv run --locked ruff check . && uv run --locked ty check src tests"
 

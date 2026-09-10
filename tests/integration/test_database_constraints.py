@@ -12,6 +12,7 @@ from standard_annotation_backend.persistence.models import (
     AnnotationMultivaluedFieldValueRecord,
     AnnotationRecord,
     AnnotationVersionRecord,
+    JobRecord,
 )
 
 
@@ -44,14 +45,28 @@ def _annotation_values(annotation_id: UUID) -> dict[str, object]:
         {"status": "active", "deleted_at": datetime.now(UTC)},
         {"status": "pending"},
         {"duplicate_base_signature": "0" * 63},
+        {"record_origin": "direct", "source_import_job_id": uuid4()},
+        {"record_origin": "import", "source_import_job_id": None},
     ],
 )
 def test_annotation_constraints_reject_invalid_current_rows(
     database_engine: Engine,
     changes: dict[str, object],
 ) -> None:
-    """The database rejects invalid versions, states, and signatures."""
+    """The database rejects invalid versions, states, signatures, and provenance”."""
     values = _annotation_values(uuid4()) | changes
+    if changes.get("source_import_job_id") is not None:
+        with database_engine.begin() as connection:
+            connection.execute(
+                insert(JobRecord),
+                {
+                    "job_id": values["source_import_job_id"],
+                    "job_type": "import",
+                    "status": "completed",
+                    "created_at": datetime.now(UTC),
+                    "requested_by": "test-user",
+                },
+            )
 
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
         connection.execute(insert(AnnotationRecord), values)

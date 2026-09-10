@@ -93,6 +93,11 @@ class AnnotationRecord(Base):
             "duplicate_base_signature ~ '^[0-9A-Fa-f]{64}$'",
             name="duplicate_base_signature_format",
         ),
+        CheckConstraint(
+            "(record_origin = 'import' AND source_import_job_id IS NOT NULL) OR "
+            "(record_origin != 'import' AND source_import_job_id IS NULL)",
+            name="record_origin_source_import_job_id_consistent",
+        ),
         Index("ix_annotation_owning_group_id", "owning_group_id"),
         Index("ix_annotation_record_origin", "record_origin"),
         Index("ix_annotation_source_import_job_id", "source_import_job_id"),

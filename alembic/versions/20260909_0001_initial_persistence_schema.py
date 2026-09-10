@@ -91,6 +91,11 @@ def upgrade() -> None:
             "duplicate_base_signature ~ '^[0-9A-Fa-f]{64}$'",
             name=op.f("ck_annotation_duplicate_base_signature_format"),
         ),
+        sa.CheckConstraint(
+            "(record_origin = 'import' AND source_import_job_id IS NOT NULL) OR "
+            "(record_origin != 'import' AND source_import_job_id IS NULL)",
+            name=op.f("ck_annotation_record_origin_source_import_job_id_consistent"),
+        ),
         sa.ForeignKeyConstraint(
             ["source_import_job_id"],
             ["job.job_id"],
