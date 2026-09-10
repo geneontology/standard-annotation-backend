@@ -185,13 +185,14 @@ def test_imported_duplicate_peers_coexist_and_find_each_other(
     [
         (AnnotationOrigin.DIRECT, True),
         (AnnotationOrigin.IMPORT, False),
+        ("unsupported", False),
     ],
 )
 def test_invalid_provenance_raises_before_flush(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
-    record_origin: AnnotationOrigin,
+    record_origin: str | AnnotationOrigin,
     has_import_job: bool,
 ) -> None:
     job_id = _create_import_job(session_factory) if has_import_job else None

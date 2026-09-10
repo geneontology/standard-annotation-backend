@@ -36,7 +36,7 @@ class AnnotationDeletedError(RuntimeError):
 
 
 class InvalidAnnotationProvenanceError(ValueError):
-    """Raised when annotation origin and import-job provenance disagree."""
+    """Raised when annotation provenance is unsupported or inconsistent."""
 
 
 class CommentNotFoundError(LookupError):
@@ -341,6 +341,13 @@ class AnnotationRepository:
         record_origin: str,
         source_import_job_id: UUID | None,
     ) -> None:
+        try:
+            AnnotationOrigin(record_origin)
+        except ValueError:
+            raise InvalidAnnotationProvenanceError(
+                f"{record_origin!r} is not a supported annotation record origin"
+            ) from None
+
         if (
             record_origin == AnnotationOrigin.DIRECT.value
             and source_import_job_id is not None
