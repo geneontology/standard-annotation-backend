@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir uv==0.12.9
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+COPY alembic.ini ./
+COPY alembic ./alembic
 RUN uv sync --locked --no-dev
 
 RUN groupadd --gid 10001 sab \

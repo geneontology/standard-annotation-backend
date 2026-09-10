@@ -34,6 +34,27 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    env:
+      SAB_APPLICATION_SECRET: ci-test-secret
+      SAB_DATABASE_URL: postgresql+psycopg://sab:sab@localhost:5432/sab_test
+      SAB_ENVIRONMENT: testing
+      SAB_LOG_FORMAT: console
+      SAB_REDIS_URL: redis://localhost:6379/0
+      SAB_TEST_DATABASE_URL: postgresql+psycopg://sab:sab@localhost:5432/sab_test
+    services:
+      postgres:
+        image: postgres@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73 # 17.11
+        env:
+          POSTGRES_DB: sab_test
+          POSTGRES_PASSWORD: sab
+          POSTGRES_USER: sab
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sab -d sab_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -43,5 +64,7 @@ jobs:
           enable-cache: true
       - name: Synchronize dependencies
         run: uv sync --locked
+      - name: Apply database migrations
+        run: uv run --locked alembic upgrade head
       - name: Test
         run: uv run --locked pytest
