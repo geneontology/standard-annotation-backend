@@ -88,8 +88,8 @@ def upgrade() -> None:
             name=op.f("ck_annotation_status_deleted_at_consistent"),
         ),
         sa.CheckConstraint(
-            "char_length(duplicate_base_signature) = 64",
-            name=op.f("ck_annotation_duplicate_base_signature_length"),
+            "duplicate_base_signature ~ '^[0-9A-Fa-f]{64}$'",
+            name=op.f("ck_annotation_duplicate_base_signature_format"),
         ),
         sa.ForeignKeyConstraint(
             ["source_import_job_id"],
@@ -180,9 +180,9 @@ def upgrade() -> None:
         sa.Column("canonical_reference", sa.Text(), nullable=False),
         sa.Column("duplicate_base_signature", sa.String(length=64), nullable=False),
         sa.CheckConstraint(
-            "char_length(duplicate_base_signature) = 64",
+            "duplicate_base_signature ~ '^[0-9A-Fa-f]{64}$'",
             name=op.f(
-                "ck_annotation_duplicate_reference_duplicate_base_signature_length"
+                "ck_annotation_duplicate_reference_duplicate_base_signature_format"
             ),
         ),
         sa.ForeignKeyConstraint(

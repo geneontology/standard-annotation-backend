@@ -90,8 +90,8 @@ class AnnotationRecord(Base):
             name="status_deleted_at_consistent",
         ),
         CheckConstraint(
-            "char_length(duplicate_base_signature) = 64",
-            name="duplicate_base_signature_length",
+            "duplicate_base_signature ~ '^[0-9A-Fa-f]{64}$'",
+            name="duplicate_base_signature_format",
         ),
         Index("ix_annotation_owning_group_id", "owning_group_id"),
         Index("ix_annotation_record_origin", "record_origin"),
@@ -188,8 +188,8 @@ class AnnotationDuplicateReferenceRecord(Base):
     __tablename__ = "annotation_duplicate_reference"
     __table_args__ = (
         CheckConstraint(
-            "char_length(duplicate_base_signature) = 64",
-            name="duplicate_base_signature_length",
+            "duplicate_base_signature ~ '^[0-9A-Fa-f]{64}$'",
+            name="duplicate_base_signature_format",
         ),
         Index(
             "ix_annotation_duplicate_reference_conflict_lookup",
