@@ -225,7 +225,7 @@ class AnnotationCommentRecord(Base):
             name="fk_annotation_comment_annotation_version",
             ondelete="CASCADE",
         ),
-        CheckConstraint("btrim(body) <> ''", name="body_nonblank"),
+        CheckConstraint("body ~ '[^[:space:]]'", name="body_nonblank"),
     )
 
     comment_id: Mapped[UUID] = mapped_column(

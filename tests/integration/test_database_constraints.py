@@ -130,6 +130,39 @@ def test_comment_constraint_rejects_unknown_annotation_version(
         )
 
 
+def test_comment_constraint_rejects_whitespace_only_body(
+    database_engine: Engine,
+) -> None:
+    """The database rejects a comment containing only whitespace."""
+    annotation_id = uuid4()
+    with database_engine.begin() as connection:
+        connection.execute(insert(AnnotationRecord), _annotation_values(annotation_id))
+        connection.execute(
+            insert(AnnotationVersionRecord),
+            {
+                "annotation_id": annotation_id,
+                "version": 1,
+                "annotation_data": {},
+                "is_deleted": False,
+                "actor_id": "test-user",
+                "change_source": "test",
+            },
+        )
+
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(
+            insert(AnnotationCommentRecord),
+            {
+                "comment_id": uuid4(),
+                "annotation_id": annotation_id,
+                "annotation_version": 1,
+                "body": "\t\n",
+                "created_by": "test-user",
+                "deleted_at": None,
+            },
+        )
+
+
 def test_multivalued_field_constraint_rejects_unknown_fields(
     database_engine: Engine,
 ) -> None:

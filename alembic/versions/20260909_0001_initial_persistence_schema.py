@@ -230,7 +230,7 @@ def upgrade() -> None:
         ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
-            "btrim(body) <> ''",
+            "body ~ '[^[:space:]]'",
             name=op.f("ck_annotation_comment_body_nonblank"),
         ),
         sa.ForeignKeyConstraint(
