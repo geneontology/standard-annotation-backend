@@ -1,5 +1,5 @@
 # python@3.13.15
-FROM python@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
+FROM python@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285 AS base
 
 WORKDIR /app
 
@@ -13,13 +13,20 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY alembic.ini ./
 COPY alembic ./alembic
-RUN uv sync --locked --no-dev
 
 RUN groupadd --gid 10001 sab \
     && useradd --uid 10001 --gid sab --create-home --shell /usr/sbin/nologin sab \
     && chown -R sab:sab /app
 
 USER sab
+
+FROM base AS development
+
+RUN uv sync --locked
+
+FROM base AS runtime
+
+RUN uv sync --locked --no-dev
 
 EXPOSE 8000
 
