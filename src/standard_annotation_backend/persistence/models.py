@@ -226,6 +226,12 @@ class AnnotationCommentRecord(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint("body ~ '[^[:space:]]'", name="body_nonblank"),
+        Index(
+            "ix_annotation_comment_annotation_id_created_at_comment_id",
+            "annotation_id",
+            "created_at",
+            "comment_id",
+        ),
     )
 
     comment_id: Mapped[UUID] = mapped_column(

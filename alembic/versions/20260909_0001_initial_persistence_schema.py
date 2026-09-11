@@ -241,6 +241,12 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("comment_id", name="pk_annotation_comment"),
     )
+    op.create_index(
+        "ix_annotation_comment_annotation_id_created_at_comment_id",
+        "annotation_comment",
+        ["annotation_id", "created_at", "comment_id"],
+        unique=False,
+    )
 
     op.create_table(
         "audit_event",
