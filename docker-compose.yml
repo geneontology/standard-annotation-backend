@@ -12,8 +12,10 @@ services:
     volumes:
       - ./src:/app/src
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
 
   postgres:
     image: postgres@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73 # 17.11
@@ -21,8 +23,15 @@ services:
       POSTGRES_DB: sab
       POSTGRES_PASSWORD: sab
       POSTGRES_USER: sab
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sab -d sab"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf # 7.4.11
@@ -38,8 +47,30 @@ services:
     volumes:
       - ./src:/app/src
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  tools:
+    profiles:
+      - tools
+    build:
+      context: .
+      target: development
+    env_file:
+      - .env
+    environment:
+      SAB_DATABASE_URL: postgresql+psycopg://sab:sab@postgres:5432/sab_test
+      SAB_ENVIRONMENT: testing
+      SAB_REDIS_URL: redis://redis:6379/0
+      SAB_TEST_DATABASE_URL: postgresql+psycopg://sab:sab@postgres:5432/sab_test
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres-data:

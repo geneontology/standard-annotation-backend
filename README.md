@@ -1,69 +1,94 @@
 # Standard Annotation Backend
 
-Python 3.13 service foundation for the Standard Annotation Backend (SAB).
+The Standard Annotation Backend (SAB) is a Python service for storing and
+managing Gene Ontology standard annotations.
 
-## Local development
+## Start a local development environment
 
-Install [uv](https://docs.astral.sh/uv/) and synchronize the locked environment:
-
-```bash
-uv sync --locked
-```
-
-Before running locally or starting Docker Compose, copy the required local
-settings file:
+The preferred setup uses Docker Compose through a small set of project commands.
+You need Git, a recent version of Docker with Compose support, and
+[`just`](https://just.systems/man/en/packages.html). Follow the linked `just`
+installation instructions for your operating system, then confirm the command
+is available:
 
 ```bash
-cp .env.example .env
+just --version
 ```
 
-Docker Compose loads shared settings from `.env` for both application services,
-while overriding only database and Redis URLs with its internal `postgres` and
-`redis` service DNS addresses. The database and Redis URLs in `.env.example`
-remain for processes run directly on the host.
-
-Set `SAB_LOG_FORMAT=console` for readable local-development logs or
-`SAB_LOG_FORMAT=json` for machine-readable logs in deployed environments. Log
-format selection is independent of `SAB_ENVIRONMENT`; application, Uvicorn,
-and Celery records all use the selected renderer.
-
-The Standard Annotation Python models and JSON Schema are loaded from the pinned
-`go-standard-annotation-schema` package. Application startup verifies that
-the packaged JSON Schema has the expected identity and Annotation definition.
-Upgrade the dependency with `uv add go-standard-annotation-schema==<version>`.
-
-Run quality checks and tests:
+Clone the repository, enter its directory, and prepare the project:
 
 ```bash
-uv run ruff format --check .
-uv run ruff check .
-uv run ty check src tests
-uv run pytest
+just setup
 ```
 
-## Containers
+This creates `.env` from `.env.example` if it does not already exist, builds the
+application and development-tools images, and applies the database migrations.
+It never replaces an existing `.env` file.
 
-Start the web service, PostgreSQL, Redis, and the Celery worker:
+Migrations are always run explicitly. Starting the application does not change
+the database schema. Apply new migrations later with `just migrate`.
+
+Start the web application, PostgreSQL, Redis, and the background worker:
 
 ```bash
-docker compose up --build -d
+just up
 ```
 
-The health endpoint does not depend on PostgreSQL or Redis being ready, so it
-can respond while those services finish starting:
+Check that the application is running:
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-Expected response:
+You should receive:
 
 ```json
-{"status": "ok"}
+{"status":"ok"}
 ```
 
-Stop the local stack without removing its PostgreSQL volume:
+The web container reloads when files under `src/` change, so most Python edits do
+not require an image rebuild. Restart the worker after changing worker code.
+Follow the web application logs with:
 
 ```bash
-docker compose down
+just logs
 ```
+
+Stop the environment when you are finished:
+
+```bash
+just down
+```
+
+This keeps the PostgreSQL data volume. Add `--volumes` only when you intentionally
+run the underlying Docker Compose command and want to remove your local database
+data.
+
+## Run the tests
+
+Run the complete test suite in a disposable development-tools container:
+
+```bash
+just test
+```
+
+The command builds the tools image and starts PostgreSQL when needed.
+
+The test fixture only uses the database named by `SAB_TEST_DATABASE_URL`. For
+safety, `SAB_ENVIRONMENT` must be `testing`, the database name must end in
+`_test`, and the URL may not override the database name with a `dbname` query
+parameter. Always use a disposable test database because the fixture resets it.
+
+## Run contributor checks
+
+Run the same formatting, lint, and type checks used in CI:
+
+```bash
+just check
+```
+
+Local settings live in `.env`. The checked-in `.env.example` contains safe
+development defaults. Set `SAB_LOG_FORMAT=console` for readable logs or
+`SAB_LOG_FORMAT=json` for structured logs.
+
+Run `just` with no recipe to see all available project commands.
