@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from standard_annotation_backend.persistence.models import (
     AnnotationCommentRecord,
     AnnotationMultivaluedFieldValueRecord,
+    AnnotationOrigin,
     AnnotationRecord,
     AnnotationVersionRecord,
     JobRecord,
@@ -45,8 +46,9 @@ def _annotation_values(annotation_id: UUID) -> dict[str, object]:
         {"status": "active", "deleted_at": datetime.now(UTC)},
         {"status": "pending"},
         {"duplicate_base_signature": "0" * 63},
-        {"record_origin": "direct", "source_import_job_id": uuid4()},
-        {"record_origin": "import", "source_import_job_id": None},
+        {"record_origin": AnnotationOrigin.DIRECT, "source_import_job_id": uuid4()},
+        {"record_origin": AnnotationOrigin.IMPORT, "source_import_job_id": None},
+        {"record_origin": "unsupported", "source_import_job_id": None},
     ],
 )
 def test_annotation_constraints_reject_invalid_current_rows(

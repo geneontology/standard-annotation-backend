@@ -93,7 +93,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "(record_origin = 'import' AND source_import_job_id IS NOT NULL) OR "
-            "(record_origin != 'import' AND source_import_job_id IS NULL)",
+            "(record_origin = 'direct' AND source_import_job_id IS NULL)",
             name=op.f("ck_annotation_record_origin_source_import_job_id_consistent"),
         ),
         sa.ForeignKeyConstraint(
