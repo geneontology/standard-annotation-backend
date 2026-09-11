@@ -55,7 +55,7 @@ def test_annotation_constraints_reject_invalid_current_rows(
     database_engine: Engine,
     changes: dict[str, object],
 ) -> None:
-    """The database rejects invalid versions, states, signatures, and provenance”."""
+    """The database rejects invalid versions, states, signatures, and provenance."""
     values = _annotation_values(uuid4()) | changes
     if changes.get("source_import_job_id") is not None:
         with database_engine.begin() as connection:
