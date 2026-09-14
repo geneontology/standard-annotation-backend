@@ -1,12 +1,13 @@
 """Read and write annotations and comments with SQLAlchemy sessions."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, exists, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import Select, delete, exists, func, select, true
+from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
 from standard_annotation_backend.domain.annotations import Annotation, new_annotation_id
 from standard_annotation_backend.persistence.annotation_data import (
@@ -71,6 +72,55 @@ class Page[T]:
 
     items: tuple[T, ...]
     total: int
+
+
+def _load_page[T](
+    session: Session,
+    statement: Select[tuple[T]],
+    *,
+    record_type: type[T],
+    order_by: Sequence[InstrumentedAttribute[Any]],
+    limit: int,
+    offset: int,
+) -> Page[T]:
+    """Load a page and its total using one database snapshot.
+
+    The statement must select one SQLAlchemy record type. The ordering fields
+    must belong to that record type and together provide a stable result order.
+
+    Args:
+        session: Database session used to execute the query.
+        statement: Query selecting the complete filtered result set.
+        record_type: SQLAlchemy record returned by the query.
+        order_by: Fields that determine the stable result order.
+        limit: Maximum number of records to return.
+        offset: Number of matching records to skip.
+
+    Returns:
+        The requested records and the total before pagination.
+    """
+    filtered_records = statement.cte()
+    filtered_record = aliased(record_type, filtered_records)
+    filtered_order = tuple(getattr(filtered_record, field.key) for field in order_by)
+    page = (
+        select(filtered_record)
+        .order_by(*filtered_order)
+        .limit(limit)
+        .offset(offset)
+        .cte()
+    )
+    page_record = aliased(record_type, page)
+    page_order = tuple(getattr(page_record, field.key) for field in order_by)
+    summary = select(func.count().label("total")).select_from(filtered_records).cte()
+    rows = session.execute(
+        select(page_record, summary.c.total)
+        .select_from(summary.outerjoin(page, true()))
+        .order_by(*page_order)
+    ).all()
+    total = rows[0].total
+    assert total is not None
+    items = tuple(row[0] for row in rows if row[0] is not None)
+    return Page(items=items, total=total)
 
 
 class AnnotationNotFoundError(LookupError):
@@ -233,13 +283,14 @@ class AnnotationRepository:
         statement = select(AnnotationVersionRecord).where(
             AnnotationVersionRecord.annotation_id == annotation_id
         )
-        count_statement = select(func.count()).select_from(statement.subquery())
-        total = self.session.scalar(count_statement)
-        assert total is not None
-
-        statement = statement.order_by(AnnotationVersionRecord.version)
-        items = tuple(self.session.scalars(statement.limit(limit).offset(offset)))
-        return Page(items=items, total=total)
+        return _load_page(
+            self.session,
+            statement,
+            record_type=AnnotationVersionRecord,
+            order_by=(AnnotationVersionRecord.version,),
+            limit=limit,
+            offset=offset,
+        )
 
     def get_version(
         self,
@@ -310,18 +361,14 @@ class AnnotationRepository:
                     )
                 )
 
-        count_statement = select(func.count()).select_from(
-            statement.order_by(None).subquery()
+        return _load_page(
+            self.session,
+            statement,
+            record_type=AnnotationRecord,
+            order_by=(AnnotationRecord.created_at, AnnotationRecord.annotation_id),
+            limit=limit,
+            offset=offset,
         )
-        total = self.session.scalar(count_statement)
-        assert total is not None
-
-        statement = statement.order_by(
-            AnnotationRecord.created_at,
-            AnnotationRecord.annotation_id,
-        )
-        items = tuple(self.session.scalars(statement.limit(limit).offset(offset)))
-        return Page(items=items, total=total)
 
     def find_duplicate_peer_ids(
         self,

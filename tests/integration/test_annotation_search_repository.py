@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import event
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.persistence import repositories
@@ -140,6 +141,71 @@ def test_scalar_search_returns_stable_page_and_exact_total(
             earlier_mgi_id,
             later_mgi_id,
         ]
+
+        empty_page = unit_of_work.annotations.list_active(
+            repositories.AnnotationSearchFilters(assigned_by="MGI"),
+            limit=2,
+            offset=3,
+        )
+        assert empty_page.total == 3
+        assert empty_page.items == ()
+
+
+def test_active_page_total_and_items_share_one_database_snapshot(
+    unit_of_work_factory: UnitOfWorkFactory,
+    validated_annotation: Annotation,
+) -> None:
+    first_id = UUID("00000000-0000-0000-0000-000000000014")
+    concurrent_id = UUID("00000000-0000-0000-0000-000000000015")
+    with unit_of_work_factory() as unit_of_work:
+        _create(
+            unit_of_work,
+            _changed(validated_annotation, assigned_by="MGI"),
+            annotation_id=first_id,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        unit_of_work.commit()
+
+    writer_calls = 0
+    with unit_of_work_factory() as reader:
+
+        def insert_after_reader_statement(*_args: object) -> None:
+            nonlocal writer_calls
+            writer_calls += 1
+            with unit_of_work_factory() as writer:
+                _create(
+                    writer,
+                    _changed(
+                        validated_annotation,
+                        db_object_id="MGI:concurrent",
+                        assigned_by="MGI",
+                    ),
+                    annotation_id=concurrent_id,
+                    created_at=datetime(2026, 1, 2, tzinfo=UTC),
+                )
+                writer.commit()
+
+        # The event listener is registered to trigger after the first SQL statement
+        # executed by the reader's session. This simulates a concurrent write operation
+        # that occurs while the reader is fetching data, allowing us to test that the
+        # reader's view of the database remains consistent and unaffected by the
+        # concurrent write.
+        event.listen(
+            reader.annotations.session.connection(),
+            "after_cursor_execute",
+            insert_after_reader_statement,
+            once=True,
+        )
+        page = reader.annotations.list_active(
+            repositories.AnnotationSearchFilters(assigned_by="MGI"),
+            limit=10,
+            offset=0,
+        )
+        page_ids = [record.annotation_id for record in page.items]
+
+    assert writer_calls == 1
+    assert page.total == 1
+    assert page_ids == [first_id]
 
 
 def test_scalar_search_excludes_soft_deleted_rows_from_items_and_total(
@@ -387,7 +453,62 @@ def test_version_queries_include_deleted_annotation_and_paginate_oldest_first(
             (3, True),
         ]
 
+        empty_page = unit_of_work.annotations.list_versions_page(
+            annotation_id,
+            limit=2,
+            offset=3,
+        )
+        assert empty_page.total == 3
+        assert empty_page.items == ()
+
         deleted_version = unit_of_work.annotations.get_version(annotation_id, 3)
         assert deleted_version is not None
         assert deleted_version.is_deleted is True
         assert unit_of_work.annotations.get_version(annotation_id, 4) is None
+
+
+def test_version_page_total_and_items_share_one_database_snapshot(
+    unit_of_work_factory: UnitOfWorkFactory,
+    validated_annotation: Annotation,
+) -> None:
+    annotation_id = UUID("00000000-0000-0000-0000-000000000062")
+    with unit_of_work_factory() as unit_of_work:
+        _create(
+            unit_of_work,
+            validated_annotation,
+            annotation_id=annotation_id,
+            created_at=datetime(2026, 6, 2, tzinfo=UTC),
+        )
+        unit_of_work.commit()
+
+    writer_calls = 0
+    with unit_of_work_factory() as reader:
+
+        def append_version_after_reader_statement(*_args: object) -> None:
+            nonlocal writer_calls
+            writer_calls += 1
+            with unit_of_work_factory() as writer:
+                writer.annotations.update(
+                    annotation_id,
+                    _changed(validated_annotation, assigned_by="MGI"),
+                    actor_id="concurrent-editor",
+                    change_source="test",
+                )
+                writer.commit()
+
+        event.listen(
+            reader.annotations.session.connection(),
+            "after_cursor_execute",
+            append_version_after_reader_statement,
+            once=True,
+        )
+        page = reader.annotations.list_versions_page(
+            annotation_id,
+            limit=10,
+            offset=0,
+        )
+        page_versions = [version.version for version in page.items]
+
+    assert writer_calls == 1
+    assert page.total == 1
+    assert page_versions == [1]
