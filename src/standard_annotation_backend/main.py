@@ -5,8 +5,22 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from standard_annotation_backend.api.errors import install_exception_handlers
+from standard_annotation_backend.api.routes.annotation_versions import (
+    router as annotation_versions_router,
+)
+from standard_annotation_backend.api.routes.annotations import (
+    router as annotations_router,
+)
 from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.schema_artifacts import load_json_schema
+from standard_annotation_backend.persistence.database import (
+    create_database_engine,
+    create_session_factory,
+)
+from standard_annotation_backend.persistence.unit_of_work import (
+    create_unit_of_work_factory,
+)
 
 
 @asynccontextmanager
@@ -22,10 +36,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     app.state.settings = settings
     app.state.standard_annotation_json_schema = load_json_schema()
-    yield
+    engine = create_database_engine(settings.database_url)
+    session_factory = create_session_factory(engine)
+    app.state.unit_of_work_factory = create_unit_of_work_factory(session_factory)
+    try:
+        yield
+    finally:
+        engine.dispose()
 
 
 app = FastAPI(title="Standard Annotation Backend", lifespan=lifespan)
+install_exception_handlers(app)
+app.include_router(annotation_versions_router)
+app.include_router(annotations_router)
 
 
 @app.get("/health")
