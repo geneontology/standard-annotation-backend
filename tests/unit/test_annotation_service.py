@@ -265,9 +265,72 @@ class FakeAnnotationRepository:
         return self.versions.get(version)
 
 
+@dataclass(frozen=True, slots=True)
+class AuditCall:
+    action: str
+    actor_id: str
+    result: str
+    token_id: str | None
+    token_name: str | None
+    selected_role: str | None
+    selected_scope: str | None
+    selected_group_id: str | None
+    annotation_id: UUID | None
+    annotation_version: int | None
+    comment_id: UUID | None
+    job_id: UUID | None
+    change_set_id: UUID | None
+    details: dict[str, object] | None
+
+
+class FakeAuditRepository:
+    """Retain audit writes made by the service under test."""
+
+    def __init__(self) -> None:
+        self.calls: list[AuditCall] = []
+
+    def record(
+        self,
+        *,
+        action: str,
+        actor_id: str,
+        result: str,
+        token_id: str | None = None,
+        token_name: str | None = None,
+        selected_role: str | None = None,
+        selected_scope: str | None = None,
+        selected_group_id: str | None = None,
+        annotation_id: UUID | None = None,
+        annotation_version: int | None = None,
+        comment_id: UUID | None = None,
+        job_id: UUID | None = None,
+        change_set_id: UUID | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        self.calls.append(
+            AuditCall(
+                action=action,
+                actor_id=actor_id,
+                result=result,
+                token_id=token_id,
+                token_name=token_name,
+                selected_role=selected_role,
+                selected_scope=selected_scope,
+                selected_group_id=selected_group_id,
+                annotation_id=annotation_id,
+                annotation_version=annotation_version,
+                comment_id=comment_id,
+                job_id=job_id,
+                change_set_id=change_set_id,
+                details=details,
+            )
+        )
+
+
 @dataclass(slots=True)
 class FakeUnitOfWork:
     annotations: FakeAnnotationRepository
+    audit: FakeAuditRepository
     commit_count: int = 0
 
     @property
@@ -299,7 +362,10 @@ class ServiceHarness:
 @pytest.fixture
 def service_harness() -> ServiceHarness:
     repository = FakeAnnotationRepository(current_record=_current_record())
-    unit_of_work = FakeUnitOfWork(annotations=repository)
+    unit_of_work = FakeUnitOfWork(
+        annotations=repository,
+        audit=FakeAuditRepository(),
+    )
     factory = cast(UnitOfWorkFactory, lambda: unit_of_work)
     service = AnnotationService(unit_of_work_factory=factory)
     return ServiceHarness(service, repository, unit_of_work)
@@ -322,6 +388,24 @@ def test_create_validates_payload_commits_and_returns_a_domain_result(
     assert result.annotation.db_object_id == "UniProtKB:P12345"
     assert service_harness.repository.last_actor_id == "provisional-api-user"
     assert isinstance(service_harness.repository.last_annotation, Annotation)
+    assert service_harness.unit_of_work.audit.calls == [
+        AuditCall(
+            action="annotation.created",
+            actor_id="provisional-api-user",
+            result="success",
+            token_id=None,
+            token_name=None,
+            selected_role=None,
+            selected_scope=None,
+            selected_group_id=None,
+            annotation_id=FIXED_ID,
+            annotation_version=1,
+            comment_id=None,
+            job_id=None,
+            change_set_id=None,
+            details={"change_source": "api"},
+        )
+    ]
     assert service_harness.unit_of_work.commit_count == 1
 
 
@@ -379,6 +463,24 @@ def test_patch_replaces_a_supplied_list_and_keeps_omitted_fields(
     assert result.annotation.assigned_by == "GO_Central"
     assert service_harness.repository.last_expected_version == 1
     assert service_harness.repository.last_actor_id == "provisional-api-user"
+    assert service_harness.unit_of_work.audit.calls == [
+        AuditCall(
+            action="annotation.updated",
+            actor_id="provisional-api-user",
+            result="success",
+            token_id=None,
+            token_name=None,
+            selected_role=None,
+            selected_scope=None,
+            selected_group_id=None,
+            annotation_id=FIXED_ID,
+            annotation_version=2,
+            comment_id=None,
+            job_id=None,
+            change_set_id=None,
+            details={"change_source": "api"},
+        )
+    ]
     assert service_harness.unit_of_work.commit_count == 1
 
 
@@ -445,6 +547,24 @@ def test_delete_commits_exactly_once_after_a_successful_soft_delete(
     assert service_harness.repository.current_record.current_version == 2
     assert service_harness.repository.last_expected_version == 1
     assert service_harness.repository.last_actor_id == "provisional-api-user"
+    assert service_harness.unit_of_work.audit.calls == [
+        AuditCall(
+            action="annotation.deleted",
+            actor_id="provisional-api-user",
+            result="success",
+            token_id=None,
+            token_name=None,
+            selected_role=None,
+            selected_scope=None,
+            selected_group_id=None,
+            annotation_id=FIXED_ID,
+            annotation_version=2,
+            comment_id=None,
+            job_id=None,
+            change_set_id=None,
+            details={"change_source": "api"},
+        )
+    ]
     assert service_harness.unit_of_work.commit_count == 1
 
 

@@ -251,7 +251,7 @@ class AnnotationCommentRecord(Base):
 
 
 class AuditEventRecord(Base):
-    """Define storage reserved for future audit events."""
+    """Store durable context about an application operation."""
 
     __tablename__ = "audit_event"
     __table_args__ = (
