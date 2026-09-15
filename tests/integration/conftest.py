@@ -7,20 +7,28 @@ from pathlib import Path
 import psycopg
 import pytest
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from psycopg import sql
 from sqlalchemy import Engine
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
+from standard_annotation_backend.api.dependencies import (
+    get_request_context,
+    get_unit_of_work_factory,
+)
+from standard_annotation_backend.main import app
 from standard_annotation_backend.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
+    UnitOfWorkFactory,
     create_unit_of_work_factory,
 )
+from standard_annotation_backend.services.annotation_service import RequestContext
 
 APPLICATION_TABLES = (
     "annotation_comment",
@@ -89,7 +97,7 @@ def database_engine() -> Iterator[Engine]:
     """Provide an engine connected to a freshly migrated test database.
 
     Yields:
-        An engine connected to the database named by ``SAB_TEST_DATABASE_URL``.
+        An engine connected to the database named by `SAB_TEST_DATABASE_URL`.
     """
     database_url = _test_database_url()
     _create_test_database_if_missing(database_url)
@@ -134,6 +142,33 @@ def unit_of_work_factory(
         A factory that creates a new unit of work for each test operation.
     """
     return create_unit_of_work_factory(session_factory)
+
+
+@pytest.fixture
+def annotation_api_client(
+    configured_environment: None,
+    unit_of_work_factory: UnitOfWorkFactory,
+) -> Iterator[TestClient]:
+    """Provide an API client backed by the isolated integration-test database.
+
+    Args:
+        configured_environment: Fixture that supplies the required application settings.
+        unit_of_work_factory: Callable that opens test database transactions.
+
+    Yields:
+        A client whose requests use the test database and a fixed test identity.
+    """
+    previous_overrides = app.dependency_overrides.copy()
+    app.dependency_overrides[get_unit_of_work_factory] = lambda: unit_of_work_factory
+    app.dependency_overrides[get_request_context] = lambda: RequestContext(
+        actor_id="api-test-user"
+    )
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)
 
 
 @pytest.fixture(autouse=True)
