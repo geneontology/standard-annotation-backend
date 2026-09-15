@@ -6,7 +6,8 @@ from threading import Barrier, Event
 from time import monotonic
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+import pytest
+from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation
@@ -18,6 +19,13 @@ from standard_annotation_backend.persistence.repositories import (
     AnnotationRepository,
     DuplicateAnnotationError,
     StaleAnnotationVersionError,
+)
+from standard_annotation_backend.persistence.unit_of_work import (
+    create_unit_of_work_factory,
+)
+from standard_annotation_backend.services.annotation_service import (
+    AnnotationService,
+    RequestContext,
 )
 
 GUARD_SECONDS = 5
@@ -292,6 +300,66 @@ def test_same_record_update_race_rejects_the_stale_version(
             1,
             2,
         ]
+
+
+def test_patch_rejects_a_merge_based_on_a_different_version(
+    session_factory: sessionmaker[Session],
+    validated_annotation: Annotation,
+) -> None:
+    with session_factory() as session:
+        record = AnnotationRepository(session).create_direct(
+            annotation=validated_annotation,
+            actor_id="seed",
+            owning_group_id="group-1",
+        )
+        session.commit()
+        annotation_id = record.annotation_id
+
+    writer_calls = 0
+
+    def reader_session_factory() -> Session:
+        reader = session_factory()
+
+        def commit_expected_version_after_initial_read(*_args: object) -> None:
+            nonlocal writer_calls
+            writer_calls += 1
+            with session_factory() as writer:
+                AnnotationRepository(writer).update_direct(
+                    annotation_id,
+                    _changed(validated_annotation, assigned_by="Concurrent"),
+                    expected_version=1,
+                    actor_id="concurrent-editor",
+                )
+                writer.commit()
+
+        event.listen(
+            reader.connection(),
+            "after_cursor_execute",
+            commit_expected_version_after_initial_read,
+            once=True,
+        )
+        return reader
+
+    service = AnnotationService(create_unit_of_work_factory(reader_session_factory))
+    with pytest.raises(StaleAnnotationVersionError):
+        service.patch(
+            annotation_id,
+            changes={"annotation_date": "2026-09-10"},
+            expected_version=2,
+            context=RequestContext(actor_id="api-editor"),
+        )
+
+    assert writer_calls == 1
+    with session_factory() as session:
+        repository = AnnotationRepository(session)
+        current = repository.get(annotation_id)
+        assert current is not None
+        current_version = current.current_version
+        assigned_by = current.assigned_by
+        versions = tuple(repository.list_versions(annotation_id))
+    assert current_version == 2
+    assert assigned_by == "Concurrent"
+    assert [version.version for version in versions] == [1, 2]
 
 
 def test_unrelated_signatures_overlap_after_the_shared_global_lock(

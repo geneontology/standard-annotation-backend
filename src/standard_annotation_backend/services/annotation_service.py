@@ -16,6 +16,7 @@ from standard_annotation_backend.persistence.models import (
 from standard_annotation_backend.persistence.repositories import (
     AnnotationNotFoundError,
     AnnotationSearchFilters,
+    StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 
@@ -229,6 +230,12 @@ class AnnotationService:
             current = unit_of_work.annotations.get(annotation_id)
             if current is None:
                 raise AnnotationNotFoundError(annotation_id)
+            if current.current_version != expected_version:
+                raise StaleAnnotationVersionError(
+                    annotation_id,
+                    expected_version,
+                    current.current_version,
+                )
 
             merged = current.annotation_data.copy()
             merged.update(changes)
