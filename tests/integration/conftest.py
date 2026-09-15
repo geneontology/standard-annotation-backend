@@ -31,6 +31,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
 from standard_annotation_backend.services.annotation_service import RequestContext
 
 APPLICATION_TABLES = (
+    "change_set",
     "annotation_comment",
     "annotation_duplicate_reference",
     "annotation_multivalued_field_value",
@@ -145,7 +146,7 @@ def unit_of_work_factory(
 
 
 @pytest.fixture
-def annotation_api_client(
+def integration_api_client(
     configured_environment: None,
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> Iterator[TestClient]:

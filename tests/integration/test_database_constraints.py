@@ -4,9 +4,10 @@ from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import Engine, insert
+from sqlalchemy import CheckConstraint, Engine, insert, inspect, text
 from sqlalchemy.exc import IntegrityError
 
+from standard_annotation_backend.persistence import models
 from standard_annotation_backend.persistence.models import (
     AnnotationCommentRecord,
     AnnotationMultivaluedFieldValueRecord,
@@ -36,6 +37,155 @@ def _annotation_values(annotation_id: UUID) -> dict[str, object]:
         "annotation_date": date(2026, 1, 1),
         "assigned_by": "TEST",
     }
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"operation": "unsupported"},
+        {"state": "unsupported"},
+        {"annotation_payload": None},
+        {"annotation_payload": []},
+        {"patch": []},
+        {"base_version": 1},
+        {"annotation_id": uuid4()},
+        {"operation": "update", "annotation_payload": None, "patch": []},
+        {"operation": "delete", "annotation_payload": None},
+        {"reviewed_by": "reviewer"},
+        {"reviewed_at": datetime.now(UTC)},
+        {"review_reason": "Unfinished review"},
+        {"state": "rejected", "review_reason": "Declined"},
+        {
+            "state": "rejected",
+            "reviewed_by": "reviewer",
+            "reviewed_at": datetime.now(UTC),
+        },
+        {
+            "state": "rejected",
+            "reviewed_by": "reviewer",
+            "reviewed_at": datetime.now(UTC),
+            "review_reason": " \t\n",
+        },
+        {
+            "state": "accepted",
+            "reviewed_by": "reviewer",
+            "reviewed_at": datetime.now(UTC),
+        },
+        {"result_annotation_version": 1},
+        {"state": "stale", "reviewed_by": "reviewer"},
+        {"preview": []},
+        {"preview": {}},
+        {"previewed_at": datetime.now(UTC)},
+    ],
+)
+def test_change_set_constraints_reject_invalid_operation_and_review_shapes(
+    database_engine: Engine,
+    changes: dict[str, object],
+) -> None:
+    """Direct database writes must obey proposal and review field requirements."""
+    values = {
+        "operation": "create",
+        "state": "proposed",
+        "owning_group_id": "group",
+        "annotation_payload": {},
+        "proposed_by": "proposer",
+        "reason": "Evidence",
+    } | changes
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(models.ChangeSetRecord), values)
+
+
+def test_change_set_database_generates_identity_and_proposal_time(
+    database_engine: Engine,
+) -> None:
+    """Raw inserts receive the same server defaults as repository proposals."""
+    with database_engine.begin() as connection:
+        row = connection.execute(
+            text(
+                "INSERT INTO change_set (operation, owning_group_id, annotation_payload, proposed_by, reason) "
+                "VALUES ('create', 'group', '{}'::jsonb, 'proposer', 'Evidence') "
+                "RETURNING change_set_id, proposed_at, state"
+            )
+        ).one()
+        assert isinstance(row.change_set_id, UUID)
+        assert row.proposed_at.tzinfo is UTC
+        assert row.state == "proposed"
+
+
+def test_change_set_migration_constraints_match_model_metadata(
+    database_engine: Engine,
+) -> None:
+    """Migration constraint names match those used by later schema operations."""
+    deployed = {
+        constraint["name"]
+        for constraint in inspect(database_engine).get_check_constraints("change_set")
+    }
+    declared = {
+        constraint.name
+        for constraint in models.Base.metadata.tables["change_set"].constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert deployed == declared
+
+
+@pytest.mark.parametrize("operation", ["update", "delete"])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"annotation_id": None},
+        {"base_version": None},
+        {"base_version": 0},
+        {"annotation_payload": {}},
+        {"patch": {}},
+        {
+            "state": "accepted",
+            "reviewed_by": "reviewer",
+            "reviewed_at": datetime.now(UTC),
+        },
+        {
+            "state": "accepted",
+            "reviewed_by": "reviewer",
+            "reviewed_at": datetime.now(UTC),
+            "result_annotation_version": 0,
+        },
+        {
+            "state": "rejected",
+            "reviewed_by": "reviewer",
+            "reviewed_at": datetime.now(UTC),
+            "review_reason": "Declined",
+            "result_annotation_version": 2,
+        },
+        {
+            "state": "stale",
+            "reviewed_by": "reviewer",
+            "reviewed_at": datetime.now(UTC),
+            "result_annotation_version": 2,
+        },
+    ],
+)
+def test_targeted_change_set_constraints(
+    database_engine: Engine,
+    operation: str,
+    changes: dict[str, object],
+) -> None:
+    """Targeted proposals require a positive base version and accepted result version."""
+    annotation_id = uuid4()
+    with database_engine.begin() as connection:
+        connection.execute(insert(AnnotationRecord), _annotation_values(annotation_id))
+    values = {
+        "operation": operation,
+        "state": "proposed",
+        "owning_group_id": "group",
+        "annotation_id": annotation_id,
+        "base_version": 1,
+        "patch": [{"op": "replace", "path": "/assigned_by", "value": "TEST"}]
+        if operation == "update"
+        else None,
+        "proposed_by": "proposer",
+        "reason": "Evidence",
+    } | changes
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(models.ChangeSetRecord), values)
 
 
 @pytest.mark.parametrize(

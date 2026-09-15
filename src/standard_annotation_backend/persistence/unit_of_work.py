@@ -9,6 +9,7 @@ from standard_annotation_backend.persistence.repositories import (
     AnnotationCommentRepository,
     AnnotationRepository,
     AuditRepository,
+    ChangeSetRepository,
 )
 
 SessionFactory = Callable[[], Session]
@@ -32,6 +33,7 @@ class SqlAlchemyUnitOfWork:
         self.annotations: AnnotationRepository
         self.comments: AnnotationCommentRepository
         self.audit: AuditRepository
+        self.change_sets: ChangeSetRepository
 
     def __enter__(self) -> "SqlAlchemyUnitOfWork":
         self._session = self._session_factory()
@@ -39,6 +41,7 @@ class SqlAlchemyUnitOfWork:
         self.annotations = AnnotationRepository(self._session)
         self.comments = AnnotationCommentRepository(self._session)
         self.audit = AuditRepository(self._session)
+        self.change_sets = ChangeSetRepository(self._session)
         return self
 
     def commit(self) -> None:

@@ -1,4 +1,4 @@
-"""Create request-specific objects used by annotation routes."""
+"""Create request-specific objects used by API routes."""
 
 import re
 from typing import Annotated
@@ -11,6 +11,7 @@ from standard_annotation_backend.services.annotation_service import (
     AnnotationService,
     RequestContext,
 )
+from standard_annotation_backend.services.change_set_service import ChangeSetService
 
 _IF_MATCH_PATTERN = re.compile(r'^"([1-9][0-9]*)"$')
 
@@ -130,3 +131,13 @@ def get_annotation_service(
         A service configured to run annotation operations.
     """
     return AnnotationService(unit_of_work_factory)
+
+
+def get_change_set_service(
+    unit_of_work_factory: Annotated[
+        UnitOfWorkFactory,
+        Depends(get_unit_of_work_factory),
+    ],
+) -> ChangeSetService:
+    """Create proposal and review operations using the request's transaction factory."""
+    return ChangeSetService(unit_of_work_factory)

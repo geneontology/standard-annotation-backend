@@ -96,25 +96,25 @@ def test_record_audit_event_persists_complete_context(
 
 
 def test_direct_annotation_mutations_record_successful_audit_events(
-    annotation_api_client: TestClient,
+    integration_api_client: TestClient,
     session_factory: sessionmaker[Session],
 ) -> None:
     """Create, update, and delete each record the actor and resulting version."""
-    created = annotation_api_client.post(
+    created = integration_api_client.post(
         "/annotations",
         json={"owning_group_id": "group-1", "annotation": VALID_ANNOTATION},
     )
     assert created.status_code == status.HTTP_201_CREATED
     annotation_id = UUID(created.json()["annotation_id"])
 
-    updated = annotation_api_client.patch(
+    updated = integration_api_client.patch(
         f"/annotations/{annotation_id}",
         headers={"If-Match": '"1"'},
         json={"assigned_by": "Updated_Source"},
     )
     assert updated.status_code == status.HTTP_200_OK
 
-    deleted = annotation_api_client.delete(
+    deleted = integration_api_client.delete(
         f"/annotations/{annotation_id}",
         headers={"If-Match": '"2"'},
     )
@@ -141,29 +141,29 @@ def test_direct_annotation_mutations_record_successful_audit_events(
 
 
 def test_rejected_direct_mutations_do_not_record_successful_audit_events(
-    annotation_api_client: TestClient,
+    integration_api_client: TestClient,
     session_factory: sessionmaker[Session],
 ) -> None:
     """Validation, duplicate, and stale-write rejection add no success events."""
-    created = annotation_api_client.post(
+    created = integration_api_client.post(
         "/annotations",
         json={"owning_group_id": "group-1", "annotation": VALID_ANNOTATION},
     )
     assert created.status_code == status.HTTP_201_CREATED
     annotation_id = UUID(created.json()["annotation_id"])
 
-    invalid = annotation_api_client.post(
+    invalid = integration_api_client.post(
         "/annotations",
         json={
             "owning_group_id": "group-1",
             "annotation": {**VALID_ANNOTATION, "db_object_id": None},
         },
     )
-    duplicate = annotation_api_client.post(
+    duplicate = integration_api_client.post(
         "/annotations",
         json={"owning_group_id": "group-1", "annotation": VALID_ANNOTATION},
     )
-    stale = annotation_api_client.patch(
+    stale = integration_api_client.patch(
         f"/annotations/{annotation_id}",
         headers={"If-Match": '"9"'},
         json={"assigned_by": "Stale_Source"},
@@ -179,7 +179,7 @@ def test_rejected_direct_mutations_do_not_record_successful_audit_events(
 
 
 def test_audit_write_failure_rolls_back_the_complete_annotation_create(
-    annotation_api_client: TestClient,
+    integration_api_client: TestClient,
     session_factory: sessionmaker[Session],
 ) -> None:
     """An audit insertion failure leaves no annotation-related database state."""
@@ -190,7 +190,7 @@ def test_audit_write_failure_rolls_back_the_complete_annotation_create(
     event.listen(AuditEventRecord, "before_insert", reject_audit_insert)
     try:
         with pytest.raises(RuntimeError, match="audit storage unavailable"):
-            annotation_api_client.post(
+            integration_api_client.post(
                 "/annotations",
                 json={
                     "owning_group_id": "group-1",

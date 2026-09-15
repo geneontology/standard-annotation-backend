@@ -15,7 +15,7 @@ class _ConnectionlessEngine:
         self.disposed = True
 
 
-def test_lifespan_builds_uow_factory_without_connecting_and_disposes_engine(
+def test_lifespan_builds_unit_of_work_factory_without_connecting_and_disposes_engine(
     configured_environment: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

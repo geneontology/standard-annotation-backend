@@ -82,6 +82,10 @@ not make repositories depend on FastAPI, HTTP headers, or API response models.
 - Use constants from `fastapi.status` instead of bare integers for HTTP status codes.
 - Use Pydantic models at untrusted data boundaries and reuse the schema-generated
   Standard Annotation model rather than duplicating it.
+- Use Pydantic models for untrusted input, public API schemas, and other runtime
+  validation or serialization boundaries. Use frozen, slotted dataclasses for trusted
+  internal value objects. Reserve `TypedDict` for values that are intentionally
+  dictionary-shaped, such as normalized JSON-compatible records.
 - Preserve stable public error envelopes and machine-readable error codes. When a public
   route changes, update its OpenAPI declaration and contract tests together.
 - Use Alembic for database schema changes. Add constraints and indexes when correctness

@@ -1,7 +1,7 @@
-"""Typed request and response models for the annotation HTTP API."""
+"""Typed request and response models for annotation and change-set APIs."""
 
 from datetime import date, datetime
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +16,68 @@ from standard_annotation_backend.services.annotation_service import (
     CurrentAnnotation,
     ResultPage,
 )
+from standard_annotation_backend.services.change_set_service import (
+    AcceptedChangeSet,
+    ChangeSet,
+    ChangeSetPreview,
+)
+
+
+class ChangeSetCreateRequest(BaseModel):
+    """Propose raw annotation data whose validity will be assessed during review."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["create"]
+    owning_group_id: Annotated[str, Field(pattern=r".*\S.*")]
+    annotation: dict[str, object]
+    reason: Annotated[str, Field(pattern=r".*\S.*")]
+
+
+class ChangeSetUpdateRequest(BaseModel):
+    """Propose a nonempty JSON Patch against a saved annotation version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["update"]
+    annotation_id: UUID
+    base_version: Annotated[int, Field(gt=0, strict=True)]
+    patch_format: Literal["application/json-patch+json"] = "application/json-patch+json"
+    patch: Annotated[list[object], Field(min_length=1)]
+    reason: Annotated[str, Field(pattern=r".*\S.*")]
+
+
+class ChangeSetDeleteRequest(BaseModel):
+    """Propose deletion of an annotation based on a saved version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["delete"]
+    annotation_id: UUID
+    base_version: Annotated[int, Field(gt=0, strict=True)]
+    reason: Annotated[str, Field(pattern=r".*\S.*")]
+
+
+type ChangeSetProposalRequest = Annotated[
+    ChangeSetCreateRequest | ChangeSetUpdateRequest | ChangeSetDeleteRequest,
+    Field(discriminator="operation"),
+]
+
+
+class ChangeSetAcceptRequest(BaseModel):
+    """Supply optional reviewer text when accepting a proposal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_reason: str | None = None
+
+
+class ChangeSetRejectRequest(BaseModel):
+    """Require a nonblank explanation when rejecting a proposal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_reason: Annotated[str, Field(pattern=r".*\S.*")]
 
 
 class AnnotationCreateRequest(BaseModel):
@@ -191,6 +253,79 @@ class ApiValidationIssue(BaseModel):
     type: str
 
 
+class ChangeSetPreviewResource(BaseModel):
+    """Show the candidate annotation and current obstacles to acceptance.
+
+    A preview is advisory. Acceptance repeats validation and concurrency checks.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    change_set_id: UUID
+    operation: Literal["create", "update", "delete"]
+    annotation_id: UUID | None
+    base_version: int | None
+    current_version: int | None
+    before_annotation: dict[str, object] | None
+    annotation: dict[str, object] | None
+    is_deleted: bool
+    validation_errors: tuple[ApiValidationIssue, ...]
+    duplicate_peer_ids: tuple[UUID, ...]
+    is_stale: bool
+    can_accept: bool
+
+    @classmethod
+    def from_service(cls, result: ChangeSetPreview) -> Self:
+        """Convert a service preview to the public response model."""
+        return cls.model_validate(result)
+
+
+class ChangeSetResource(BaseModel):
+    """Expose a proposal, its last stored preview, and its review outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    change_set_id: UUID
+    operation: Literal["create", "update", "delete"]
+    state: Literal["proposed", "accepted", "rejected", "stale"]
+    owning_group_id: str
+    annotation_id: UUID | None
+    base_version: int | None
+    annotation_payload: dict[str, object] | None
+    patch: list[dict[str, object]] | None
+    reason: str
+    preview: ChangeSetPreviewResource | None
+    previewed_at: datetime | None
+    proposed_by: str
+    proposed_at: datetime
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    review_reason: str | None
+    result_annotation_version: int | None
+
+    @classmethod
+    def from_service(cls, result: ChangeSet) -> Self:
+        """Convert a service proposal and its stored preview to an API resource."""
+        return cls.model_validate(result)
+
+
+class AcceptedChangeSetResource(BaseModel):
+    """Identify an accepted proposal and its resulting annotation version."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    change_set: ChangeSetResource
+    annotation_id: UUID
+    version: int
+    is_deleted: bool
+    annotation: Annotation
+
+    @classmethod
+    def from_service(cls, result: AcceptedChangeSet) -> Self:
+        """Convert acceptance data, including deletion results, to an API response."""
+        return cls.model_validate(result)
+
+
 class DuplicateAnnotationDetails(BaseModel):
     """List active annotations that conflict with a requested change."""
 
@@ -205,10 +340,20 @@ class StaleAnnotationVersionDetails(BaseModel):
     current_version: int
 
 
+class StaleChangeSetDetails(BaseModel):
+    """Identify a stale proposal and the annotation versions that conflicted."""
+
+    change_set_id: UUID
+    annotation_id: UUID
+    expected_version: int
+    current_version: int
+
+
 type ApiErrorDetails = (
     list[ApiValidationIssue]
     | DuplicateAnnotationDetails
     | StaleAnnotationVersionDetails
+    | StaleChangeSetDetails
 )
 
 
