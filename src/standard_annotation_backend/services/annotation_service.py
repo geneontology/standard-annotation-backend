@@ -16,9 +16,11 @@ from standard_annotation_backend.persistence.models import (
 from standard_annotation_backend.persistence.repositories import (
     AnnotationNotFoundError,
     AnnotationSearchFilters,
+    AuditRepository,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.audit_service import AuditAction, AuditService
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +28,7 @@ class RequestContext:
     """Identify the person or process making a request.
 
     Attributes:
-        actor_id: Stable identifier recorded in annotation version history.
+        actor_id: Stable identifier recorded in version history and audit events.
     """
 
     actor_id: str
@@ -171,6 +173,12 @@ class AnnotationService:
                 owning_group_id=owning_group_id,
             )
             result = _current_annotation(record)
+            _record_annotation_audit(
+                unit_of_work.audit,
+                action=AuditAction.ANNOTATION_CREATED,
+                context=context,
+                annotation=result,
+            )
             unit_of_work.commit()
         return result
 
@@ -247,6 +255,12 @@ class AnnotationService:
                 actor_id=context.actor_id,
             )
             result = _current_annotation(updated)
+            _record_annotation_audit(
+                unit_of_work.audit,
+                action=AuditAction.ANNOTATION_UPDATED,
+                context=context,
+                annotation=result,
+            )
             unit_of_work.commit()
         return result
 
@@ -270,10 +284,16 @@ class AnnotationService:
             StaleAnnotationVersionError: If `expected_version` is no longer current.
         """
         with self._unit_of_work_factory() as unit_of_work:
-            unit_of_work.annotations.soft_delete_direct(
+            record = unit_of_work.annotations.soft_delete_direct(
                 annotation_id,
                 expected_version=expected_version,
                 actor_id=context.actor_id,
+            )
+            _record_annotation_audit(
+                unit_of_work.audit,
+                action=AuditAction.ANNOTATION_DELETED,
+                context=context,
+                annotation=_current_annotation(record),
             )
             unit_of_work.commit()
 
@@ -410,6 +430,21 @@ class AnnotationService:
                 raise AnnotationHistoryNotFoundError(annotation_id, version)
             result = _annotation_version(record)
         return result
+
+
+def _record_annotation_audit(
+    repository: AuditRepository,
+    *,
+    action: AuditAction,
+    context: RequestContext,
+    annotation: CurrentAnnotation,
+) -> None:
+    AuditService(repository).record_annotation_mutation(
+        action=action,
+        actor_id=context.actor_id,
+        annotation_id=annotation.annotation_id,
+        annotation_version=annotation.version,
+    )
 
 
 def _validated_annotation(payload: object) -> Annotation:

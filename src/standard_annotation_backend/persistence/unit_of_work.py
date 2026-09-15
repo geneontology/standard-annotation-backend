@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from standard_annotation_backend.persistence.repositories import (
     AnnotationCommentRepository,
     AnnotationRepository,
+    AuditRepository,
 )
 
 SessionFactory = Callable[[], Session]
@@ -15,7 +16,7 @@ UnitOfWorkFactory = Callable[[], "SqlAlchemyUnitOfWork"]
 
 
 class SqlAlchemyUnitOfWork:
-    """Manage one session shared by the annotation and comment repositories.
+    """Manage one session shared by application repositories.
 
     Use this class as a context manager. Call `commit()` to keep the changes;
     leaving the context without a commit rolls them back.
@@ -30,12 +31,14 @@ class SqlAlchemyUnitOfWork:
         self._committed = False
         self.annotations: AnnotationRepository
         self.comments: AnnotationCommentRepository
+        self.audit: AuditRepository
 
     def __enter__(self) -> "SqlAlchemyUnitOfWork":
         self._session = self._session_factory()
         self._committed = False
         self.annotations = AnnotationRepository(self._session)
         self.comments = AnnotationCommentRepository(self._session)
+        self.audit = AuditRepository(self._session)
         return self
 
     def commit(self) -> None:
