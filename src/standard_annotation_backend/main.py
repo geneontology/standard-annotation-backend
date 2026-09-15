@@ -12,6 +12,9 @@ from standard_annotation_backend.api.routes.annotation_versions import (
 from standard_annotation_backend.api.routes.annotations import (
     router as annotations_router,
 )
+from standard_annotation_backend.api.routes.change_sets import (
+    router as change_sets_router,
+)
 from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.schema_artifacts import load_json_schema
 from standard_annotation_backend.persistence.database import (
@@ -49,6 +52,7 @@ app = FastAPI(title="Standard Annotation Backend", lifespan=lifespan)
 install_exception_handlers(app)
 app.include_router(annotation_versions_router)
 app.include_router(annotations_router)
+app.include_router(change_sets_router)
 
 
 @app.get("/health")

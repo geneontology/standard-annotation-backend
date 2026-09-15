@@ -46,6 +46,31 @@ class AuditService:
     def __init__(self, repository: AuditRepository) -> None:
         self._repository = repository
 
+    def record_change_set_transition(
+        self,
+        *,
+        action: AuditAction,
+        actor_id: str,
+        change_set_id: UUID,
+        operation: str,
+        annotation_id: UUID | None = None,
+        annotation_version: int | None = None,
+    ) -> AuditEventRecord:
+        """Link a successful proposal or review to its resulting annotation version.
+
+        The repository shares the workflow transaction so audit and state changes
+        commit together. Token context remains null until authentication is added.
+        """
+        return self._repository.record(
+            action=action.value,
+            actor_id=actor_id,
+            result=AuditResult.SUCCESS.value,
+            change_set_id=change_set_id,
+            annotation_id=annotation_id,
+            annotation_version=annotation_version,
+            details={"change_source": "change_set", "operation": operation},
+        )
+
     def record_annotation_mutation(
         self,
         *,

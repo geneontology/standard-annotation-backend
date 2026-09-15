@@ -13,6 +13,7 @@ dependencies = [
     "celery",
     "fastapi",
     "go-standard-annotation-schema==0.0.4",
+    "jsonpatch>=1.33",
     "linkml-runtime",
     "psycopg[binary]",
     "pydantic",

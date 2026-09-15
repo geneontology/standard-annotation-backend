@@ -1,4 +1,4 @@
-"""Convert expected annotation failures into consistent HTTP responses."""
+"""Convert expected application failures into consistent HTTP responses."""
 
 from collections.abc import Sequence
 
@@ -13,6 +13,7 @@ from standard_annotation_backend.api.models import (
     ApiValidationIssue,
     DuplicateAnnotationDetails,
     StaleAnnotationVersionDetails,
+    StaleChangeSetDetails,
 )
 from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.repositories import (
@@ -25,6 +26,12 @@ from standard_annotation_backend.services.annotation_service import (
     AnnotationHistoryNotFoundError,
     EmptyAnnotationPatchError,
     InvalidAnnotationPayloadError,
+)
+from standard_annotation_backend.services.change_set_service import (
+    ChangeSetNotFoundError,
+    ChangeSetStateError,
+    InvalidChangeSetError,
+    StaleChangeSetError,
 )
 
 
@@ -81,6 +88,53 @@ def install_exception_handlers(app: FastAPI) -> None:
     Args:
         app: FastAPI application that should use the handlers.
     """
+
+    @app.exception_handler(ChangeSetNotFoundError)
+    def handle_change_set_not_found(
+        _request: Request, _error: ChangeSetNotFoundError
+    ) -> JSONResponse:
+        return _error_response(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="change_set_not_found",
+            message="Change set was not found",
+        )
+
+    @app.exception_handler(ChangeSetStateError)
+    def handle_change_set_state(
+        _request: Request, _error: ChangeSetStateError
+    ) -> JSONResponse:
+        return _error_response(
+            status_code=status.HTTP_409_CONFLICT,
+            code="change_set_not_proposed",
+            message="Change set is no longer proposed",
+        )
+
+    @app.exception_handler(InvalidChangeSetError)
+    def handle_invalid_change_set(
+        _request: Request, error: InvalidChangeSetError
+    ) -> JSONResponse:
+        return _error_response(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code="invalid_change_set",
+            message="Change set is invalid",
+            details=_validation_details(error.errors),
+        )
+
+    @app.exception_handler(StaleChangeSetError)
+    def handle_stale_change_set(
+        _request: Request, error: StaleChangeSetError
+    ) -> JSONResponse:
+        return _error_response(
+            status_code=status.HTTP_409_CONFLICT,
+            code="stale_change_set",
+            message="Annotation changed after the change set's base version",
+            details=StaleChangeSetDetails(
+                change_set_id=error.change_set_id,
+                annotation_id=error.annotation_id,
+                expected_version=error.expected_version,
+                current_version=error.current_version,
+            ),
+        )
 
     @app.exception_handler(ApiError)
     def handle_api_error(_request: Request, error: ApiError) -> JSONResponse:

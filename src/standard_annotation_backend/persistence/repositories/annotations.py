@@ -1,13 +1,12 @@
-"""Read and write annotations, comments, and audit events."""
+"""Read and write annotations in caller-managed transactions."""
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from sqlalchemy import Select, delete, exists, func, select, true
-from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
+from sqlalchemy import delete, exists, select
+from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotations import Annotation, new_annotation_id
 from standard_annotation_backend.persistence.annotation_data import (
@@ -19,14 +18,16 @@ from standard_annotation_backend.persistence.locks import (
     acquire_signature_locks,
 )
 from standard_annotation_backend.persistence.models import (
-    AnnotationCommentRecord,
     AnnotationDuplicateReferenceRecord,
     AnnotationMultivaluedFieldValueRecord,
     AnnotationOrigin,
     AnnotationRecord,
     AnnotationStatus,
     AnnotationVersionRecord,
-    AuditEventRecord,
+)
+from standard_annotation_backend.persistence.repositories.pagination import (
+    Page,
+    _load_page,
 )
 
 
@@ -60,68 +61,6 @@ class AnnotationSearchFilters:
     references: tuple[str, ...] = ()
     with_or_from: tuple[str, ...] = ()
     interacting_taxon_id: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class Page[T]:
-    """Hold selected results and the size of the complete result set.
-
-    Attributes:
-        items: Records included in the requested page.
-        total: Number of records matching the query before pagination.
-    """
-
-    items: tuple[T, ...]
-    total: int
-
-
-def _load_page[T](
-    session: Session,
-    statement: Select[tuple[T]],
-    *,
-    record_type: type[T],
-    order_by: Sequence[InstrumentedAttribute[Any]],
-    limit: int,
-    offset: int,
-) -> Page[T]:
-    """Load a page and its total using one database snapshot.
-
-    The statement must select one SQLAlchemy record type. The ordering fields
-    must belong to that record type and together provide a stable result order.
-
-    Args:
-        session: Database session used to execute the query.
-        statement: Query selecting the complete filtered result set.
-        record_type: SQLAlchemy record returned by the query.
-        order_by: Fields that determine the stable result order.
-        limit: Maximum number of records to return.
-        offset: Number of matching records to skip.
-
-    Returns:
-        The requested records and the total before pagination.
-    """
-    filtered_records = statement.cte()
-    filtered_record = aliased(record_type, filtered_records)
-    filtered_order = tuple(getattr(filtered_record, field.key) for field in order_by)
-    page = (
-        select(filtered_record)
-        .order_by(*filtered_order)
-        .limit(limit)
-        .offset(offset)
-        .cte()
-    )
-    page_record = aliased(record_type, page)
-    page_order = tuple(getattr(page_record, field.key) for field in order_by)
-    summary = select(func.count().label("total")).select_from(filtered_records).cte()
-    rows = session.execute(
-        select(page_record, summary.c.total)
-        .select_from(summary.outerjoin(page, true()))
-        .order_by(*page_order)
-    ).all()
-    total = rows[0].total
-    assert total is not None
-    items = tuple(row[0] for row in rows if row[0] is not None)
-    return Page(items=items, total=total)
 
 
 class AnnotationNotFoundError(LookupError):
@@ -167,14 +106,6 @@ class StaleAnnotationVersionError(RuntimeError):
 
 class InvalidAnnotationProvenanceError(ValueError):
     """Raised when annotation provenance is unsupported or inconsistent."""
-
-
-class CommentNotFoundError(LookupError):
-    """Raised when a comment write targets a missing or deleted comment."""
-
-
-class InvalidCommentError(ValueError):
-    """Raised when a comment body is blank."""
 
 
 class AnnotationRepository:
@@ -479,13 +410,15 @@ class AnnotationRepository:
         annotation: Annotation,
         actor_id: str,
         owning_group_id: str,
+        change_source: str = "api",
     ) -> AnnotationRecord:
-        """Store an API-submitted annotation unless an equivalent one is active.
+        """Store an annotation unless an equivalent one is active.
 
         Args:
             annotation: Validated annotation to store.
             actor_id: Identifier for the person or process creating the annotation.
             owning_group_id: Identifier of the responsible group.
+            change_source: Workflow recorded in version history; defaults to API.
 
         Returns:
             The newly stored annotation at version 1.
@@ -510,7 +443,7 @@ class AnnotationRepository:
             annotation=annotation,
             persistence_data=persistence_data,
             actor_id=actor_id,
-            change_source="api",
+            change_source=change_source,
             owning_group_id=owning_group_id,
             record_origin=AnnotationOrigin.DIRECT.value,
             source_import_job_id=None,
@@ -633,14 +566,16 @@ class AnnotationRepository:
         *,
         expected_version: int,
         actor_id: str,
+        change_source: str = "api",
     ) -> AnnotationRecord:
-        """Update an API-submitted annotation when the client version is current.
+        """Update an annotation when the client version is current.
 
         Args:
             annotation_id: Identifier of the annotation to update.
             annotation: Validated replacement annotation.
             expected_version: Version supplied by the client.
             actor_id: Identifier for the person or process making the change.
+            change_source: Workflow recorded in version history; defaults to API.
 
         Returns:
             The updated annotation with a newly saved version.
@@ -701,7 +636,7 @@ class AnnotationRepository:
             current,
             candidate,
             actor_id=actor_id,
-            change_source="api",
+            change_source=change_source,
         )
 
     def _apply_update(
@@ -788,8 +723,9 @@ class AnnotationRepository:
         *,
         expected_version: int,
         actor_id: str,
+        change_source: str = "api",
     ) -> AnnotationRecord:
-        """Mark an API-submitted annotation as deleted when its version matches.
+        """Mark an annotation as deleted when its version matches.
 
         The annotation's database record and saved versions remain available for
         history queries, but current-annotation queries no longer return it.
@@ -798,6 +734,7 @@ class AnnotationRepository:
             annotation_id: Identifier of the annotation to delete.
             expected_version: Version supplied by the client.
             actor_id: Identifier for the person or process making the change.
+            change_source: Workflow recorded in version history; defaults to API.
 
         Returns:
             The annotation record in its deleted state.
@@ -824,7 +761,7 @@ class AnnotationRepository:
         return self._apply_soft_delete(
             record,
             actor_id=actor_id,
-            change_source="api",
+            change_source=change_source,
         )
 
     def _apply_soft_delete(
@@ -974,292 +911,3 @@ class AnnotationRepository:
             )
             for reference in persistence_data.canonical_references
         )
-
-
-class AuditRepository:
-    """Write audit events in a caller-managed transaction.
-
-    The repository flushes events so database errors are raised before the
-    caller commits the surrounding operation.
-
-    Args:
-        session: Session shared with the operation being audited.
-    """
-
-    def __init__(self, session: Session) -> None:
-        self.session = session
-
-    def record(
-        self,
-        *,
-        action: str,
-        actor_id: str,
-        result: str,
-        token_id: str | None = None,
-        token_name: str | None = None,
-        selected_role: str | None = None,
-        selected_scope: str | None = None,
-        selected_group_id: str | None = None,
-        annotation_id: UUID | None = None,
-        annotation_version: int | None = None,
-        comment_id: UUID | None = None,
-        job_id: UUID | None = None,
-        change_set_id: UUID | None = None,
-        details: dict[str, object] | None = None,
-    ) -> AuditEventRecord:
-        """Record who performed an operation and which resources it affected.
-
-        Args:
-            action: Stable name of the operation.
-            actor_id: Identifier for the person or process responsible.
-            result: Outcome of the operation.
-            token_id: Token used for the operation, when available.
-            token_name: Human-readable token name, when available.
-            selected_role: Role selected by the token, when available.
-            selected_scope: Scope selected by the token, when available.
-            selected_group_id: Group selected by the token, when available.
-            annotation_id: Annotation affected by the operation, when applicable.
-            annotation_version: Annotation version produced or observed.
-            comment_id: Comment affected by the operation, when applicable.
-            job_id: Job associated with the operation, when applicable.
-            change_set_id: Change set associated with the operation, when applicable.
-            details: Additional structured context for the operation.
-
-        Returns:
-            The newly stored audit event.
-        """
-        event = AuditEventRecord(
-            action=action,
-            actor_id=actor_id,
-            result=result,
-            token_id=token_id,
-            token_name=token_name,
-            selected_role=selected_role,
-            selected_scope=selected_scope,
-            selected_group_id=selected_group_id,
-            annotation_id=annotation_id,
-            annotation_version=annotation_version,
-            comment_id=comment_id,
-            job_id=job_id,
-            change_set_id=change_set_id,
-            details={} if details is None else details,
-        )
-        self.session.add(event)
-        self.session.flush([event])
-        return event
-
-
-class AnnotationCommentRepository:
-    """Read and write comments in a caller-managed transaction.
-
-    Each comment stays attached to the annotation version that was current when
-    the comment was created.
-
-    Args:
-        session: Session used for every query and write.
-    """
-
-    def __init__(self, session: Session) -> None:
-        self.session = session
-
-    def get(
-        self,
-        comment_id: UUID,
-        *,
-        include_deleted: bool = False,
-    ) -> AnnotationCommentRecord | None:
-        """Get a comment by identifier.
-
-        Args:
-            comment_id: Identifier of the comment to find.
-            include_deleted: Whether a deleted comment may be returned.
-
-        Returns:
-            The comment, or `None` when no visible comment exists.
-        """
-        statement = select(AnnotationCommentRecord).where(
-            AnnotationCommentRecord.comment_id == comment_id
-        )
-        if not include_deleted:
-            statement = statement.where(AnnotationCommentRecord.deleted_at.is_(None))
-        return self.session.scalar(statement)
-
-    def list(
-        self,
-        annotation_id: UUID,
-        *,
-        include_deleted: bool = False,
-    ) -> tuple[AnnotationCommentRecord, ...]:
-        """List comments attached to an annotation.
-
-        Args:
-            annotation_id: Identifier of the annotation to list comments for.
-            include_deleted: Whether deleted comments should be included.
-
-        Returns:
-            Comments ordered by creation time and identifier.
-        """
-        statement = select(AnnotationCommentRecord).where(
-            AnnotationCommentRecord.annotation_id == annotation_id
-        )
-        if not include_deleted:
-            statement = statement.where(AnnotationCommentRecord.deleted_at.is_(None))
-        statement = statement.order_by(
-            AnnotationCommentRecord.created_at,
-            AnnotationCommentRecord.comment_id,
-        )
-        return tuple(self.session.scalars(statement))
-
-    def create(
-        self,
-        annotation_id: UUID,
-        *,
-        body: str,
-        created_by: str,
-        comment_id: UUID | None = None,
-    ) -> AnnotationCommentRecord:
-        """Create a comment on an annotation's current version.
-
-        Args:
-            annotation_id: Identifier of the annotation being discussed.
-            body: Nonblank comment text.
-            created_by: Identifier for the comment author.
-            comment_id: Identifier to use instead of generating one.
-
-        Returns:
-            The new comment record.
-
-        Raises:
-            InvalidCommentError: If `body` is blank.
-            AnnotationNotFoundError: If the annotation does not exist.
-            AnnotationDeletedError: If the annotation has been deleted.
-        """
-        self._validate_body(body)
-        acquire_global_annotation_write_lock(self.session)
-        annotation = self._get_active_annotation_for_comment(annotation_id)
-
-        now = datetime.now(UTC)
-        comment = AnnotationCommentRecord(
-            comment_id=comment_id or uuid4(),
-            annotation_id=annotation_id,
-            annotation_version=annotation.current_version,
-            body=body,
-            created_by=created_by,
-            created_at=now,
-            updated_at=now,
-            deleted_at=None,
-        )
-        self.session.add(comment)
-        self.session.flush([comment])
-        return comment
-
-    def edit(self, comment_id: UUID, *, body: str) -> AnnotationCommentRecord:
-        """Change the text of an existing comment.
-
-        Args:
-            comment_id: Identifier of the comment to edit.
-            body: New nonblank comment text.
-
-        Returns:
-            The updated comment record.
-
-        Raises:
-            InvalidCommentError: If `body` is blank.
-            CommentNotFoundError: If the comment is missing or deleted.
-        """
-        self._validate_body(body)
-        acquire_global_annotation_write_lock(self.session)
-        comment = self._get_active_comment_for_change(comment_id)
-        comment.body = body
-        comment.updated_at = datetime.now(UTC)
-        self.session.flush([comment])
-        return comment
-
-    def soft_delete(self, comment_id: UUID) -> AnnotationCommentRecord:
-        """Mark a comment as deleted without removing its row.
-
-        Args:
-            comment_id: Identifier of the comment to delete.
-
-        Returns:
-            The comment record in its deleted state.
-
-        Raises:
-            CommentNotFoundError: If the comment is missing or already deleted.
-        """
-        acquire_global_annotation_write_lock(self.session)
-        comment = self._get_active_comment_for_change(comment_id)
-        now = datetime.now(UTC)
-        comment.updated_at = now
-        comment.deleted_at = now
-        self.session.flush([comment])
-        return comment
-
-    def _get_active_annotation_for_comment(
-        self,
-        annotation_id: UUID,
-    ) -> AnnotationRecord:
-        """Get the active annotation version that a new comment will reference.
-
-        Other transactions cannot change the annotation until this transaction ends.
-
-        Args:
-            annotation_id: Identifier of the annotation being discussed.
-
-        Returns:
-            The active annotation record with its current version protected.
-
-        Raises:
-            AnnotationNotFoundError: If the annotation does not exist.
-            AnnotationDeletedError: If the annotation has been deleted.
-        """
-        statement = (
-            select(AnnotationRecord)
-            .where(AnnotationRecord.annotation_id == annotation_id)
-            .with_for_update(read=True)
-            .execution_options(populate_existing=True)
-        )
-        annotation = self.session.scalar(statement)
-        if annotation is None:
-            raise AnnotationNotFoundError(f"annotation {annotation_id} was not found")
-        if annotation.status == AnnotationStatus.DELETED.value:
-            raise AnnotationDeletedError(
-                f"annotation {annotation.annotation_id} is already deleted"
-            )
-        return annotation
-
-    def _get_active_comment_for_change(
-        self,
-        comment_id: UUID,
-    ) -> AnnotationCommentRecord:
-        """Get an active comment and prevent concurrent changes to it.
-
-        Args:
-            comment_id: Identifier of the comment being changed.
-
-        Returns:
-            The active comment record.
-
-        Raises:
-            CommentNotFoundError: If the comment is missing or deleted.
-        """
-        statement = (
-            select(AnnotationCommentRecord)
-            .where(
-                AnnotationCommentRecord.comment_id == comment_id,
-                AnnotationCommentRecord.deleted_at.is_(None),
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        comment = self.session.scalar(statement)
-        if comment is None:
-            raise CommentNotFoundError(
-                f"comment {comment_id} was not found or is deleted"
-            )
-        return comment
-
-    @staticmethod
-    def _validate_body(body: str) -> None:
-        if not body.strip():
-            raise InvalidCommentError("comment body must not be blank")

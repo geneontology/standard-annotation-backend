@@ -11,6 +11,11 @@ from standard_annotation_backend.domain.annotations import Annotation
 class ValidationIssue(TypedDict):
     """Serializable details describing one validation failure.
 
+    This type deliberately remains dictionary-shaped because it normalizes Pydantic
+    error details into JSON-compatible data. Validation results carry these mappings
+    directly into Pydantic API models for serialization; they are not internal value
+    objects with behavior or identity.
+
     Attributes:
         location: Path to the invalid or missing value in the payload.
         message: Human-readable explanation of the failure.

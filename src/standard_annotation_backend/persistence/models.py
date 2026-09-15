@@ -48,6 +48,23 @@ class AnnotationOrigin(StrEnum):
     IMPORT = "import"
 
 
+class ChangeSetOperation(StrEnum):
+    """Operations that a proposal can request."""
+
+    CREATE = "create"
+    UPDATE = "update"
+    DELETE = "delete"
+
+
+class ChangeSetState(StrEnum):
+    """Review states persisted for a change set."""
+
+    PROPOSED = "proposed"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    STALE = "stale"
+
+
 class Base(DeclarativeBase):
     """Base class shared by all application database records."""
 
@@ -250,6 +267,89 @@ class AnnotationCommentRecord(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ChangeSetRecord(Base):
+    """Store a proposal and the outcome of its single terminal review."""
+
+    __tablename__ = "change_set"
+    __table_args__ = (
+        CheckConstraint(
+            "(operation = 'create' AND base_version IS NULL "
+            "AND annotation_payload IS NOT NULL "
+            "AND jsonb_typeof(annotation_payload) = 'object' AND patch IS NULL "
+            "AND ((state = 'accepted' AND annotation_id IS NOT NULL) OR "
+            "(state <> 'accepted' AND annotation_id IS NULL))) OR "
+            "(operation = 'update' AND annotation_id IS NOT NULL "
+            "AND base_version IS NOT NULL AND base_version > 0 "
+            "AND annotation_payload IS NULL AND patch IS NOT NULL "
+            "AND jsonb_typeof(patch) = 'array') OR "
+            "(operation = 'delete' AND annotation_id IS NOT NULL "
+            "AND base_version IS NOT NULL AND base_version > 0 "
+            "AND annotation_payload IS NULL AND patch IS NULL)",
+            name="operation_fields_consistent",
+        ),
+        CheckConstraint(
+            "(state = 'proposed' AND reviewed_by IS NULL "
+            "AND reviewed_at IS NULL AND review_reason IS NULL) OR "
+            "(state IN ('accepted', 'rejected', 'stale') "
+            "AND reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)",
+            name="state_review_consistent",
+        ),
+        CheckConstraint(
+            "state <> 'rejected' OR "
+            "(review_reason IS NOT NULL AND review_reason ~ '[^[:space:]]')",
+            name="rejection_reason_nonblank",
+        ),
+        CheckConstraint(
+            "(state = 'accepted' AND result_annotation_version IS NOT NULL "
+            "AND result_annotation_version > 0) OR "
+            "(state <> 'accepted' AND result_annotation_version IS NULL)",
+            name="accepted_result_version_consistent",
+        ),
+        CheckConstraint(
+            "(preview IS NULL AND previewed_at IS NULL) OR "
+            "(preview IS NOT NULL AND jsonb_typeof(preview) = 'object' "
+            "AND previewed_at IS NOT NULL)",
+            name="preview_metadata_consistent",
+        ),
+        Index("ix_change_set_annotation_id", "annotation_id"),
+        Index("ix_change_set_state", "state"),
+        Index(
+            "ix_change_set_proposed_at_change_set_id", "proposed_at", "change_set_id"
+        ),
+    )
+
+    change_set_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    operation: Mapped[str] = mapped_column(String(16))
+    state: Mapped[str] = mapped_column(String(16), server_default=text("'proposed'"))
+    owning_group_id: Mapped[str] = mapped_column(Text)
+    annotation_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("annotation.annotation_id", ondelete="CASCADE"),
+    )
+    base_version: Mapped[int | None] = mapped_column(Integer)
+    annotation_payload: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    patch: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    reason: Mapped[str] = mapped_column(Text)
+    preview: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
+    previewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proposed_by: Mapped[str] = mapped_column(Text)
+    proposed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(Text)
+    result_annotation_version: Mapped[int | None] = mapped_column(Integer)
+
+
 class AuditEventRecord(Base):
     """Store durable context about an application operation."""
 
@@ -257,6 +357,7 @@ class AuditEventRecord(Base):
     __table_args__ = (
         Index("ix_audit_event_annotation_id", "annotation_id"),
         Index("ix_audit_event_job_id", "job_id"),
+        Index("ix_audit_event_change_set_id", "change_set_id"),
     )
 
     audit_event_id: Mapped[UUID] = mapped_column(
