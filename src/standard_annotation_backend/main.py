@@ -24,6 +24,7 @@ from standard_annotation_backend.persistence.database import (
 from standard_annotation_backend.persistence.unit_of_work import (
     create_unit_of_work_factory,
 )
+from standard_annotation_backend.version import get_application_version
 
 
 @asynccontextmanager
@@ -48,7 +49,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine.dispose()
 
 
-app = FastAPI(title="Standard Annotation Backend", lifespan=lifespan)
+app = FastAPI(
+    title="Standard Annotation Backend",
+    version=get_application_version(),
+    redoc_url=None,
+    lifespan=lifespan,
+)
 install_exception_handlers(app)
 app.include_router(annotation_versions_router)
 app.include_router(annotations_router)

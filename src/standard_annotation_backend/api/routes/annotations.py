@@ -4,7 +4,7 @@ from datetime import date
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 
 from standard_annotation_backend.api.dependencies import (
     IF_MATCH_OPENAPI,
@@ -13,6 +13,10 @@ from standard_annotation_backend.api.dependencies import (
     require_expected_version,
 )
 from standard_annotation_backend.api.errors import ApiError
+from standard_annotation_backend.api.examples import (
+    ANNOTATION_CREATE_EXAMPLES,
+    ANNOTATION_PATCH_EXAMPLES,
+)
 from standard_annotation_backend.api.models import (
     AnnotationCreateRequest,
     AnnotationPageResponse,
@@ -160,7 +164,10 @@ def list_annotations(
     },
 )
 def create_annotation(
-    request: AnnotationCreateRequest,
+    request: Annotated[
+        AnnotationCreateRequest,
+        Body(openapi_examples=ANNOTATION_CREATE_EXAMPLES),
+    ],
     response: Response,
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
     context: Annotated[RequestContext, Depends(get_request_context)],
@@ -229,7 +236,10 @@ def get_annotation(
 )
 def patch_annotation(
     annotation_id: UUID,
-    patch: AnnotationPatchRequest,
+    patch: Annotated[
+        AnnotationPatchRequest,
+        Body(openapi_examples=ANNOTATION_PATCH_EXAMPLES),
+    ],
     response: Response,
     expected_version: Annotated[int, Depends(require_expected_version)],
     service: Annotated[AnnotationService, Depends(get_annotation_service)],

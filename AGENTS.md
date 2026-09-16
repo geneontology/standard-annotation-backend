@@ -114,6 +114,11 @@ understands Python but may not know the surrounding codebase.
 Keep API messages and other developer-facing text clear and stable. Tests should assert
 stable structure and meaning without unnecessarily depending on third-party wording.
 
+Keep `README.md` focused on current, supported behavior and workflows. Avoid describing
+missing capabilities, rejected alternatives, temporary omissions, or future milestones.
+Include future-state context only when it is necessary to understand or use current
+behavior.
+
 ## Testing and verification
 
 Add focused regression coverage for every behavior change.

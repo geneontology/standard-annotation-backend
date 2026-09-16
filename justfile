@@ -26,11 +26,15 @@ migrate:
 # Run tests in a temporary container.
 [positional-arguments]
 test *ARGS:
-    docker compose run --build --rm tools uv run --locked pytest "$@"
+    docker compose run --build --rm tools uv run --locked --no-sync pytest "$@"
 
 # Run formatting, lint, and type checks in a temporary container.
 check:
-    docker compose run --build --rm --no-deps tools sh -c "uv run --locked ruff format --check . && uv run --locked ruff check . && uv run --locked ty check src tests"
+    docker compose run --build --rm --no-deps tools sh -c "uv run --locked --no-sync ruff format --check . && uv run --locked --no-sync ruff check . && uv run --locked --no-sync ty check src tests"
+
+# Display the application version generated from the current Git state.
+version:
+    docker compose run --build --rm --no-deps tools python -c "from importlib.metadata import version; print(version('standard-annotation-backend'))"
 
 [private]
 [unix]

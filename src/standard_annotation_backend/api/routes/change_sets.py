@@ -3,11 +3,15 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Body, Depends, Response, status
 
 from standard_annotation_backend.api.dependencies import (
     get_change_set_service,
     get_request_context,
+)
+from standard_annotation_backend.api.examples import (
+    CHANGE_SET_ACCEPT_EXAMPLES,
+    CHANGE_SET_REJECT_EXAMPLES,
 )
 from standard_annotation_backend.api.models import (
     AcceptedChangeSetResource,
@@ -116,7 +120,10 @@ def accept_change_set(
     change_set_id: UUID,
     service: Annotated[ChangeSetService, Depends(get_change_set_service)],
     context: Annotated[RequestContext, Depends(get_request_context)],
-    body: ChangeSetAcceptRequest | None = None,
+    body: Annotated[
+        ChangeSetAcceptRequest | None,
+        Body(openapi_examples=CHANGE_SET_ACCEPT_EXAMPLES),
+    ] = None,
 ) -> AcceptedChangeSetResource:
     """Accept an eligible proposal and return the resulting annotation version.
 
@@ -138,7 +145,10 @@ def accept_change_set(
 )
 def reject_change_set(
     change_set_id: UUID,
-    body: ChangeSetRejectRequest,
+    body: Annotated[
+        ChangeSetRejectRequest,
+        Body(openapi_examples=CHANGE_SET_REJECT_EXAMPLES),
+    ],
     service: Annotated[ChangeSetService, Depends(get_change_set_service)],
     context: Annotated[RequestContext, Depends(get_request_context)],
 ) -> ChangeSetResource:

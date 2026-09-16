@@ -94,6 +94,24 @@ defaults. Set `SAB_LOG_FORMAT=console` for readable logs or
 
 Run `just` with no recipe to see all available project commands.
 
+## Versioning
+
+SAB uses Git tags as the source of package versions. Hatchling and `hatch-vcs`
+generate a [PEP 440](https://peps.python.org/pep-0440/) version when the package is
+built. FastAPI reads the installed distribution metadata, so the version shown in
+Swagger UI and `/openapi.json` is the version assigned to the running build.
+
+Version tags have the form `vMAJOR.MINOR.PATCH`, such as `v0.2.0`. A build made from
+that exact tag has version `MAJOR.MINOR.PATCH`. Later commits receive a development
+version containing their distance from the tag and Git revision. A dirty checkout also
+receives a date-qualified local version.
+
+Display the version generated for the current checkout:
+
+```bash
+just version
+```
+
 ## Architecture
 
 SAB separates HTTP handling, application operations, and database access into layers:

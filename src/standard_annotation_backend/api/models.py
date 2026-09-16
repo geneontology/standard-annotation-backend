@@ -4,8 +4,10 @@ from datetime import date, datetime
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
+from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 
+from standard_annotation_backend.api.examples import CHANGE_SET_PROPOSAL_EXAMPLES
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationExtension,
@@ -29,7 +31,10 @@ class ChangeSetCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     operation: Literal["create"]
-    owning_group_id: Annotated[str, Field(pattern=r".*\S.*")]
+    owning_group_id: Annotated[
+        str,
+        Field(pattern=r".*\S.*", examples=["GO_Central"]),
+    ]
     annotation: dict[str, object]
     reason: Annotated[str, Field(pattern=r".*\S.*")]
 
@@ -60,7 +65,10 @@ class ChangeSetDeleteRequest(BaseModel):
 
 type ChangeSetProposalRequest = Annotated[
     ChangeSetCreateRequest | ChangeSetUpdateRequest | ChangeSetDeleteRequest,
-    Field(discriminator="operation"),
+    Body(
+        discriminator="operation",
+        openapi_examples=CHANGE_SET_PROPOSAL_EXAMPLES,
+    ),
 ]
 
 
@@ -90,7 +98,10 @@ class AnnotationCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    owning_group_id: Annotated[str, Field(pattern=r".*\S.*")]
+    owning_group_id: Annotated[
+        str,
+        Field(pattern=r".*\S.*", examples=["GO_Central"]),
+    ]
     annotation: Annotation
 
 

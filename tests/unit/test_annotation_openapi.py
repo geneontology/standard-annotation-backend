@@ -9,6 +9,49 @@ def _openapi_statuses(*status_codes: int) -> set[str]:
     return {str(status_code) for status_code in status_codes}
 
 
+def test_annotation_writes_include_realistic_request_examples(
+    client: TestClient,
+) -> None:
+    """Create and patch operations show complete workflow-specific requests."""
+    paths = client.get("/openapi.json").json()["paths"]
+    create_content = paths["/annotations"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]
+    patch_content = paths["/annotations/{annotation_id}"]["patch"]["requestBody"][
+        "content"
+    ]["application/json"]
+
+    assert set(create_content["examples"]) == {"create-annotation"}
+    assert create_content["examples"]["create-annotation"]["value"] == {
+        "owning_group_id": "GO_Central",
+        "annotation": {
+            "db_object_id": "UniProtKB:P12345",
+            "relation": "RO:0002331",
+            "ontology_class_id": "GO:0008150",
+            "references": ["PMID:12345678"],
+            "evidence_type": "ECO:0000314",
+            "with_or_from": ["UniProtKB:Q9XYZ1"],
+            "interacting_taxon_id": ["NCBITaxon:9606"],
+            "annotation_date": "2026-09-15",
+            "assigned_by": "GO_Central",
+            "annotation_extensions": [
+                {
+                    "extension_relation": "BFO:0000050",
+                    "extension_term": "CL:0000000",
+                }
+            ],
+            "annotation_properties": {
+                "comment": ["Curated from the cited publication"]
+            },
+        },
+    }
+    assert set(patch_content["examples"]) == {"replace-annotation-fields"}
+    assert patch_content["examples"]["replace-annotation-fields"]["value"] == {
+        "references": ["PMID:12345678", "GO_REF:0000002"],
+        "annotation_date": "2026-09-15",
+    }
+
+
 def test_annotation_openapi_documents_routes_models_headers_and_filters(
     client: TestClient,
 ) -> None:
@@ -222,3 +265,15 @@ def test_annotation_openapi_documents_success_response_headers(
     for header in response["headers"].values():
         assert header["schema"]["type"] == "string"
         assert header["description"]
+
+
+def test_owning_group_has_reusable_field_example(client: TestClient) -> None:
+    """SAB-owned group metadata carries a reusable component-level example."""
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+
+    assert schemas["AnnotationCreateRequest"]["properties"]["owning_group_id"][
+        "examples"
+    ] == ["GO_Central"]
+    assert schemas["ChangeSetCreateRequest"]["properties"]["owning_group_id"][
+        "examples"
+    ] == ["GO_Central"]
