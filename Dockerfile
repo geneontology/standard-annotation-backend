@@ -24,6 +24,7 @@ USER root
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends git \
+    && git config --system --add safe.directory /source \
     && rm -rf /var/lib/apt/lists/*
 
 USER sab
