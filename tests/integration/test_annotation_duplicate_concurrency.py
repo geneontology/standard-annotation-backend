@@ -11,6 +11,11 @@ from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.auth import (
+    AuthorizationRole,
+    AuthorizationScope,
+    RequestContext,
+)
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationStatus,
@@ -23,10 +28,7 @@ from standard_annotation_backend.persistence.repositories import (
 from standard_annotation_backend.persistence.unit_of_work import (
     create_unit_of_work_factory,
 )
-from standard_annotation_backend.services.annotation_service import (
-    AnnotationService,
-    RequestContext,
-)
+from standard_annotation_backend.services.annotation_service import AnnotationService
 
 GUARD_SECONDS = 5
 OBSERVATION_SECONDS = 2
@@ -346,7 +348,14 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
             annotation_id,
             changes={"annotation_date": "2026-09-10"},
             expected_version=2,
-            context=RequestContext(actor_id="api-editor"),
+            context=RequestContext(
+                actor_id="api-editor",
+                token_id=UUID("00000000-0000-0000-0000-000000000501"),
+                token_name="Test editor",
+                role=AuthorizationRole.EDIT,
+                scope=AuthorizationScope.GLOBAL,
+                group_id=None,
+            ),
         )
 
     assert writer_calls == 1

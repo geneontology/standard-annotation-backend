@@ -1,8 +1,8 @@
 """Add reviewable annotation change sets.
 
-Revision ID: 20260915_0002
-Revises: 20260909_0001
-Create Date: 2026-09-15
+Revision ID: a43f54366f2c
+Revises: a770761c7107
+Create Date: 2026-09-16 14:00:16.041587
 """
 
 from collections.abc import Sequence
@@ -12,8 +12,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "20260915_0002"
-down_revision: str | None = "20260909_0001"
+revision: str = "a43f54366f2c"
+down_revision: str | None = "a770761c7107"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

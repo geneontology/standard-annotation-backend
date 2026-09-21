@@ -20,12 +20,18 @@ The supported development environment uses Docker Compose and `just`.
 - Run `just up` to start the web application, PostgreSQL, Redis, and the worker.
 - Run `just logs` to follow web application logs.
 - Run `just migrate` after adding or receiving a database migration.
+- Run `just sync-authorizations` to replace local authorization state from the current
+  go-site `users.yaml` at an immutable source commit.
 - Run `just test` to execute the complete test suite with PostgreSQL available.
 - Run `just check` to check formatting, lint, and static types.
 - Run `just down` to stop services without deleting local database data.
 
 Database migrations are always explicit. Do not make application startup alter the
 database schema.
+
+Generate new revisions with Alembic. Do not hand-author revision IDs or migration
+filenames; let Alembic generate the `revision` value and apply the `file_template`
+configured in `alembic.ini`.
 
 ## Application architecture
 
@@ -114,15 +120,22 @@ understands Python but may not know the surrounding codebase.
 Keep API messages and other developer-facing text clear and stable. Tests should assert
 stable structure and meaning without unnecessarily depending on third-party wording.
 
-Keep `README.md` focused on current, supported behavior and workflows. Avoid describing
-missing capabilities, rejected alternatives, temporary omissions, or future milestones.
-Include future-state context only when it is necessary to understand or use current
-behavior.
+Keep `README.md` focused primarily on setting up and using SAB as a developer. Document
+supported commands and day-to-day workflows, but do not duplicate implementation rules,
+data-model details, API error contracts, security rationale, or edge-case behavior there.
+Limit discussion of how SAB works to a brief `Architecture` section that links to
+`ARCHITECTURE.md`. Put detailed code behavior and guarantees in docstrings beside the
+relevant implementation. Avoid describing missing capabilities, rejected alternatives,
+temporary omissions, future milestones, or release operations in the README.
 
 ## Testing and verification
 
 Add focused regression coverage for every behavior change.
 
+- Test observable behavior and outcomes rather than merely introspecting implementation
+  structure or checking that a class, table, column, route, or symbol exists. Schema and
+  contract assertions should demonstrate a consumer-visible guarantee or an enforced
+  rule; existence alone is not meaningful regression coverage.
 - Use unit tests for domain rules, service orchestration, parsing, and error translation
   that can be checked without external services.
 - Use integration tests for SQL queries, database constraints, migrations, transaction

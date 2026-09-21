@@ -1,10 +1,17 @@
 """Provide annotation operations shared by HTTP and other entry points."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.audit import AuditAction
+from standard_annotation_backend.domain.auth import (
+    PermissionAction,
+    RequestContext,
+    authorize_role,
+    derive_creation_group,
+)
 from standard_annotation_backend.domain.validation import (
     ValidationIssue,
     validate_annotation,
@@ -15,23 +22,15 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationNotFoundError,
-    AnnotationSearchFilters,
     AuditRepository,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.audit_service import AuditAction, AuditService
-
-
-@dataclass(frozen=True, slots=True)
-class RequestContext:
-    """Identify the person or process making a request.
-
-    Attributes:
-        actor_id: Stable identifier recorded in version history and audit events.
-    """
-
-    actor_id: str
+from standard_annotation_backend.services.audit_service import AuditService
+from standard_annotation_backend.services.resource_authorization import (
+    authorize_annotation,
+    ownership_filters,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,15 +147,16 @@ class AnnotationService:
         self,
         *,
         payload: object,
-        owning_group_id: str,
         context: RequestContext,
+        owning_group_id: str | None = None,
     ) -> CurrentAnnotation:
         """Validate and create an annotation submitted through the API.
 
         Args:
             payload: Untrusted annotation data to validate.
-            owning_group_id: Identifier of the group responsible for the annotation.
-            context: Identity information to record in version history.
+            owning_group_id: Explicit ownership for global tokens; otherwise the
+                selected group is used and a supplied group must match it.
+            context: Authenticated identity and selected authorization.
 
         Returns:
             The newly created annotation at version 1.
@@ -164,13 +164,19 @@ class AnnotationService:
         Raises:
             InvalidAnnotationPayloadError: If the annotation data is invalid.
             DuplicateAnnotationError: If an equivalent active annotation exists.
+            PermissionDeniedError: If the role or requested creation group is denied.
         """
+        group = derive_creation_group(
+            context,
+            owning_group_id,
+            action=PermissionAction.ANNOTATION_CREATE,
+        )
         annotation = _validated_annotation(payload)
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.annotations.create_direct(
                 annotation=annotation,
                 actor_id=context.actor_id,
-                owning_group_id=owning_group_id,
+                owning_group_id=group,
             )
             result = _current_annotation(record)
             _record_annotation_audit(
@@ -182,22 +188,31 @@ class AnnotationService:
             unit_of_work.commit()
         return result
 
-    def get(self, annotation_id: UUID) -> CurrentAnnotation:
+    def get(self, annotation_id: UUID, *, context: RequestContext) -> CurrentAnnotation:
         """Return the latest state of an active annotation.
 
         Args:
             annotation_id: Identifier of the annotation to retrieve.
+            context: Authenticated identity and ownership scope for this read.
 
         Returns:
             The annotation's current active state.
 
         Raises:
-            AnnotationNotFoundError: If the annotation is missing or deleted.
+            AnnotationNotFoundError: If the annotation is missing, deleted, or
+                outside the selected ownership scope.
         """
+        authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.annotations.get(annotation_id)
             if record is None:
                 raise AnnotationNotFoundError(annotation_id)
+            authorize_annotation(
+                unit_of_work.annotations,
+                context,
+                PermissionAction.ANNOTATION_READ,
+                record,
+            )
             result = _current_annotation(record)
         return result
 
@@ -218,7 +233,7 @@ class AnnotationService:
             annotation_id: Identifier of the annotation to update.
             changes: Top-level annotation fields and their replacement values.
             expected_version: Version that must still be current when saving.
-            context: Identity information to record in version history.
+            context: Authenticated identity and selected authorization.
 
         Returns:
             The updated annotation with its new version number.
@@ -231,6 +246,7 @@ class AnnotationService:
             DuplicateAnnotationError: If the change creates a new duplicate.
             StaleAnnotationVersionError: If `expected_version` is no longer current.
         """
+        authorize_role(context, PermissionAction.ANNOTATION_EDIT)
         if not changes:
             raise EmptyAnnotationPatchError
 
@@ -238,6 +254,12 @@ class AnnotationService:
             current = unit_of_work.annotations.get(annotation_id)
             if current is None:
                 raise AnnotationNotFoundError(annotation_id)
+            authorize_annotation(
+                unit_of_work.annotations,
+                context,
+                PermissionAction.ANNOTATION_EDIT,
+                current,
+            )
             if current.current_version != expected_version:
                 raise StaleAnnotationVersionError(
                     annotation_id,
@@ -276,14 +298,24 @@ class AnnotationService:
         Args:
             annotation_id: Identifier of the annotation to delete.
             expected_version: Version that must still be current when deleting.
-            context: Identity information to record in version history.
+            context: Authenticated identity and selected authorization.
 
         Raises:
             AnnotationNotFoundError: If the annotation does not exist.
             AnnotationDeletedError: If the annotation has already been deleted.
             StaleAnnotationVersionError: If `expected_version` is no longer current.
         """
+        authorize_role(context, PermissionAction.ANNOTATION_DELETE)
         with self._unit_of_work_factory() as unit_of_work:
+            current = unit_of_work.annotations.get(annotation_id, include_deleted=True)
+            if current is None:
+                raise AnnotationNotFoundError(annotation_id)
+            authorize_annotation(
+                unit_of_work.annotations,
+                context,
+                PermissionAction.ANNOTATION_DELETE,
+                current,
+            )
             record = unit_of_work.annotations.soft_delete_direct(
                 annotation_id,
                 expected_version=expected_version,
@@ -300,6 +332,7 @@ class AnnotationService:
     def list(
         self,
         *,
+        context: RequestContext,
         db_object_id: str | None = None,
         negation: bool | None = None,
         relation: str | None = None,
@@ -319,6 +352,7 @@ class AnnotationService:
         supplied value. Results use a stable order so offset pagination is repeatable.
 
         Args:
+            context: Authenticated identity and ownership scope for the query.
             db_object_id: Database object identifier to match.
             negation: Negation value to match.
             relation: Relation identifier to match.
@@ -335,7 +369,9 @@ class AnnotationService:
         Returns:
             The requested annotations and pagination information.
         """
-        filters = AnnotationSearchFilters(
+        authorize_role(context, PermissionAction.ANNOTATION_READ)
+        filters = replace(
+            ownership_filters(context),
             db_object_id=db_object_id,
             negation=negation,
             relation=relation,
@@ -365,6 +401,7 @@ class AnnotationService:
         self,
         annotation_id: UUID,
         *,
+        context: RequestContext,
         limit: int = 50,
         offset: int = 0,
     ) -> ResultPage[AnnotationVersion]:
@@ -374,6 +411,7 @@ class AnnotationService:
 
         Args:
             annotation_id: Identifier of the annotation whose history is requested.
+            context: Authenticated identity and current annotation ownership scope.
             limit: Maximum number of versions to return.
             offset: Number of versions to skip.
 
@@ -383,12 +421,20 @@ class AnnotationService:
         Raises:
             AnnotationHistoryNotFoundError: If the annotation does not exist.
         """
+        authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            if not unit_of_work.annotations.annotation_exists(
-                annotation_id,
-                include_deleted=True,
-            ):
+            current = unit_of_work.annotations.get(annotation_id, include_deleted=True)
+            if current is None:
                 raise AnnotationHistoryNotFoundError(annotation_id)
+            try:
+                authorize_annotation(
+                    unit_of_work.annotations,
+                    context,
+                    PermissionAction.ANNOTATION_READ,
+                    current,
+                )
+            except AnnotationNotFoundError:
+                raise AnnotationHistoryNotFoundError(annotation_id) from None
             page = unit_of_work.annotations.list_versions_page(
                 annotation_id,
                 limit=limit,
@@ -406,12 +452,15 @@ class AnnotationService:
         self,
         annotation_id: UUID,
         version: int,
+        *,
+        context: RequestContext,
     ) -> AnnotationVersion:
         """Return one previously saved state of an annotation.
 
         Args:
             annotation_id: Identifier of the annotation to inspect.
             version: Positive version number to retrieve.
+            context: Authenticated identity and current annotation ownership scope.
 
         Returns:
             The annotation data and change information saved for that version.
@@ -419,12 +468,20 @@ class AnnotationService:
         Raises:
             AnnotationHistoryNotFoundError: If the annotation or version does not exist.
         """
+        authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            if not unit_of_work.annotations.annotation_exists(
-                annotation_id,
-                include_deleted=True,
-            ):
+            current = unit_of_work.annotations.get(annotation_id, include_deleted=True)
+            if current is None:
                 raise AnnotationHistoryNotFoundError(annotation_id)
+            try:
+                authorize_annotation(
+                    unit_of_work.annotations,
+                    context,
+                    PermissionAction.ANNOTATION_READ,
+                    current,
+                )
+            except AnnotationNotFoundError:
+                raise AnnotationHistoryNotFoundError(annotation_id) from None
             record = unit_of_work.annotations.get_version(annotation_id, version)
             if record is None:
                 raise AnnotationHistoryNotFoundError(annotation_id, version)
@@ -441,7 +498,7 @@ def _record_annotation_audit(
 ) -> None:
     AuditService(repository).record_annotation_mutation(
         action=action,
-        actor_id=context.actor_id,
+        context=context,
         annotation_id=annotation.annotation_id,
         annotation_version=annotation.version,
     )

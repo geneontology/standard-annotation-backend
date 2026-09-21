@@ -9,10 +9,10 @@ from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 from standard_annotation_backend.api.dependencies import (
     IF_MATCH_OPENAPI,
     get_annotation_service,
-    get_request_context,
+    get_authenticated_context,
     require_expected_version,
 )
-from standard_annotation_backend.api.errors import ApiError
+from standard_annotation_backend.api.errors import BEARER_ERROR_RESPONSES, ApiError
 from standard_annotation_backend.api.examples import (
     ANNOTATION_CREATE_EXAMPLES,
     ANNOTATION_PATCH_EXAMPLES,
@@ -24,15 +24,17 @@ from standard_annotation_backend.api.models import (
     AnnotationResource,
     ApiErrorResponse,
 )
-from standard_annotation_backend.services.annotation_service import (
-    AnnotationService,
-    RequestContext,
-)
+from standard_annotation_backend.domain.auth import RequestContext
+from standard_annotation_backend.services.annotation_service import AnnotationService
 
 router = APIRouter(
     prefix="/annotations",
     tags=["annotations"],
-    responses={status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse}},
+    dependencies=[Depends(get_authenticated_context)],
+    responses={
+        **BEARER_ERROR_RESPONSES,
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
+    },
 )
 
 _ETAG_RESPONSE_HEADER = {
@@ -92,6 +94,7 @@ def _reject_unknown_query_parameters(request: Request) -> None:
 )
 def list_annotations(
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
     db_object_id: Annotated[str | None, Query()] = None,
     negation: Annotated[bool | None, Query()] = None,
     relation: Annotated[str | None, Query()] = None,
@@ -112,6 +115,7 @@ def list_annotations(
 
     Args:
         service: Annotation operations for this request.
+        context: Authenticated identity and ownership scope for this query.
         db_object_id: Database object identifier to match.
         negation: Negation value to match.
         relation: Relation identifier to match.
@@ -130,6 +134,7 @@ def list_annotations(
     """
     return AnnotationPageResponse.from_service(
         service.list(
+            context=context,
             db_object_id=db_object_id,
             negation=negation,
             relation=relation,
@@ -170,7 +175,7 @@ def create_annotation(
     ],
     response: Response,
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
-    context: Annotated[RequestContext, Depends(get_request_context)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> AnnotationResource:
     """Create an annotation from data submitted directly through the API.
 
@@ -205,6 +210,7 @@ def get_annotation(
     annotation_id: UUID,
     response: Response,
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> AnnotationResource:
     """Return the latest state of an active annotation.
 
@@ -212,11 +218,12 @@ def get_annotation(
         annotation_id: Identifier of the annotation to retrieve.
         response: HTTP response whose `ETag` header is set to the current version.
         service: Annotation operations for this request.
+        context: Authenticated identity and ownership scope for this read.
 
     Returns:
         The annotation's current active state.
     """
-    result = service.get(annotation_id)
+    result = service.get(annotation_id, context=context)
     response.headers["ETag"] = f'"{result.version}"'
     return AnnotationResource.from_service(result)
 
@@ -243,7 +250,7 @@ def patch_annotation(
     response: Response,
     expected_version: Annotated[int, Depends(require_expected_version)],
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
-    context: Annotated[RequestContext, Depends(get_request_context)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> AnnotationResource:
     """Replace selected fields and save a new annotation version.
 
@@ -283,7 +290,7 @@ def delete_annotation(
     annotation_id: UUID,
     expected_version: Annotated[int, Depends(require_expected_version)],
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
-    context: Annotated[RequestContext, Depends(get_request_context)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> Response:
     """Mark an annotation as deleted while preserving its saved versions.
 

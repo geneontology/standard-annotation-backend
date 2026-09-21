@@ -2,12 +2,11 @@
 
 from enum import StrEnum
 from functools import lru_cache
-from typing import Annotated
 
-from pydantic import StringConstraints
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+from standard_annotation_backend.validation_types import NonBlankString
 
 SETTINGS_CONFIG = SettingsConfigDict(
     env_file=".env",
@@ -35,10 +34,13 @@ class LoggingSettings(BaseSettings):
 class Settings(LoggingSettings):
     """Runtime settings shared by the API and worker processes."""
 
-    database_url: NonEmptyString
-    redis_url: NonEmptyString
-    application_secret: NonEmptyString
-    environment: NonEmptyString
+    database_url: NonBlankString
+    redis_url: NonBlankString
+    application_secret: NonBlankString
+    environment: NonBlankString
+    github_oauth_client_id: str | None = None
+    github_oauth_client_secret: SecretStr | None = None
+    github_oauth_callback_url: str | None = None
 
 
 @lru_cache

@@ -1,6 +1,6 @@
 """Test annotation operations independently from HTTP and PostgreSQL."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from types import TracebackType
 from typing import cast
@@ -9,6 +9,13 @@ from uuid import UUID
 import pytest
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.audit import AuditAction, AuditResult
+from standard_annotation_backend.domain.auth import (
+    AuthorizationRole,
+    AuthorizationScope,
+    PermissionDeniedError,
+    RequestContext,
+)
 from standard_annotation_backend.persistence.repositories import (
     AnnotationNotFoundError,
     AnnotationSearchFilters,
@@ -20,14 +27,20 @@ from standard_annotation_backend.services.annotation_service import (
     AnnotationService,
     EmptyAnnotationPatchError,
     InvalidAnnotationPayloadError,
-    RequestContext,
 )
 
 FIXED_ID = UUID("00000000-0000-0000-0000-000000000301")
 FIXED_JOB_ID = UUID("00000000-0000-0000-0000-000000000399")
 CREATED_AT = datetime(2026, 9, 11, 10, 0, tzinfo=UTC)
 UPDATED_AT = datetime(2026, 9, 11, 10, 5, tzinfo=UTC)
-REQUEST_CONTEXT = RequestContext(actor_id="provisional-api-user")
+REQUEST_CONTEXT = RequestContext(
+    actor_id="provisional-api-user",
+    token_id=FIXED_ID,
+    token_name="Test token",
+    role=AuthorizationRole.ADMIN,
+    scope=AuthorizationScope.GLOBAL,
+    group_id=None,
+)
 
 
 def _valid_payload() -> dict[str, object]:
@@ -175,8 +188,10 @@ class FakeAnnotationRepository:
         include_deleted: bool = False,
     ) -> CurrentRecord | None:
         self.get_count += 1
+        self.last_include_deleted = include_deleted
         if (
-            self.current_record is None
+            not self.annotation_is_known
+            or self.current_record is None
             or self.current_record.annotation_id != annotation_id
         ):
             return None
@@ -267,9 +282,9 @@ class FakeAnnotationRepository:
 
 @dataclass(frozen=True, slots=True)
 class AuditCall:
-    action: str
+    action: AuditAction
     actor_id: str
-    result: str
+    result: AuditResult
     token_id: str | None
     token_name: str | None
     selected_role: str | None
@@ -292,9 +307,9 @@ class FakeAuditRepository:
     def record(
         self,
         *,
-        action: str,
+        action: AuditAction,
         actor_id: str,
-        result: str,
+        result: AuditResult,
         token_id: str | None = None,
         token_name: str | None = None,
         selected_role: str | None = None,
@@ -390,13 +405,13 @@ def test_create_validates_payload_commits_and_returns_a_domain_result(
     assert isinstance(service_harness.repository.last_annotation, Annotation)
     assert service_harness.unit_of_work.audit.calls == [
         AuditCall(
-            action="annotation.created",
+            action=AuditAction.ANNOTATION_CREATED,
             actor_id="provisional-api-user",
-            result="success",
-            token_id=None,
-            token_name=None,
-            selected_role=None,
-            selected_scope=None,
+            result=AuditResult.SUCCESS,
+            token_id=str(FIXED_ID),
+            token_name="Test token",
+            selected_role="admin",
+            selected_scope="global",
             selected_group_id=None,
             annotation_id=FIXED_ID,
             annotation_version=1,
@@ -427,7 +442,7 @@ def test_create_rejects_invalid_payload_without_persisting_or_committing(
 def test_get_returns_a_domain_result_without_committing(
     service_harness: ServiceHarness,
 ) -> None:
-    result = service_harness.service.get(FIXED_ID)
+    result = service_harness.service.get(FIXED_ID, context=REQUEST_CONTEXT)
 
     assert result.annotation_id == FIXED_ID
     assert result.version == 1
@@ -443,7 +458,7 @@ def test_get_raises_for_an_unavailable_current_annotation(
     service_harness.repository.current_record = None
 
     with pytest.raises(AnnotationNotFoundError):
-        service_harness.service.get(FIXED_ID)
+        service_harness.service.get(FIXED_ID, context=REQUEST_CONTEXT)
 
     assert service_harness.unit_of_work.commit_count == 0
 
@@ -465,13 +480,13 @@ def test_patch_replaces_a_supplied_list_and_keeps_omitted_fields(
     assert service_harness.repository.last_actor_id == "provisional-api-user"
     assert service_harness.unit_of_work.audit.calls == [
         AuditCall(
-            action="annotation.updated",
+            action=AuditAction.ANNOTATION_UPDATED,
             actor_id="provisional-api-user",
-            result="success",
-            token_id=None,
-            token_name=None,
-            selected_role=None,
-            selected_scope=None,
+            result=AuditResult.SUCCESS,
+            token_id=str(FIXED_ID),
+            token_name="Test token",
+            selected_role="admin",
+            selected_scope="global",
             selected_group_id=None,
             annotation_id=FIXED_ID,
             annotation_version=2,
@@ -549,13 +564,13 @@ def test_delete_commits_exactly_once_after_a_successful_soft_delete(
     assert service_harness.repository.last_actor_id == "provisional-api-user"
     assert service_harness.unit_of_work.audit.calls == [
         AuditCall(
-            action="annotation.deleted",
+            action=AuditAction.ANNOTATION_DELETED,
             actor_id="provisional-api-user",
-            result="success",
-            token_id=None,
-            token_name=None,
-            selected_role=None,
-            selected_scope=None,
+            result=AuditResult.SUCCESS,
+            token_id=str(FIXED_ID),
+            token_name="Test token",
+            selected_role="admin",
+            selected_scope="global",
             selected_group_id=None,
             annotation_id=FIXED_ID,
             annotation_version=2,
@@ -579,6 +594,7 @@ def test_list_maps_every_filter_and_preserves_page_metadata(
     )
 
     result = service_harness.service.list(
+        context=REQUEST_CONTEXT,
         db_object_id="UniProtKB:P12345",
         negation=False,
         relation="RO:0002331",
@@ -626,7 +642,9 @@ def test_list_versions_returns_deleted_history_without_committing(
         total=3,
     )
 
-    result = service_harness.service.list_versions(FIXED_ID, limit=2, offset=1)
+    result = service_harness.service.list_versions(
+        FIXED_ID, limit=2, offset=1, context=REQUEST_CONTEXT
+    )
 
     assert [(item.version, item.is_deleted) for item in result.items] == [
         (2, False),
@@ -646,7 +664,9 @@ def test_list_versions_raises_when_annotation_history_is_unknown(
     service_harness.repository.annotation_is_known = False
 
     with pytest.raises(AnnotationHistoryNotFoundError) as raised:
-        service_harness.service.list_versions(FIXED_ID, limit=50, offset=0)
+        service_harness.service.list_versions(
+            FIXED_ID, limit=50, offset=0, context=REQUEST_CONTEXT
+        )
 
     assert raised.value.annotation_id == FIXED_ID
     assert raised.value.version is None
@@ -658,7 +678,7 @@ def test_get_version_returns_a_deleted_snapshot_without_committing(
 ) -> None:
     service_harness.repository.versions[3] = _version_record(3, is_deleted=True)
 
-    result = service_harness.service.get_version(FIXED_ID, 3)
+    result = service_harness.service.get_version(FIXED_ID, 3, context=REQUEST_CONTEXT)
 
     assert result.annotation_id == FIXED_ID
     assert result.version == 3
@@ -674,15 +694,156 @@ def test_get_version_distinguishes_unknown_history_from_an_unknown_version(
     service_harness: ServiceHarness,
 ) -> None:
     with pytest.raises(AnnotationHistoryNotFoundError) as missing_version:
-        service_harness.service.get_version(FIXED_ID, 9)
+        service_harness.service.get_version(FIXED_ID, 9, context=REQUEST_CONTEXT)
 
     assert missing_version.value.annotation_id == FIXED_ID
     assert missing_version.value.version == 9
 
     service_harness.repository.annotation_is_known = False
     with pytest.raises(AnnotationHistoryNotFoundError) as missing_history:
-        service_harness.service.get_version(FIXED_ID, 1)
+        service_harness.service.get_version(FIXED_ID, 1, context=REQUEST_CONTEXT)
 
     assert missing_history.value.annotation_id == FIXED_ID
     assert missing_history.value.version is None
+    assert service_harness.unit_of_work.commit_count == 0
+
+
+@pytest.mark.parametrize("operation", ["create", "patch", "delete"])
+def test_read_role_denies_mutations_before_storage(
+    service_harness: ServiceHarness, operation: str
+) -> None:
+    """Read-only credentials cannot write, audit, or commit annotation changes."""
+    context = replace(REQUEST_CONTEXT, role=AuthorizationRole.READ)
+    with pytest.raises(PermissionDeniedError):
+        if operation == "create":
+            service_harness.service.create(
+                payload=_valid_payload(), owning_group_id="group-1", context=context
+            )
+        elif operation == "patch":
+            service_harness.service.patch(
+                FIXED_ID,
+                changes={"assigned_by": "new"},
+                expected_version=1,
+                context=context,
+            )
+        else:
+            service_harness.service.delete(
+                FIXED_ID, expected_version=1, context=context
+            )
+    assert service_harness.repository.get_count == 0
+    assert service_harness.repository.last_actor_id is None
+    assert service_harness.unit_of_work.audit.calls == []
+    assert service_harness.unit_of_work.commit_count == 0
+
+
+@pytest.mark.parametrize(
+    "scope,actor,group",
+    [
+        (AuthorizationScope.SELF, "someone-else", "group-1"),
+        (AuthorizationScope.SELF, "provisional-api-user", "another-group"),
+        (AuthorizationScope.GROUP, "provisional-api-user", "another-group"),
+    ],
+)
+@pytest.mark.parametrize(
+    "operation", ["get", "patch", "delete", "list_versions", "get_version"]
+)
+def test_out_of_scope_annotation_operations_hide_resource_and_never_mutate(
+    service_harness: ServiceHarness,
+    scope: AuthorizationScope,
+    actor: str,
+    group: str,
+    operation: str,
+) -> None:
+    """Ownership denial hides existing annotation data and stops all writes."""
+    context = replace(REQUEST_CONTEXT, scope=scope, actor_id=actor, group_id=group)
+    expected_error = (
+        AnnotationHistoryNotFoundError
+        if "version" in operation
+        else AnnotationNotFoundError
+    )
+    with pytest.raises(expected_error):
+        if operation == "get_version":
+            service_harness.service.get_version(FIXED_ID, 1, context=context)
+        elif operation == "patch":
+            service_harness.service.patch(
+                FIXED_ID,
+                changes={"assigned_by": "new"},
+                expected_version=1,
+                context=context,
+            )
+        elif operation == "delete":
+            service_harness.service.delete(
+                FIXED_ID, expected_version=1, context=context
+            )
+        else:
+            getattr(service_harness.service, operation)(FIXED_ID, context=context)
+    assert service_harness.repository.last_actor_id is None
+    assert service_harness.unit_of_work.audit.calls == []
+    assert service_harness.unit_of_work.commit_count == 0
+
+
+@pytest.mark.parametrize("scope", list(AuthorizationScope))
+def test_in_scope_reads_and_sql_filter_selection(
+    service_harness: ServiceHarness,
+    scope: AuthorizationScope,
+) -> None:
+    """List ownership filters reach the repository and own-resource reads succeed."""
+    context = replace(
+        REQUEST_CONTEXT,
+        scope=scope,
+        role=AuthorizationRole.READ,
+        group_id=None if scope is AuthorizationScope.GLOBAL else "group-1",
+    )
+    assert service_harness.service.get(FIXED_ID, context=context).version == 1
+    service_harness.service.list(context=context, limit=1, offset=3)
+    filters = service_harness.repository.last_filters
+    assert filters is not None
+    assert filters.owning_group_id == (
+        None if scope is AuthorizationScope.GLOBAL else "group-1"
+    )
+    assert filters.created_by == (
+        "provisional-api-user" if scope is AuthorizationScope.SELF else None
+    )
+    assert service_harness.repository.last_limit == 1
+    assert service_harness.repository.last_offset == 3
+
+
+@pytest.mark.parametrize("scope", [AuthorizationScope.SELF, AuthorizationScope.GROUP])
+def test_create_derives_selected_group_and_records_token_context(
+    service_harness: ServiceHarness,
+    scope: AuthorizationScope,
+) -> None:
+    """Restricted creation derives ownership and records the complete bearer selection."""
+    context = replace(REQUEST_CONTEXT, scope=scope, group_id="group-1")
+    result = service_harness.service.create(payload=_valid_payload(), context=context)
+    assert result.owning_group_id == "group-1"
+    assert service_harness.unit_of_work.audit.calls[0].selected_scope == scope.value
+    assert service_harness.unit_of_work.audit.calls[0].selected_group_id == "group-1"
+
+
+@pytest.mark.parametrize(
+    "scope,requested",
+    [
+        (AuthorizationScope.SELF, "other"),
+        (AuthorizationScope.GROUP, "other"),
+        (AuthorizationScope.GLOBAL, None),
+    ],
+)
+def test_create_rejects_missing_or_conflicting_ownership_without_writes(
+    service_harness: ServiceHarness,
+    scope: AuthorizationScope,
+    requested: str | None,
+) -> None:
+    """Global ownership is explicit and restricted ownership cannot be overridden."""
+    context = replace(
+        REQUEST_CONTEXT,
+        scope=scope,
+        group_id=None if scope is AuthorizationScope.GLOBAL else "group-1",
+    )
+    with pytest.raises(PermissionDeniedError):
+        service_harness.service.create(
+            payload=_valid_payload(), owning_group_id=requested, context=context
+        )
+    assert service_harness.repository.last_actor_id is None
+    assert service_harness.unit_of_work.audit.calls == []
     assert service_harness.unit_of_work.commit_count == 0

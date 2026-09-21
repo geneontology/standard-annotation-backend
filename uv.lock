@@ -1221,11 +1221,13 @@ dependencies = [
     { name = "celery" },
     { name = "fastapi" },
     { name = "go-standard-annotation-schema" },
+    { name = "httpx2" },
     { name = "jsonpatch" },
     { name = "linkml-runtime" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pyyaml" },
     { name = "redis" },
     { name = "rich" },
     { name = "sqlalchemy" },
@@ -1236,7 +1238,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "anyio" },
-    { name = "httpx2" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
@@ -1248,11 +1249,13 @@ requires-dist = [
     { name = "celery" },
     { name = "fastapi" },
     { name = "go-standard-annotation-schema", specifier = "==0.0.4" },
+    { name = "httpx2" },
     { name = "jsonpatch", specifier = ">=1.33" },
     { name = "linkml-runtime" },
     { name = "psycopg", extras = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "redis" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "sqlalchemy" },
@@ -1263,7 +1266,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "anyio", specifier = "<4.15" },
-    { name = "httpx2" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },

@@ -10,6 +10,7 @@ from standard_annotation_backend.persistence.repositories.annotations import (
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.repositories.audit import AuditRepository
+from standard_annotation_backend.persistence.repositories.auth import AuthRepository
 from standard_annotation_backend.persistence.repositories.change_sets import (
     ChangeSetNotFoundError,
     ChangeSetRepository,
@@ -29,6 +30,7 @@ __all__ = [
     "AnnotationRepository",
     "AnnotationSearchFilters",
     "AuditRepository",
+    "AuthRepository",
     "ChangeSetNotFoundError",
     "ChangeSetRepository",
     "CommentNotFoundError",

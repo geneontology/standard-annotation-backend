@@ -157,6 +157,18 @@ def add_uvicorn_access_fields(
         return event_dict
 
     client, method, target, version, status_code = record_args
+    # OAuth callback codes and state are credentials, including on failed requests.
+    # Sanitize before any fallback can format the original positional arguments.
+    if (
+        isinstance(target, str)
+        and target.partition("?")[0].rstrip("/") == "/auth/github/callback"
+    ):
+        target = target.partition("?")[0]
+        sanitized_args = (client, method, target, version, status_code)
+        if record.args:
+            record.args = sanitized_args
+        if "positional_args" in event_dict:
+            event_dict["positional_args"] = sanitized_args
     if not (
         isinstance(client, str)
         and isinstance(method, str)
@@ -278,7 +290,9 @@ def create_formatter(
         final_processors.append(structlog.processors.format_exc_info)
         renderer = structlog.processors.JSONRenderer()
     else:
-        renderer = structlog.dev.ConsoleRenderer()
+        renderer = structlog.dev.ConsoleRenderer(
+            exception_formatter=structlog.dev.RichTracebackFormatter(show_locals=False)
+        )
     final_processors.append(renderer)
 
     return structlog.stdlib.ProcessorFormatter(

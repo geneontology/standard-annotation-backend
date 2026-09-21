@@ -46,3 +46,18 @@ def test_redoc_is_not_exposed(client: TestClient) -> None:
     response = client.get("/redoc")
 
     assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_bearer_security_applies_only_to_data_operations(client: TestClient) -> None:
+    """Data routes advertise bearer authentication while public and cookie routes do not."""
+    schema = client.get("/openapi.json").json()
+    bearer = schema["components"]["securitySchemes"]["Bearer"]
+    assert bearer["type"] == "http"
+    assert bearer["scheme"] == "bearer"
+    assert "security" not in schema
+    for path, operations in schema["paths"].items():
+        for operation in operations.values():
+            if path.startswith(("/annotations", "/change-sets")):
+                assert operation["security"] == [{"Bearer": []}]
+            else:
+                assert {"Bearer": []} not in operation.get("security", [])

@@ -5,6 +5,18 @@ from fastapi import status
 from fastapi.testclient import TestClient
 
 
+def test_proposal_ownership_is_optional_and_documents_token_derivation(
+    client: TestClient,
+) -> None:
+    """Create proposals accept ownership derived from a selected restricted group."""
+    schema = client.get("/openapi.json").json()["components"]["schemas"][
+        "ChangeSetCreateRequest"
+    ]
+    assert "owning_group_id" not in schema["required"]
+    description = schema["properties"]["owning_group_id"]["description"]
+    assert "global" in description and "selected group" in description
+
+
 def test_proposal_route_includes_create_update_and_delete_examples(
     client: TestClient,
 ) -> None:
@@ -148,7 +160,16 @@ def test_change_set_routes_and_responses(
     schema = client.get("/openapi.json").json()
     assert set(schema["paths"][path]) == {method}
     responses = schema["paths"][path][method]["responses"]
+    errors = errors | {
+        status.HTTP_401_UNAUTHORIZED,
+        status.HTTP_403_FORBIDDEN,
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+    }
     assert set(responses) == {str(code) for code in {success, *errors}}
+    assert schema["paths"][path][method]["security"] == [{"Bearer": []}]
+    assert (
+        responses["401"]["headers"]["WWW-Authenticate"]["schema"]["const"] == "Bearer"
+    )
     assert responses[str(success)]["content"]["application/json"]["schema"] == {
         "$ref": f"#/components/schemas/{model}"
     }
@@ -178,7 +199,6 @@ def test_proposal_discriminator_and_raw_candidates(client: TestClient) -> None:
             assert set(model["required"]) == {
                 "operation",
                 "reason",
-                "owning_group_id",
                 "annotation",
             }
             assert model["properties"]["annotation"]["type"] == "object"

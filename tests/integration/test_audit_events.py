@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.persistence.models import (
     AnnotationDuplicateReferenceRecord,
     AnnotationMultivaluedFieldValueRecord,
@@ -56,9 +57,9 @@ def test_record_audit_event_persists_complete_context(
     with unit_of_work_factory() as unit_of_work:
         assert unit_of_work.audit.session is unit_of_work.annotations.session
         event = unit_of_work.audit.record(
-            action="annotation.created",
+            action=AuditAction.ANNOTATION_CREATED,
             actor_id="curator-1",
-            result="success",
+            result=AuditResult.SUCCESS,
             token_id="token-1",
             token_name="nightly-curation",
             selected_role="edit",
@@ -130,10 +131,13 @@ def test_direct_annotation_mutations_record_successful_audit_events(
     assert all(audit_event.actor_id == "api-test-user" for audit_event in events)
     assert all(audit_event.result == "success" for audit_event in events)
     assert all(audit_event.annotation_id == annotation_id for audit_event in events)
-    assert all(audit_event.token_id is None for audit_event in events)
-    assert all(audit_event.token_name is None for audit_event in events)
-    assert all(audit_event.selected_role is None for audit_event in events)
-    assert all(audit_event.selected_scope is None for audit_event in events)
+    assert all(
+        audit_event.token_id == "00000000-0000-0000-0000-000000000501"
+        for audit_event in events
+    )
+    assert all(audit_event.token_name == "Integration tests" for audit_event in events)
+    assert all(audit_event.selected_role == "admin" for audit_event in events)
+    assert all(audit_event.selected_scope == "global" for audit_event in events)
     assert all(audit_event.selected_group_id is None for audit_event in events)
     assert all(
         audit_event.details == {"change_source": "api"} for audit_event in events

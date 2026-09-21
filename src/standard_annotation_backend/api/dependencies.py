@@ -4,12 +4,17 @@ import re
 from typing import Annotated
 
 from fastapi import Depends, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from standard_annotation_backend.api.errors import ApiError
-from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.annotation_service import (
-    AnnotationService,
+from standard_annotation_backend.domain.auth import (
+    AuthenticationRequiredError,
     RequestContext,
+)
+from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.annotation_service import AnnotationService
+from standard_annotation_backend.services.authentication_service import (
+    AuthenticationService,
 )
 from standard_annotation_backend.services.change_set_service import ChangeSetService
 
@@ -94,15 +99,6 @@ def require_expected_version(request: Request) -> int:
     return parse_if_match(values[0] if values else None)
 
 
-def get_request_context() -> RequestContext:
-    """Return the temporary actor identity used until authentication is available.
-
-    Returns:
-        Request identity recorded in annotation version history.
-    """
-    return RequestContext(actor_id="provisional-api-user")
-
-
 def get_unit_of_work_factory(request: Request) -> UnitOfWorkFactory:
     """Return the callable that opens a database transaction for a request.
 
@@ -114,6 +110,42 @@ def get_unit_of_work_factory(request: Request) -> UnitOfWorkFactory:
     """
     factory: UnitOfWorkFactory = request.app.state.unit_of_work_factory
     return factory
+
+
+_bearer = HTTPBearer(
+    auto_error=False,
+    scheme_name="Bearer",
+    description="An opaque API token created through token management.",
+)
+
+
+def get_authenticated_context(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    unit_of_work_factory: Annotated[
+        UnitOfWorkFactory, Depends(get_unit_of_work_factory)
+    ],
+) -> RequestContext:
+    """Authenticate a bearer token and return its current request context.
+
+    Args:
+        request: Incoming request used to reject repeated authorization headers.
+        credentials: Bearer credential parsed by FastAPI, when supplied.
+        unit_of_work_factory: Callable that opens the authentication transaction.
+
+    Returns:
+        Authenticated user, token identity, and selected authorization.
+
+    Raises:
+        AuthenticationRequiredError: If exactly one bearer credential is not supplied
+            or the credential cannot authenticate.
+        CredentialPersistenceError: If credential lookup or recording use fails.
+    """
+    if credentials is None or len(request.headers.getlist("Authorization")) != 1:
+        raise AuthenticationRequiredError
+    return AuthenticationService(unit_of_work_factory).authenticate(
+        credentials.credentials
+    )
 
 
 def get_annotation_service(
@@ -139,5 +171,12 @@ def get_change_set_service(
         Depends(get_unit_of_work_factory),
     ],
 ) -> ChangeSetService:
-    """Create proposal and review operations using the request's transaction factory."""
+    """Create proposal and review operations for one request.
+
+    Args:
+        unit_of_work_factory: Callable that opens a database transaction.
+
+    Returns:
+        Service configured to run change-set operations.
+    """
     return ChangeSetService(unit_of_work_factory)

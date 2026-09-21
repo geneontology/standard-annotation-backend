@@ -6,13 +6,18 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from threading import Barrier, Event, Timer
 from time import monotonic
 from typing import Never
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.auth import (
+    AuthorizationRole,
+    AuthorizationScope,
+    RequestContext,
+)
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
 )
@@ -31,10 +36,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
     create_unit_of_work_factory,
 )
-from standard_annotation_backend.services.annotation_service import (
-    AnnotationService,
-    RequestContext,
-)
+from standard_annotation_backend.services.annotation_service import AnnotationService
 from standard_annotation_backend.services.change_set_service import (
     AcceptedChangeSet,
     ChangeSetService,
@@ -44,9 +46,30 @@ from standard_annotation_backend.services.change_set_service import (
 
 GUARD_SECONDS = 10
 OBSERVATION_SECONDS = 3
-PROPOSER = RequestContext(actor_id="proposer")
-FIRST_REVIEWER = RequestContext(actor_id="first-reviewer")
-SECOND_REVIEWER = RequestContext(actor_id="second-reviewer")
+PROPOSER = RequestContext(
+    actor_id="proposer",
+    token_id=uuid4(),
+    token_name="Test proposer",
+    role=AuthorizationRole.EDIT,
+    scope=AuthorizationScope.GLOBAL,
+    group_id=None,
+)
+FIRST_REVIEWER = RequestContext(
+    actor_id="first-reviewer",
+    token_id=uuid4(),
+    token_name="Test reviewer 1",
+    role=AuthorizationRole.ADMIN,
+    scope=AuthorizationScope.GLOBAL,
+    group_id=None,
+)
+SECOND_REVIEWER = RequestContext(
+    actor_id="second-reviewer",
+    token_id=uuid4(),
+    token_name="Test reviewer 2",
+    role=AuthorizationRole.ADMIN,
+    scope=AuthorizationScope.GLOBAL,
+    group_id=None,
+)
 Operation = Callable[[UnitOfWorkFactory], object]
 
 
@@ -579,7 +602,7 @@ def test_review_and_preview_wait_for_global_lock_before_locking_proposal(
             try:
                 if operation == "accept":
                     return service.accept(proposal_id, context=FIRST_REVIEWER)
-                return service.preview(proposal_id)
+                return service.preview(proposal_id, context=FIRST_REVIEWER)
             finally:
                 reviewer.rollback()
                 finished.set()
@@ -614,6 +637,8 @@ def test_review_and_preview_wait_for_global_lock_before_locking_proposal(
         finally:
             holder.rollback()
             _drain_workers(executor, futures, failures, stop_workers=stop_reviewer)
-    stored = ChangeSetService(unit_of_work_factory).get(proposal_id)
+    stored = ChangeSetService(unit_of_work_factory).get(
+        proposal_id, context=FIRST_REVIEWER
+    )
     assert stored.state == ("accepted" if operation == "accept" else "proposed")
     assert stored.preview is not None

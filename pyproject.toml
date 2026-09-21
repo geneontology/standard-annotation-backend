@@ -13,11 +13,13 @@ dependencies = [
     "celery",
     "fastapi",
     "go-standard-annotation-schema==0.0.4",
+    "httpx2",
     "jsonpatch>=1.33",
     "linkml-runtime",
     "psycopg[binary]",
     "pydantic",
     "pydantic-settings",
+    "pyyaml>=6.0.3",
     "redis",
     "rich>=15.0.0",
     "sqlalchemy",
@@ -28,7 +30,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "anyio<4.15",
-    "httpx2",
     "pytest",
     "ruff",
     "ty",

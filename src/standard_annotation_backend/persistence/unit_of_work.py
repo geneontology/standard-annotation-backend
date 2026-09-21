@@ -1,15 +1,21 @@
 """Group repository changes into one database transaction."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from types import TracebackType
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.persistence.repositories import (
     AnnotationCommentRepository,
     AnnotationRepository,
     AuditRepository,
+    AuthRepository,
     ChangeSetRepository,
+)
+from standard_annotation_backend.persistence.repositories.auth import (
+    CredentialPersistenceError,
 )
 
 SessionFactory = Callable[[], Session]
@@ -33,6 +39,7 @@ class SqlAlchemyUnitOfWork:
         self.annotations: AnnotationRepository
         self.comments: AnnotationCommentRepository
         self.audit: AuditRepository
+        self.auth: AuthRepository
         self.change_sets: ChangeSetRepository
 
     def __enter__(self) -> "SqlAlchemyUnitOfWork":
@@ -41,6 +48,7 @@ class SqlAlchemyUnitOfWork:
         self.annotations = AnnotationRepository(self._session)
         self.comments = AnnotationCommentRepository(self._session)
         self.audit = AuditRepository(self._session)
+        self.auth = AuthRepository(self._session)
         self.change_sets = ChangeSetRepository(self._session)
         return self
 
@@ -101,3 +109,30 @@ def create_unit_of_work_factory(
         return SqlAlchemyUnitOfWork(session_factory)
 
     return factory
+
+
+@contextmanager
+def credential_unit_of_work(
+    factory: UnitOfWorkFactory,
+) -> Iterator[SqlAlchemyUnitOfWork]:
+    """Protect a complete credential transaction from disclosing database details.
+
+    Lookup, flush, commit, and cleanup can each fail with database diagnostics
+    containing credential parameters or row values. Translate those failures
+    after the unit of work has performed its normal rollback and close behavior.
+    Services retain responsibility for explicitly committing successful work.
+
+    Args:
+        factory: Callable that opens the unit of work.
+
+    Yields:
+        Active unit of work for one credential operation.
+
+    Raises:
+        CredentialPersistenceError: If any SQLAlchemy operation or cleanup fails.
+    """
+    try:
+        with factory() as uow:
+            yield uow
+    except SQLAlchemyError:
+        raise CredentialPersistenceError from None

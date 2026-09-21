@@ -1,6 +1,6 @@
 """Tests that PostgreSQL rejects data which violates application rules."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,6 +16,275 @@ from standard_annotation_backend.persistence.models import (
     AnnotationVersionRecord,
     JobRecord,
 )
+
+
+def _auth_owner(database_engine: Engine) -> tuple[UUID, UUID, UUID]:
+    """Persist a user, group, and valid group-scoped assignment."""
+    user_id, group_id, assignment_id = uuid4(), uuid4(), uuid4()
+    with database_engine.begin() as connection:
+        connection.execute(
+            insert(models.SabUserRecord),
+            {"user_id": user_id, "github_login": "curator"},
+        )
+        connection.execute(
+            insert(models.SabGroupRecord), {"group_id": group_id, "group_key": "MGI"}
+        )
+        connection.execute(
+            insert(models.AuthorizationAssignmentRecord),
+            {
+                "assignment_id": assignment_id,
+                "user_id": user_id,
+                "role": "edit",
+                "scope": "group",
+                "group_id": group_id,
+            },
+        )
+    return user_id, group_id, assignment_id
+
+
+@pytest.mark.parametrize(
+    "role,scope,needs_group",
+    [
+        ("owner", "global", False),
+        ("read", "unknown", False),
+        ("read", "self", False),
+        ("edit", "group", False),
+        ("admin", "global", True),
+    ],
+)
+def test_authorization_constraints_reject_invalid_context(
+    database_engine: Engine,
+    role: str,
+    scope: str,
+    needs_group: bool,
+) -> None:
+    """The database enforces allowed roles and scope-specific group requirements."""
+    user_id, group_id, _ = _auth_owner(database_engine)
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(
+            insert(models.AuthorizationAssignmentRecord),
+            {
+                "user_id": user_id,
+                "role": role,
+                "scope": scope,
+                "group_id": group_id if needs_group else None,
+            },
+        )
+
+
+@pytest.mark.parametrize("login", ["curator", "CURATOR"])
+def test_github_login_is_unique_ignoring_case(
+    database_engine: Engine, login: str
+) -> None:
+    """GitHub's case-insensitive identity cannot represent two user owners."""
+    _auth_owner(database_engine)
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(models.SabUserRecord), {"github_login": login})
+
+
+@pytest.mark.parametrize(
+    "role,scope,group",
+    [
+        ("owner", "group", "MGI"),
+        ("read", "unknown", None),
+        ("read", "self", None),
+        ("edit", "group", None),
+        ("admin", "global", "MGI"),
+    ],
+)
+def test_token_snapshot_constraints_reject_invalid_selection(
+    database_engine: Engine,
+    role: str,
+    scope: str,
+    group: str | None,
+) -> None:
+    """Token selections retain valid roles and the group required by their scope."""
+    user_id, _, assignment_id = _auth_owner(database_engine)
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO api_token (user_id, assignment_id, name, digest, expires_at, selected_role, selected_scope, selected_group_id) VALUES (:user_id, :assignment_id, 'Client', :digest, :expiry, :role, :scope, :group)"
+            ),
+            {
+                "user_id": user_id,
+                "assignment_id": assignment_id,
+                "digest": "a" * 64,
+                "expiry": datetime.now(UTC) + timedelta(days=1),
+                "role": role,
+                "scope": scope,
+                "group": group,
+            },
+        )
+
+
+@pytest.mark.parametrize("scope", ["group", "global"])
+def test_active_authorization_contexts_are_unique(
+    database_engine: Engine, scope: str
+) -> None:
+    """Equivalent active grants cannot have distinct IDs, including groupless grants."""
+    user_id, group_id, _ = _auth_owner(database_engine)
+    values = {
+        "user_id": user_id,
+        "role": "read",
+        "scope": scope,
+        "group_id": group_id if scope == "group" else None,
+    }
+    with database_engine.begin() as connection:
+        connection.execute(insert(models.AuthorizationAssignmentRecord), values)
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(models.AuthorizationAssignmentRecord), values)
+    with database_engine.begin() as connection:
+        connection.execute(
+            insert(models.AuthorizationAssignmentRecord), values | {"is_active": False}
+        )
+
+
+@pytest.mark.parametrize("table", ["ApiTokenRecord", "TokenManagementSessionRecord"])
+@pytest.mark.parametrize("bad_value", [None, "short", "g" * 64, "A" * 64])
+def test_credential_digests_require_lowercase_sha256(
+    database_engine: Engine,
+    table: str,
+    bad_value: str | None,
+) -> None:
+    """Credentials persist only fixed-length lowercase SHA-256 digests."""
+    user_id, _, assignment_id = _auth_owner(database_engine)
+    values = {
+        "user_id": user_id,
+        "digest": bad_value,
+        "expires_at": datetime.now(UTC) + timedelta(days=1),
+    }
+    if table == "ApiTokenRecord":
+        values.update(
+            assignment_id=assignment_id,
+            name="Client",
+            selected_role="edit",
+            selected_scope="group",
+            selected_group_id="MGI",
+        )
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(getattr(models, table)), values)
+
+
+@pytest.mark.parametrize("table", ["ApiTokenRecord", "TokenManagementSessionRecord"])
+def test_credential_digest_is_unique(database_engine: Engine, table: str) -> None:
+    """A persisted digest identifies at most one credential of its kind."""
+    user_id, _, assignment_id = _auth_owner(database_engine)
+    values = {
+        "user_id": user_id,
+        "digest": "a" * 64,
+        "expires_at": datetime.now(UTC) + timedelta(days=1),
+    }
+    if table == "ApiTokenRecord":
+        values.update(
+            assignment_id=assignment_id,
+            name="Client",
+            selected_role="edit",
+            selected_scope="group",
+            selected_group_id="MGI",
+        )
+    with database_engine.begin() as connection:
+        connection.execute(insert(getattr(models, table)), values)
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(getattr(models, table)), values)
+
+
+@pytest.mark.parametrize("table", ["ApiTokenRecord", "TokenManagementSessionRecord"])
+@pytest.mark.parametrize("expires_at", [None, datetime(2000, 1, 1, tzinfo=UTC)])
+def test_credentials_require_expiration_after_creation(
+    database_engine: Engine,
+    table: str,
+    expires_at: datetime | None,
+) -> None:
+    """Persistent credentials always have an expiration later than creation."""
+    user_id, _, assignment_id = _auth_owner(database_engine)
+    values = {"user_id": user_id, "digest": "a" * 64, "expires_at": expires_at}
+    if table == "ApiTokenRecord":
+        values.update(
+            assignment_id=assignment_id,
+            name="Client",
+            selected_role="edit",
+            selected_scope="group",
+            selected_group_id="MGI",
+        )
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(getattr(models, table)), values)
+
+
+def test_token_assignment_must_belong_to_owner(database_engine: Engine) -> None:
+    """Even direct writes cannot bind a person's token to another person's grant."""
+    _, _, assignment_id = _auth_owner(database_engine)
+    other = uuid4()
+    with database_engine.begin() as connection:
+        connection.execute(
+            insert(models.SabUserRecord),
+            {"user_id": other, "github_login": "other"},
+        )
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(
+            insert(models.ApiTokenRecord),
+            {
+                "user_id": other,
+                "assignment_id": assignment_id,
+                "selected_role": "edit",
+                "selected_scope": "group",
+                "selected_group_id": "MGI",
+                "name": "Client",
+                "digest": "a" * 64,
+                "expires_at": datetime.now(UTC) + timedelta(days=1),
+            },
+        )
+
+
+def test_authorization_history_restricts_deletion_and_sessions_cascade(
+    database_engine: Engine,
+) -> None:
+    """Referenced users and assignments remain available while sessions follow their owner."""
+    user_id, group_id, assignment_id = _auth_owner(database_engine)
+    with database_engine.begin() as connection:
+        connection.execute(
+            insert(models.ApiTokenRecord),
+            {
+                "user_id": user_id,
+                "assignment_id": assignment_id,
+                "selected_role": "edit",
+                "selected_scope": "group",
+                "selected_group_id": "MGI",
+                "name": "Client",
+                "digest": "a" * 64,
+                "expires_at": datetime.now(UTC) + timedelta(days=1),
+            },
+        )
+    for table, column, identity in [
+        ("sab_user", "user_id", user_id),
+        ("sab_group", "group_id", group_id),
+        ("authorization_assignment", "assignment_id", assignment_id),
+    ]:
+        with pytest.raises(IntegrityError), database_engine.begin() as connection:
+            connection.execute(
+                text(f"DELETE FROM {table} WHERE {column} = :identity"),
+                {"identity": identity},
+            )
+    with database_engine.begin() as connection:
+        other = uuid4()
+        connection.execute(
+            insert(models.SabUserRecord),
+            {"user_id": other, "github_login": "other"},
+        )
+        connection.execute(
+            insert(models.TokenManagementSessionRecord),
+            {
+                "user_id": other,
+                "digest": "b" * 64,
+                "expires_at": datetime.now(UTC) + timedelta(minutes=15),
+            },
+        )
+        connection.execute(
+            text("DELETE FROM sab_user WHERE user_id = :identity"), {"identity": other}
+        )
+        assert (
+            connection.scalar(text("SELECT count(*) FROM token_management_session"))
+            == 0
+        )
 
 
 def _annotation_values(annotation_id: UUID) -> dict[str, object]:

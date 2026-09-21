@@ -10,7 +10,6 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from standard_annotation_backend.api.dependencies import (
-    get_request_context,
     parse_if_match,
     require_expected_version,
 )
@@ -24,6 +23,7 @@ from standard_annotation_backend.api.models import (
     AnnotationVersionResource,
 )
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.auth import PermissionDeniedError
 from standard_annotation_backend.persistence.repositories import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
@@ -243,13 +243,14 @@ def test_resource_models_convert_all_service_results() -> None:
     assert version_page.model_dump()["limit"] == 50
 
 
-def test_default_request_context_model_uses_the_provisional_actor() -> None:
-    assert get_request_context().actor_id == "provisional-api-user"
-
-
 @pytest.mark.parametrize(
     ("error", "expected_status", "expected_code"),
     [
+        (
+            PermissionDeniedError(),
+            status.HTTP_403_FORBIDDEN,
+            "permission_denied",
+        ),
         (
             AnnotationNotFoundError(ANNOTATION_ID),
             status.HTTP_404_NOT_FOUND,

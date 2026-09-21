@@ -3,6 +3,7 @@
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -15,8 +16,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
 from standard_annotation_backend.api.dependencies import (
-    get_request_context,
+    get_authenticated_context,
     get_unit_of_work_factory,
+)
+from standard_annotation_backend.domain.auth import (
+    AuthorizationRole,
+    AuthorizationScope,
+    RequestContext,
 )
 from standard_annotation_backend.main import app
 from standard_annotation_backend.persistence.database import (
@@ -28,9 +34,14 @@ from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
     create_unit_of_work_factory,
 )
-from standard_annotation_backend.services.annotation_service import RequestContext
 
 APPLICATION_TABLES = (
+    "api_token",
+    "token_management_session",
+    "authorization_assignment",
+    "authorization_sync",
+    "sab_user",
+    "sab_group",
     "change_set",
     "annotation_comment",
     "annotation_duplicate_reference",
@@ -161,8 +172,13 @@ def integration_api_client(
     """
     previous_overrides = app.dependency_overrides.copy()
     app.dependency_overrides[get_unit_of_work_factory] = lambda: unit_of_work_factory
-    app.dependency_overrides[get_request_context] = lambda: RequestContext(
-        actor_id="api-test-user"
+    app.dependency_overrides[get_authenticated_context] = lambda: RequestContext(
+        actor_id="api-test-user",
+        token_id=UUID("00000000-0000-0000-0000-000000000501"),
+        token_name="Integration tests",
+        role=AuthorizationRole.ADMIN,
+        scope=AuthorizationScope.GLOBAL,
+        group_id=None,
     )
     try:
         with TestClient(app) as test_client:
