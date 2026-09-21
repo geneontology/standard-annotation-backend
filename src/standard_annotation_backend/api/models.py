@@ -1,4 +1,11 @@
-"""Define typed request and response models for SAB's HTTP APIs."""
+"""Define typed request and response models for SAB's HTTP APIs.
+
+Response constructors for annotation and comment resources intentionally enumerate
+fields even when service results currently have the same shape. This makes the
+public API boundary explicit, prevents newly added service fields from being exposed
+automatically, and allows service and API models to evolve independently. Their page
+constructors likewise convert each item through its resource constructor.
+"""
 
 from datetime import date, datetime
 from typing import Annotated, Literal, Self
@@ -16,14 +23,16 @@ from standard_annotation_backend.domain.annotations import (
 from standard_annotation_backend.services.annotation_service import (
     AnnotationVersion,
     CurrentAnnotation,
-    ResultPage,
 )
 from standard_annotation_backend.services.change_set_service import (
     AcceptedChangeSet,
     ChangeSet,
     ChangeSetPreview,
 )
+from standard_annotation_backend.services.comment_service import AnnotationComment
+from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.token_service import TokenCreateInput
+from standard_annotation_backend.validation_types import NonBlankString
 
 
 class ChangeSetCreateRequest(BaseModel):
@@ -33,15 +42,14 @@ class ChangeSetCreateRequest(BaseModel):
 
     operation: Literal["create"]
     owning_group_id: Annotated[
-        str | None,
+        NonBlankString | None,
         Field(
-            pattern=r".*\S.*",
             examples=["GO_Central"],
             description="Uses the token's selected group when omitted; global tokens must supply an explicit group.",
         ),
     ] = None
     annotation: dict[str, object]
-    reason: Annotated[str, Field(pattern=r".*\S.*")]
+    reason: NonBlankString
 
 
 class ChangeSetUpdateRequest(BaseModel):
@@ -54,7 +62,7 @@ class ChangeSetUpdateRequest(BaseModel):
     base_version: Annotated[int, Field(gt=0, strict=True)]
     patch_format: Literal["application/json-patch+json"] = "application/json-patch+json"
     patch: Annotated[list[object], Field(min_length=1)]
-    reason: Annotated[str, Field(pattern=r".*\S.*")]
+    reason: NonBlankString
 
 
 class ChangeSetDeleteRequest(BaseModel):
@@ -65,7 +73,7 @@ class ChangeSetDeleteRequest(BaseModel):
     operation: Literal["delete"]
     annotation_id: UUID
     base_version: Annotated[int, Field(gt=0, strict=True)]
-    reason: Annotated[str, Field(pattern=r".*\S.*")]
+    reason: NonBlankString
 
 
 type ChangeSetProposalRequest = Annotated[
@@ -90,7 +98,7 @@ class ChangeSetRejectRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    review_reason: Annotated[str, Field(pattern=r".*\S.*")]
+    review_reason: NonBlankString
 
 
 class AnnotationCreateRequest(BaseModel):
@@ -104,9 +112,8 @@ class AnnotationCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     owning_group_id: Annotated[
-        str | None,
+        NonBlankString | None,
         Field(
-            pattern=r".*\S.*",
             examples=["GO_Central"],
             description="Uses the token's selected group when omitted; global tokens must supply an explicit group.",
         ),
@@ -176,6 +183,74 @@ class AnnotationResource(BaseModel):
             created_at=result.created_at,
             updated_at=result.updated_at,
             annotation=result.annotation,
+        )
+
+
+class AnnotationCommentRequest(BaseModel):
+    """Supply the text for a new or edited annotation comment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    body: NonBlankString
+
+
+class AnnotationCommentResource(BaseModel):
+    """Represent a comment attached to a specific annotation version."""
+
+    comment_id: UUID
+    annotation_id: UUID
+    annotation_version: int
+    body: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_service(cls, result: AnnotationComment) -> Self:
+        """Build a response from a comment service result.
+
+        Args:
+            result: Comment returned by the application service.
+
+        Returns:
+            Serialized public comment resource.
+        """
+        return cls(
+            comment_id=result.comment_id,
+            annotation_id=result.annotation_id,
+            annotation_version=result.annotation_version,
+            body=result.body,
+            created_by=result.created_by,
+            created_at=result.created_at,
+            updated_at=result.updated_at,
+        )
+
+
+class AnnotationCommentPageResponse(BaseModel):
+    """Represent one requested page of visible annotation comments."""
+
+    items: list[AnnotationCommentResource]
+    total: int
+    limit: int
+    offset: int
+
+    @classmethod
+    def from_service(cls, result: ResultPage[AnnotationComment]) -> Self:
+        """Build a response page from a comment service result.
+
+        Args:
+            result: Page returned by the application service.
+
+        Returns:
+            Serialized public comment page.
+        """
+        return cls(
+            items=[
+                AnnotationCommentResource.from_service(item) for item in result.items
+            ],
+            total=result.total,
+            limit=result.limit,
+            offset=result.offset,
         )
 
 

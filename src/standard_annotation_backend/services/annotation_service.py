@@ -27,6 +27,7 @@ from standard_annotation_backend.persistence.repositories import (
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.audit_service import AuditService
+from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.resource_authorization import (
     authorize_annotation,
     ownership_filters,
@@ -79,23 +80,6 @@ class AnnotationVersion:
     change_source: str
     created_at: datetime
     annotation: Annotation
-
-
-@dataclass(frozen=True, slots=True)
-class ResultPage[T]:
-    """Hold one requested portion of a larger result set.
-
-    Attributes:
-        items: Results included in this page.
-        total: Number of results across all pages.
-        limit: Maximum number of results requested for this page.
-        offset: Number of matching results skipped before this page.
-    """
-
-    items: tuple[T, ...]
-    total: int
-    limit: int
-    offset: int
 
 
 class InvalidAnnotationPayloadError(ValueError):

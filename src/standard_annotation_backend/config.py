@@ -6,7 +6,7 @@ from functools import lru_cache
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from standard_annotation_backend.validation_types import NonBlankString
+from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 SETTINGS_CONFIG = SettingsConfigDict(
     env_file=".env",
@@ -34,10 +34,10 @@ class LoggingSettings(BaseSettings):
 class Settings(LoggingSettings):
     """Runtime settings shared by the API and worker processes."""
 
-    database_url: NonBlankString
-    redis_url: NonBlankString
-    application_secret: NonBlankString
-    environment: NonBlankString
+    database_url: TrimmedNonBlankString
+    redis_url: TrimmedNonBlankString
+    application_secret: TrimmedNonBlankString
+    environment: TrimmedNonBlankString
     github_oauth_client_id: str | None = None
     github_oauth_client_secret: SecretStr | None = None
     github_oauth_callback_url: str | None = None

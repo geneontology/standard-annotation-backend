@@ -28,6 +28,7 @@ class PermissionAction(StrEnum):
     ANNOTATION_CREATE = "annotation.create"
     ANNOTATION_EDIT = "annotation.edit"
     ANNOTATION_DELETE = "annotation.delete"
+    ANNOTATION_COMMENT_ADMIN = "annotation_comment.admin"
     CHANGE_SET_READ = "change_set.read"
     CHANGE_SET_PROPOSE = "change_set.propose"
     CHANGE_SET_REVIEW = "change_set.review"
