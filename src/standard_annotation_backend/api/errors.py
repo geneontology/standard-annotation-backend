@@ -1,6 +1,7 @@
 """Convert expected application failures into consistent HTTP responses."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -15,12 +16,23 @@ from standard_annotation_backend.api.models import (
     StaleAnnotationVersionDetails,
     StaleChangeSetDetails,
 )
+from standard_annotation_backend.auth.github_oauth import (
+    OAuthConfigurationError,
+    OAuthUpstreamError,
+)
+from standard_annotation_backend.domain.auth import (
+    AuthenticationRequiredError,
+    PermissionDeniedError,
+)
 from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.repositories import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
     DuplicateAnnotationError,
     StaleAnnotationVersionError,
+)
+from standard_annotation_backend.persistence.repositories.auth import (
+    CredentialPersistenceError,
 )
 from standard_annotation_backend.services.annotation_service import (
     AnnotationHistoryNotFoundError,
@@ -33,6 +45,50 @@ from standard_annotation_backend.services.change_set_service import (
     InvalidChangeSetError,
     StaleChangeSetError,
 )
+from standard_annotation_backend.services.token_service import (
+    InvalidTokenError,
+    ManagementSessionRequiredError,
+    OAuthCallbackError,
+    OAuthIdentityNotAllowedError,
+    OAuthStateError,
+    TokenContextNotFoundError,
+    TokenNotFoundError,
+)
+
+BEARER_ERROR_RESPONSES = {
+    status.HTTP_401_UNAUTHORIZED: {
+        "model": ApiErrorResponse,
+        "description": "Authentication required",
+        "headers": {
+            "WWW-Authenticate": {"schema": {"type": "string", "const": "Bearer"}}
+        },
+    },
+    status.HTTP_403_FORBIDDEN: {
+        "model": ApiErrorResponse,
+        "description": "Permission denied",
+    },
+    status.HTTP_503_SERVICE_UNAVAILABLE: {
+        "model": ApiErrorResponse,
+        "description": "Credential storage is unavailable",
+    },
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _FixedErrorResponse:
+    """Describe an error response determined entirely by exception type.
+
+    Attributes:
+        status_code: HTTP status code for the response.
+        code: Stable machine-readable error identifier.
+        message: Plain-language explanation safe for clients.
+        headers: Additional response headers as name-value pairs.
+    """
+
+    status_code: int
+    code: str
+    message: str
+    headers: tuple[tuple[str, str], ...] = ()
 
 
 class ApiError(RuntimeError):
@@ -82,6 +138,15 @@ def _validation_details(
     return [ApiValidationIssue.model_validate(error) for error in errors]
 
 
+def oauth_callback_failure_response() -> JSONResponse:
+    """Return a safe envelope for an unexpected failure during OAuth completion."""
+    return _error_response(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        code="oauth_callback_failed",
+        message="GitHub authentication could not be completed",
+    )
+
+
 def install_exception_handlers(app: FastAPI) -> None:
     """Register the application's consistent error-response handlers.
 
@@ -89,25 +154,114 @@ def install_exception_handlers(app: FastAPI) -> None:
         app: FastAPI application that should use the handlers.
     """
 
-    @app.exception_handler(ChangeSetNotFoundError)
-    def handle_change_set_not_found(
-        _request: Request, _error: ChangeSetNotFoundError
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="change_set_not_found",
-            message="Change set was not found",
-        )
+    # "Fixed" means the response depends only on the exception type; no value
+    # carried by the exception instance affects its status, body, or headers.
+    fixed_errors: dict[type[Exception], _FixedErrorResponse] = {
+        AuthenticationRequiredError: _FixedErrorResponse(
+            status.HTTP_401_UNAUTHORIZED,
+            "authentication_required",
+            "Authentication required",
+            (("WWW-Authenticate", "Bearer"),),
+        ),
+        PermissionDeniedError: _FixedErrorResponse(
+            status.HTTP_403_FORBIDDEN,
+            "permission_denied",
+            "Permission denied",
+        ),
+        CredentialPersistenceError: _FixedErrorResponse(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "credential_storage_unavailable",
+            "Credential storage is unavailable",
+        ),
+        OAuthConfigurationError: _FixedErrorResponse(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "oauth_not_configured",
+            "GitHub authentication is not configured",
+        ),
+        OAuthUpstreamError: _FixedErrorResponse(
+            status.HTTP_502_BAD_GATEWAY,
+            "github_oauth_unavailable",
+            "GitHub authentication is unavailable",
+        ),
+        OAuthStateError: _FixedErrorResponse(
+            status.HTTP_400_BAD_REQUEST,
+            "invalid_oauth_state",
+            "OAuth state is invalid",
+        ),
+        OAuthCallbackError: _FixedErrorResponse(
+            status.HTTP_400_BAD_REQUEST,
+            "invalid_oauth_callback",
+            "GitHub authentication was not completed",
+        ),
+        OAuthIdentityNotAllowedError: _FixedErrorResponse(
+            status.HTTP_403_FORBIDDEN,
+            "github_identity_not_allowed",
+            "GitHub identity is not authorized for token management",
+        ),
+        ManagementSessionRequiredError: _FixedErrorResponse(
+            status.HTTP_401_UNAUTHORIZED,
+            "management_session_required",
+            "A current token-management session is required",
+        ),
+        TokenContextNotFoundError: _FixedErrorResponse(
+            status.HTTP_404_NOT_FOUND,
+            "token_context_not_found",
+            "Token authorization context was not found",
+        ),
+        TokenNotFoundError: _FixedErrorResponse(
+            status.HTTP_404_NOT_FOUND,
+            "token_not_found",
+            "Token was not found",
+        ),
+        InvalidTokenError: _FixedErrorResponse(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "invalid_token",
+            "Token name, context, or expiration is invalid",
+        ),
+        ChangeSetNotFoundError: _FixedErrorResponse(
+            status.HTTP_404_NOT_FOUND,
+            "change_set_not_found",
+            "Change set was not found",
+        ),
+        ChangeSetStateError: _FixedErrorResponse(
+            status.HTTP_409_CONFLICT,
+            "change_set_not_proposed",
+            "Change set is no longer proposed",
+        ),
+        EmptyAnnotationPatchError: _FixedErrorResponse(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "empty_annotation_patch",
+            "Annotation patch must include at least one field",
+        ),
+        AnnotationNotFoundError: _FixedErrorResponse(
+            status.HTTP_404_NOT_FOUND,
+            "annotation_not_found",
+            "Annotation was not found",
+        ),
+        AnnotationDeletedError: _FixedErrorResponse(
+            status.HTTP_404_NOT_FOUND,
+            "annotation_not_found",
+            "Annotation was not found",
+        ),
+    }
 
-    @app.exception_handler(ChangeSetStateError)
-    def handle_change_set_state(
-        _request: Request, _error: ChangeSetStateError
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=status.HTTP_409_CONFLICT,
-            code="change_set_not_proposed",
-            message="Change set is no longer proposed",
-        )
+    def fixed_error_handler(
+        error_response: _FixedErrorResponse,
+    ) -> Callable[[Request, Exception], JSONResponse]:
+        def handle_fixed_error(_request: Request, _error: Exception) -> JSONResponse:
+            response = _error_response(
+                status_code=error_response.status_code,
+                code=error_response.code,
+                message=error_response.message,
+            )
+            for name, value in error_response.headers:
+                response.headers[name] = value
+            return response
+
+        return handle_fixed_error
+
+    for error_type, error_response in fixed_errors.items():
+        app.add_exception_handler(error_type, fixed_error_handler(error_response))
 
     @app.exception_handler(InvalidChangeSetError)
     def handle_invalid_change_set(
@@ -175,29 +329,6 @@ def install_exception_handlers(app: FastAPI) -> None:
             code="invalid_annotation",
             message="Annotation payload is invalid",
             details=_validation_details(error.errors),
-        )
-
-    @app.exception_handler(EmptyAnnotationPatchError)
-    def handle_empty_annotation_patch(
-        _request: Request,
-        _error: EmptyAnnotationPatchError,
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code="empty_annotation_patch",
-            message="Annotation patch must include at least one field",
-        )
-
-    @app.exception_handler(AnnotationNotFoundError)
-    @app.exception_handler(AnnotationDeletedError)
-    def handle_annotation_not_found(
-        _request: Request,
-        _error: AnnotationNotFoundError | AnnotationDeletedError,
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="annotation_not_found",
-            message="Annotation was not found",
         )
 
     @app.exception_handler(AnnotationHistoryNotFoundError)

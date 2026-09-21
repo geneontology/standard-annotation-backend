@@ -6,9 +6,10 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Depends, Response, status
 
 from standard_annotation_backend.api.dependencies import (
+    get_authenticated_context,
     get_change_set_service,
-    get_request_context,
 )
+from standard_annotation_backend.api.errors import BEARER_ERROR_RESPONSES
 from standard_annotation_backend.api.examples import (
     CHANGE_SET_ACCEPT_EXAMPLES,
     CHANGE_SET_REJECT_EXAMPLES,
@@ -24,13 +25,15 @@ from standard_annotation_backend.api.models import (
     ChangeSetResource,
     ChangeSetUpdateRequest,
 )
-from standard_annotation_backend.services.annotation_service import RequestContext
+from standard_annotation_backend.domain.auth import RequestContext
 from standard_annotation_backend.services.change_set_service import ChangeSetService
 
 router = APIRouter(
     prefix="/change-sets",
     tags=["change-sets"],
+    dependencies=[Depends(get_authenticated_context)],
     responses={
+        **BEARER_ERROR_RESPONSES,
         status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
     },
@@ -56,7 +59,7 @@ def propose_change_set(
     body: ChangeSetProposalRequest,
     response: Response,
     service: Annotated[ChangeSetService, Depends(get_change_set_service)],
-    context: Annotated[RequestContext, Depends(get_request_context)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> ChangeSetResource:
     """Store a proposal without changing an annotation.
 
@@ -93,9 +96,10 @@ def propose_change_set(
 def get_change_set(
     change_set_id: UUID,
     service: Annotated[ChangeSetService, Depends(get_change_set_service)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> ChangeSetResource:
     """Read a proposal, its stored preview, and any completed review."""
-    return ChangeSetResource.from_service(service.get(change_set_id))
+    return ChangeSetResource.from_service(service.get(change_set_id, context=context))
 
 
 @router.post(
@@ -106,9 +110,12 @@ def get_change_set(
 def preview_change_set(
     change_set_id: UUID,
     service: Annotated[ChangeSetService, Depends(get_change_set_service)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> ChangeSetPreviewResource:
     """Validate and store an advisory preview without accepting the proposal."""
-    return ChangeSetPreviewResource.from_service(service.preview(change_set_id))
+    return ChangeSetPreviewResource.from_service(
+        service.preview(change_set_id, context=context)
+    )
 
 
 @router.post(
@@ -119,7 +126,7 @@ def preview_change_set(
 def accept_change_set(
     change_set_id: UUID,
     service: Annotated[ChangeSetService, Depends(get_change_set_service)],
-    context: Annotated[RequestContext, Depends(get_request_context)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
     body: Annotated[
         ChangeSetAcceptRequest | None,
         Body(openapi_examples=CHANGE_SET_ACCEPT_EXAMPLES),
@@ -150,7 +157,7 @@ def reject_change_set(
         Body(openapi_examples=CHANGE_SET_REJECT_EXAMPLES),
     ],
     service: Annotated[ChangeSetService, Depends(get_change_set_service)],
-    context: Annotated[RequestContext, Depends(get_request_context)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> ChangeSetResource:
     """Reject a proposal with a required explanation from the reviewer."""
     return ChangeSetResource.from_service(

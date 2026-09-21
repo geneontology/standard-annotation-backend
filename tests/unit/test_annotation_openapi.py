@@ -5,6 +5,18 @@ from fastapi import status
 from fastapi.testclient import TestClient
 
 
+def test_creation_ownership_is_optional_and_documents_token_derivation(
+    client: TestClient,
+) -> None:
+    """The create body permits token-derived groups and explains explicit global ownership."""
+    schema = client.get("/openapi.json").json()["components"]["schemas"][
+        "AnnotationCreateRequest"
+    ]
+    assert "owning_group_id" not in schema["required"]
+    description = schema["properties"]["owning_group_id"]["description"]
+    assert "global" in description and "selected group" in description
+
+
 def _openapi_statuses(*status_codes: int) -> set[str]:
     return {str(status_code) for status_code in status_codes}
 
@@ -204,7 +216,11 @@ def test_annotation_openapi_documents_applicable_typed_errors(
     """OpenAPI lists only applicable statuses using the standard error model."""
     schema = client.get("/openapi.json").json()
     responses = schema["paths"][path][method]["responses"]
-    assert set(responses) == expected_statuses
+    assert set(responses) == expected_statuses | {"401", "403", "503"}
+    assert schema["paths"][path][method]["security"] == [{"Bearer": []}]
+    assert (
+        responses["401"]["headers"]["WWW-Authenticate"]["schema"]["const"] == "Bearer"
+    )
     assert "ApiErrorResponse" in schema["components"]["schemas"]
     for status_code, response in responses.items():
         if int(status_code) >= status.HTTP_400_BAD_REQUEST:

@@ -23,6 +23,10 @@ logs:
 migrate:
     docker compose run --build --rm web alembic upgrade head
 
+# Synchronize local authorization state from the current go-site users.yaml.
+sync-authorizations:
+    docker compose run --build --rm web python -m standard_annotation_backend.cli.authorization_sync
+
 # Run tests in a temporary container.
 [positional-arguments]
 test *ARGS:

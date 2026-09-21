@@ -1,4 +1,4 @@
-"""Typed request and response models for annotation and change-set APIs."""
+"""Define typed request and response models for SAB's HTTP APIs."""
 
 from datetime import date, datetime
 from typing import Annotated, Literal, Self
@@ -23,6 +23,7 @@ from standard_annotation_backend.services.change_set_service import (
     ChangeSet,
     ChangeSetPreview,
 )
+from standard_annotation_backend.services.token_service import TokenCreateInput
 
 
 class ChangeSetCreateRequest(BaseModel):
@@ -32,9 +33,13 @@ class ChangeSetCreateRequest(BaseModel):
 
     operation: Literal["create"]
     owning_group_id: Annotated[
-        str,
-        Field(pattern=r".*\S.*", examples=["GO_Central"]),
-    ]
+        str | None,
+        Field(
+            pattern=r".*\S.*",
+            examples=["GO_Central"],
+            description="Uses the token's selected group when omitted; global tokens must supply an explicit group.",
+        ),
+    ] = None
     annotation: dict[str, object]
     reason: Annotated[str, Field(pattern=r".*\S.*")]
 
@@ -99,9 +104,13 @@ class AnnotationCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     owning_group_id: Annotated[
-        str,
-        Field(pattern=r".*\S.*", examples=["GO_Central"]),
-    ]
+        str | None,
+        Field(
+            pattern=r".*\S.*",
+            examples=["GO_Central"],
+            description="Uses the token's selected group when omitted; global tokens must supply an explicit group.",
+        ),
+    ] = None
     annotation: Annotation
 
 
@@ -380,3 +389,57 @@ class ApiErrorResponse(BaseModel):
     """Wrap every expected API error in a consistent top-level object."""
 
     error: ApiErrorBody
+
+
+class TokenCreateRequest(TokenCreateInput):
+    """Name a token, choose an owned context, and provide its expiration timestamp."""
+
+
+class TokenContextResource(BaseModel):
+    """Expose one current context available to the authenticated user."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    assignment_id: UUID
+    role: Literal["read", "edit", "admin"]
+    scope: Literal["self", "group", "global"]
+    group_id: str | None
+
+
+class TokenContextListResponse(BaseModel):
+    """List the user's active authorization choices."""
+
+    items: list[TokenContextResource]
+
+
+class TokenResource(BaseModel):
+    """Expose token metadata without a bearer secret or lookup digest."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    token_id: UUID
+    user_id: UUID
+    assignment_id: UUID
+    name: str
+    created_at: datetime
+    expires_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+    role: Literal["read", "edit", "admin"]
+    scope: Literal["self", "group", "global"]
+    group_id: str | None
+    assignment_is_active: bool
+
+
+class TokenCreatedResponse(TokenResource):
+    """Return a bearer secret exactly once, when its token is created."""
+
+    token: str = Field(
+        repr=False, description="Copy this secret now; it cannot be retrieved again."
+    )
+
+
+class TokenListResponse(BaseModel):
+    """List the user's token history with safe metadata only."""
+
+    items: list[TokenResource]

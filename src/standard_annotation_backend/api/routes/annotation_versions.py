@@ -5,18 +5,25 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Query, status
 
-from standard_annotation_backend.api.dependencies import get_annotation_service
+from standard_annotation_backend.api.dependencies import (
+    get_annotation_service,
+    get_authenticated_context,
+)
+from standard_annotation_backend.api.errors import BEARER_ERROR_RESPONSES
 from standard_annotation_backend.api.models import (
     AnnotationVersionPageResponse,
     AnnotationVersionResource,
     ApiErrorResponse,
 )
+from standard_annotation_backend.domain.auth import RequestContext
 from standard_annotation_backend.services.annotation_service import AnnotationService
 
 router = APIRouter(
     prefix="/annotations",
     tags=["annotations"],
+    dependencies=[Depends(get_authenticated_context)],
     responses={
+        **BEARER_ERROR_RESPONSES,
         status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
     },
@@ -30,6 +37,7 @@ router = APIRouter(
 def list_annotation_versions(
     annotation_id: UUID,
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> AnnotationVersionPageResponse:
@@ -38,6 +46,7 @@ def list_annotation_versions(
     Args:
         annotation_id: Identifier of the annotation whose history is requested.
         service: Annotation operations for this request.
+        context: Authenticated identity and current annotation ownership scope.
         limit: Maximum number of versions to return.
         offset: Number of versions to skip.
 
@@ -45,7 +54,9 @@ def list_annotation_versions(
         The requested versions and pagination information.
     """
     return AnnotationVersionPageResponse.from_service(
-        service.list_versions(annotation_id, limit=limit, offset=offset)
+        service.list_versions(
+            annotation_id, limit=limit, offset=offset, context=context
+        )
     )
 
 
@@ -57,6 +68,7 @@ def get_annotation_version(
     annotation_id: UUID,
     version: Annotated[int, Path(ge=1)],
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> AnnotationVersionResource:
     """Return the annotation data and change information saved in one version.
 
@@ -64,10 +76,11 @@ def get_annotation_version(
         annotation_id: Identifier of the annotation to inspect.
         version: Positive version number to retrieve.
         service: Annotation operations for this request.
+        context: Authenticated identity and current annotation ownership scope.
 
     Returns:
         The requested saved annotation version.
     """
     return AnnotationVersionResource.from_service(
-        service.get_version(annotation_id, version)
+        service.get_version(annotation_id, version, context=context)
     )

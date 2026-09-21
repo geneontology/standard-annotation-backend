@@ -1,8 +1,8 @@
 """Initial persistence schema.
 
-Revision ID: 20260909_0001
+Revision ID: a770761c7107
 Revises:
-Create Date: 2026-09-09
+Create Date: 2026-09-16 14:00:01.729272
 """
 
 from collections.abc import Sequence
@@ -12,7 +12,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "20260909_0001"
+revision: str = "a770761c7107"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

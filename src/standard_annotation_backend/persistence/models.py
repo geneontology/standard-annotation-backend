@@ -16,12 +16,13 @@ from sqlalchemy import (
     MetaData,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from standard_annotation_backend.domain.annotations import new_annotation_id
 
@@ -69,6 +70,192 @@ class Base(DeclarativeBase):
     """Base class shared by all application database records."""
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+class SabUserRecord(Base):
+    """Store a synchronized user identity without OAuth credentials."""
+
+    __tablename__ = "sab_user"
+    __table_args__ = (
+        Index(
+            "uq_sab_user_github_login", func.lower(text("github_login")), unique=True
+        ),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    github_login: Mapped[str] = mapped_column(Text)
+    display_name: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class SabGroupRecord(Base):
+    """Associate a local group identity with its external annotation ownership key."""
+
+    __tablename__ = "sab_group"
+
+    group_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    group_key: Mapped[str] = mapped_column(Text, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AuthorizationAssignmentRecord(Base):
+    """Retain grants after removal so issued tokens cannot acquire a later regrant."""
+
+    __tablename__ = "authorization_assignment"
+    __table_args__ = (
+        CheckConstraint("role IN ('read', 'edit', 'admin')", name="role_allowed"),
+        CheckConstraint(
+            "(scope IN ('self', 'group') AND group_id IS NOT NULL) OR (scope = 'global' AND group_id IS NULL)",
+            name="scope_group_consistent",
+        ),
+        UniqueConstraint("assignment_id", "user_id"),
+        Index(
+            "uq_authorization_assignment_active_context",
+            "user_id",
+            "role",
+            "scope",
+            "group_id",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+            postgresql_where=text("is_active"),
+        ),
+        Index("ix_authorization_assignment_group_id", "group_id"),
+    )
+
+    assignment_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("sab_user.user_id", ondelete="RESTRICT"),
+    )
+    role: Mapped[str] = mapped_column(String(16))
+    scope: Mapped[str] = mapped_column(String(16))
+    group_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("sab_group.group_id", ondelete="RESTRICT"),
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    owner: Mapped[SabUserRecord] = relationship()
+    group: Mapped[SabGroupRecord | None] = relationship()
+
+
+class ApiTokenRecord(Base):
+    """Store a digest and the immutable authorization selected for a user token."""
+
+    __tablename__ = "api_token"
+    __table_args__ = (
+        CheckConstraint("digest ~ '^[0-9a-f]{64}$'", name="digest_format"),
+        CheckConstraint("expires_at > created_at", name="expiration_after_creation"),
+        CheckConstraint(
+            "selected_role IN ('read', 'edit', 'admin')", name="selected_role_allowed"
+        ),
+        CheckConstraint(
+            "(selected_scope IN ('self', 'group') AND selected_group_id IS NOT NULL) OR (selected_scope = 'global' AND selected_group_id IS NULL)",
+            name="selected_scope_group_consistent",
+        ),
+        ForeignKeyConstraint(
+            ["assignment_id", "user_id"],
+            [
+                "authorization_assignment.assignment_id",
+                "authorization_assignment.user_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_api_token_assignment_owner",
+        ),
+        Index("ix_api_token_user_id", "user_id"),
+        Index("ix_api_token_assignment_id", "assignment_id"),
+    )
+
+    token_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("sab_user.user_id", ondelete="RESTRICT"),
+    )
+    assignment_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    selected_role: Mapped[str] = mapped_column(String(16))
+    selected_scope: Mapped[str] = mapped_column(String(16))
+    selected_group_id: Mapped[str | None] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(Text)
+    digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    owner: Mapped[SabUserRecord] = relationship(viewonly=True)
+    assignment: Mapped[AuthorizationAssignmentRecord] = relationship(viewonly=True)
+
+
+class TokenManagementSessionRecord(Base):
+    """Store a short-lived digest for a user's token-management session."""
+
+    __tablename__ = "token_management_session"
+    __table_args__ = (
+        CheckConstraint("digest ~ '^[0-9a-f]{64}$'", name="digest_format"),
+        CheckConstraint("expires_at > created_at", name="expiration_after_creation"),
+        Index("ix_token_management_session_user_id", "user_id"),
+    )
+
+    session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), ForeignKey("sab_user.user_id", ondelete="CASCADE")
+    )
+    digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    owner: Mapped[SabUserRecord] = relationship()
+
+
+class AuthorizationSyncRecord(Base):
+    """Record successful synchronization provenance and a credential-free summary."""
+
+    __tablename__ = "authorization_sync"
+
+    sync_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    source_repository: Mapped[str] = mapped_column(Text)
+    source_commit_sha: Mapped[str] = mapped_column(Text)
+    synchronized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    summary: Mapped[dict[str, object]] = mapped_column(JSONB)
 
 
 class JobRecord(Base):

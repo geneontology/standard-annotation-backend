@@ -2,14 +2,77 @@
 
 import json
 import logging
+import secrets
 import subprocess
 import sys
+
+import pytest
 
 from standard_annotation_backend.config import LogFormat
 from standard_annotation_backend.logging import (
     add_uvicorn_access_fields,
     create_formatter,
 )
+
+
+@pytest.mark.parametrize("log_format", [LogFormat.CONSOLE, LogFormat.JSON])
+def test_exception_logs_do_not_display_credential_locals(log_format: LogFormat) -> None:
+    """Error tracebacks retain failure context without displaying local credentials."""
+    raw_credential = secrets.token_urlsafe(32)
+
+    def fail_with_credential_in_scope(credential: str) -> None:
+        raise RuntimeError("safe failure message")
+
+    try:
+        fail_with_credential_in_scope(raw_credential)
+    except RuntimeError:
+        record = logging.LogRecord(
+            "sab.test",
+            logging.ERROR,
+            __file__,
+            1,
+            "operation_failed",
+            (),
+            sys.exc_info(),
+        )
+        rendered = create_formatter(log_format).format(record)
+    assert raw_credential not in rendered
+    assert "RuntimeError" in rendered
+    assert "safe failure message" in rendered
+
+
+@pytest.mark.parametrize("path", ["/auth/github/callback", "/auth/github/callback/"])
+def test_oauth_callback_access_logs_exclude_sensitive_query_values(path: str) -> None:
+    """Callback access logs preserve HTTP structure without OAuth codes or state."""
+    for client in ("127.0.0.1:12345", "unknown"):
+        record = logging.LogRecord(
+            "uvicorn.access",
+            logging.INFO,
+            __file__,
+            1,
+            '%s - "%s %s HTTP/%s" %d',
+            (
+                client,
+                "GET",
+                path + "?code=secret-code&state=secret-state",
+                "1.1",
+                204,
+            ),
+            None,
+        )
+        output = create_formatter(LogFormat.JSON).format(record)
+        assert "secret-code" not in output and "secret-state" not in output
+        transformed = json.loads(output)
+        if client != "unknown":
+            assert transformed["http"] == {
+                "method": "GET",
+                "target": path,
+                "version": "1.1",
+                "status_code": 204,
+            }
+            assert transformed["event"] == "http_request"
+        else:
+            assert path + " HTTP/1.1" in transformed["event"]
 
 
 def test_json_pipeline_formats_structured_and_standard_library_records() -> None:

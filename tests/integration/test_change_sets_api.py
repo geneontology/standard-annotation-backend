@@ -487,7 +487,6 @@ def test_review_body_validation(
     [
         ("create", "operation"),
         ("create", "annotation"),
-        ("create", "owning_group_id"),
         ("create", "reason"),
         ("update", "annotation_id"),
         ("update", "base_version"),

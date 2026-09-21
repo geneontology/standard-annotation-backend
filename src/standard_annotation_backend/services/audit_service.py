@@ -1,39 +1,11 @@
 """Record application audit events through the current transaction."""
 
-from enum import StrEnum
 from uuid import UUID
 
+from standard_annotation_backend.domain.audit import AuditAction, AuditResult
+from standard_annotation_backend.domain.auth import RequestContext
 from standard_annotation_backend.persistence.models import AuditEventRecord
 from standard_annotation_backend.persistence.repositories import AuditRepository
-
-
-class AuditAction(StrEnum):
-    """Stable names for operations recorded in the audit trail."""
-
-    ANNOTATION_CREATED = "annotation.created"
-    ANNOTATION_UPDATED = "annotation.updated"
-    ANNOTATION_DELETED = "annotation.deleted"
-    ANNOTATION_COMMENT_CREATED = "annotation_comment.created"
-    ANNOTATION_COMMENT_UPDATED = "annotation_comment.updated"
-    ANNOTATION_COMMENT_DELETED = "annotation_comment.deleted"
-    TOKEN_CREATED = "token.created"
-    TOKEN_REVOKED = "token.revoked"
-    AUTHORIZATION_SYNCHRONIZED = "authorization.synchronized"
-    CHANGE_SET_PROPOSED = "change_set.proposed"
-    CHANGE_SET_ACCEPTED = "change_set.accepted"
-    CHANGE_SET_REJECTED = "change_set.rejected"
-    CHANGE_SET_MARKED_STALE = "change_set.marked_stale"
-    IMPORT_COMPLETED = "import.completed"
-    EXPORT_COMPLETED = "export.completed"
-    ONTOLOGY_LOADED = "ontology.loaded"
-    ADMINISTRATIVE_CHANGE = "administrative.change"
-
-
-class AuditResult(StrEnum):
-    """Outcomes stored on audit events."""
-
-    SUCCESS = "success"
-    FAILURE = "failure"
 
 
 class AuditService:
@@ -50,7 +22,7 @@ class AuditService:
         self,
         *,
         action: AuditAction,
-        actor_id: str,
+        context: RequestContext,
         change_set_id: UUID,
         operation: str,
         annotation_id: UUID | None = None,
@@ -59,12 +31,30 @@ class AuditService:
         """Link a successful proposal or review to its resulting annotation version.
 
         The repository shares the workflow transaction so audit and state changes
-        commit together. Token context remains null until authentication is added.
+        commit together. The immutable request context identifies the user and
+        the bearer authorization used for this operation.
+
+        Args:
+            action: Change-set operation that completed.
+            context: Authenticated user, token identity, and selected authorization.
+            change_set_id: Change set affected by the operation.
+            operation: Kind of annotation change proposed by the change set.
+            annotation_id: Annotation affected or observed, when applicable.
+            annotation_version: Annotation version produced or observed, when
+                applicable.
+
+        Returns:
+            The audit event added to the current transaction.
         """
         return self._repository.record(
-            action=action.value,
-            actor_id=actor_id,
-            result=AuditResult.SUCCESS.value,
+            action=action,
+            actor_id=context.actor_id,
+            token_id=str(context.token_id),
+            token_name=context.token_name,
+            selected_role=context.role.value,
+            selected_scope=context.scope.value,
+            selected_group_id=context.group_id,
+            result=AuditResult.SUCCESS,
             change_set_id=change_set_id,
             annotation_id=annotation_id,
             annotation_version=annotation_version,
@@ -75,7 +65,7 @@ class AuditService:
         self,
         *,
         action: AuditAction,
-        actor_id: str,
+        context: RequestContext,
         annotation_id: UUID,
         annotation_version: int,
     ) -> AuditEventRecord:
@@ -83,7 +73,7 @@ class AuditService:
 
         Args:
             action: Direct annotation operation that completed.
-            actor_id: Identifier for the person or process responsible.
+            context: Authenticated actor, token identity, and selected authorization.
             annotation_id: Annotation changed by the operation.
             annotation_version: Version produced by the operation.
 
@@ -91,9 +81,14 @@ class AuditService:
             The audit event added to the current transaction.
         """
         return self._repository.record(
-            action=action.value,
-            actor_id=actor_id,
-            result=AuditResult.SUCCESS.value,
+            action=action,
+            actor_id=context.actor_id,
+            token_id=str(context.token_id),
+            token_name=context.token_name,
+            selected_role=context.role.value,
+            selected_scope=context.scope.value,
+            selected_group_id=context.group_id,
+            result=AuditResult.SUCCESS,
             annotation_id=annotation_id,
             annotation_version=annotation_version,
             details={"change_source": "api"},

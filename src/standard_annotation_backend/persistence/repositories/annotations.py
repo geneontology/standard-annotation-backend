@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from uuid import UUID
 
-from sqlalchemy import delete, exists, select
+from sqlalchemy import ColumnElement, delete, exists, select
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotations import Annotation, new_annotation_id
@@ -49,6 +49,8 @@ class AnnotationSearchFilters:
         references: Reference identifiers that must all be present.
         with_or_from: Supporting identifiers that must all be present.
         interacting_taxon_id: Taxon identifiers that must all be present.
+        owning_group_id: Group whose annotations may be returned.
+        created_by: Actor recorded in the immutable first annotation version.
     """
 
     db_object_id: str | None = None
@@ -61,6 +63,8 @@ class AnnotationSearchFilters:
     references: tuple[str, ...] = ()
     with_or_from: tuple[str, ...] = ()
     interacting_taxon_id: tuple[str, ...] = ()
+    owning_group_id: str | None = None
+    created_by: str | None = None
 
 
 class AnnotationNotFoundError(LookupError):
@@ -106,6 +110,35 @@ class StaleAnnotationVersionError(RuntimeError):
 
 class InvalidAnnotationProvenanceError(ValueError):
     """Raised when annotation provenance is unsupported or inconsistent."""
+
+
+def _ownership_conditions(
+    owning_group_id: str | None, created_by: str | None
+) -> tuple[ColumnElement[bool], ...]:
+    """Build ownership conditions to apply before pagination.
+
+    Args:
+        owning_group_id: Group key that returned annotations must match.
+        created_by: Actor on the first annotation version that results must match.
+
+    Returns:
+        SQL conditions for the requested ownership restrictions.
+    """
+    conditions: list[ColumnElement[bool]] = []
+    if owning_group_id is not None:
+        conditions.append(AnnotationRecord.owning_group_id == owning_group_id)
+    if created_by is not None:
+        conditions.append(
+            exists(
+                select(1).where(
+                    AnnotationVersionRecord.annotation_id
+                    == AnnotationRecord.annotation_id,
+                    AnnotationVersionRecord.version == 1,
+                    AnnotationVersionRecord.actor_id == created_by,
+                )
+            )
+        )
+    return tuple(conditions)
 
 
 class AnnotationRepository:
@@ -258,7 +291,8 @@ class AnnotationRepository:
             The selected annotation records and total number of matches.
         """
         statement = select(AnnotationRecord).where(
-            AnnotationRecord.status == AnnotationStatus.ACTIVE.value
+            AnnotationRecord.status == AnnotationStatus.ACTIVE.value,
+            *_ownership_conditions(filters.owning_group_id, filters.created_by),
         )
         for field_name in (
             "db_object_id",

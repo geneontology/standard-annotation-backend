@@ -4,6 +4,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.persistence.models import AuditEventRecord
 
 
@@ -23,9 +24,9 @@ class AuditRepository:
     def record(
         self,
         *,
-        action: str,
+        action: AuditAction,
         actor_id: str,
-        result: str,
+        result: AuditResult,
         token_id: str | None = None,
         token_name: str | None = None,
         selected_role: str | None = None,
@@ -44,8 +45,9 @@ class AuditRepository:
             action: Stable name of the operation.
             actor_id: Identifier for the person or process responsible.
             result: Outcome of the operation.
-            token_id: Token used for the operation, when available.
-            token_name: Human-readable token name, when available.
+            token_id: Identifier of the bearer token used for the operation, when
+                available. A token being created or revoked is a separate target.
+            token_name: Human-readable name of the bearer token used, when available.
             selected_role: Role selected by the token, when available.
             selected_scope: Scope selected by the token, when available.
             selected_group_id: Group selected by the token, when available.
@@ -60,9 +62,9 @@ class AuditRepository:
             The newly stored audit event.
         """
         event = AuditEventRecord(
-            action=action,
+            action=action.value,
             actor_id=actor_id,
-            result=result,
+            result=result.value,
             token_id=token_id,
             token_name=token_name,
             selected_role=selected_role,

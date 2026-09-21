@@ -9,11 +9,20 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    StringConstraints,
     ValidationError,
 )
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.audit import AuditAction
+from standard_annotation_backend.domain.auth import (
+    PermissionAction,
+    PermissionDeniedError,
+    RequestContext,
+    ResourceOwnership,
+    authorize,
+    authorize_role,
+    derive_creation_group,
+)
 from standard_annotation_backend.domain.change_sets import (
     InvalidChangeSetPatchError,
     apply_annotation_patch,
@@ -46,8 +55,11 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
-from standard_annotation_backend.services.annotation_service import RequestContext
-from standard_annotation_backend.services.audit_service import AuditAction, AuditService
+from standard_annotation_backend.services.audit_service import AuditService
+from standard_annotation_backend.services.resource_authorization import (
+    authorize_annotation,
+)
+from standard_annotation_backend.validation_types import NonBlankString
 
 
 class ChangeSetPreview(BaseModel):
@@ -155,15 +167,12 @@ class StaleChangeSetError(RuntimeError):
         )
 
 
-NonblankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-
-
 class _CreateProposal(BaseModel):
     model_config = ConfigDict(strict=True, allow_inf_nan=False)
 
     payload: dict[str, JsonValue]
-    owning_group_id: NonblankText
-    reason: NonblankText
+    owning_group_id: NonBlankString
+    reason: NonBlankString
 
 
 class _TargetProposal(BaseModel):
@@ -171,7 +180,7 @@ class _TargetProposal(BaseModel):
 
     annotation_id: UUID
     base_version: Annotated[int, Field(gt=0)]
-    reason: NonblankText
+    reason: NonBlankString
 
 
 class _UpdateProposal(_TargetProposal):
@@ -181,7 +190,7 @@ class _UpdateProposal(_TargetProposal):
 class _Rejection(BaseModel):
     model_config = ConfigDict(strict=True)
 
-    review_reason: NonblankText
+    review_reason: NonBlankString
 
 
 class _Acceptance(BaseModel):
@@ -204,16 +213,36 @@ class ChangeSetService:
         self,
         *,
         payload: object,
-        owning_group_id: str,
         reason: str,
         context: RequestContext,
+        owning_group_id: str | None = None,
     ) -> ChangeSet:
-        """Store a candidate for creation, deferring annotation validation to preview."""
+        """Store a creation candidate without validating its annotation fields.
+
+        Args:
+            payload: Untrusted annotation data to retain for preview and review.
+            reason: Nonblank explanation for the proposal.
+            context: Authenticated user and selected authorization.
+            owning_group_id: Explicit ownership for global tokens; otherwise the
+                selected group is used and a supplied group must match it.
+
+        Returns:
+            Stored creation proposal.
+
+        Raises:
+            InvalidChangeSetError: If the reason or proposal structure is invalid.
+            PermissionDeniedError: If the role or requested creation group is denied.
+        """
+        group = derive_creation_group(
+            context,
+            owning_group_id,
+            action=PermissionAction.CHANGE_SET_PROPOSE,
+        )
         proposal = _validate_input(
             _CreateProposal,
             {
                 "payload": payload,
-                "owning_group_id": owning_group_id,
+                "owning_group_id": group,
                 "reason": reason,
             },
         )
@@ -245,7 +274,23 @@ class ChangeSetService:
 
         Unsupported patches fail before persistence. A structurally invalid
         annotation produced by a valid patch is retained for preview and review.
+
+        Args:
+            annotation_id: Identifier of the annotation to change.
+            base_version: Saved version to which the patch applies.
+            patch: Untrusted JSON Patch operations.
+            reason: Nonblank explanation for the proposal.
+            context: Authenticated user and selected authorization.
+
+        Returns:
+            Stored update proposal.
+
+        Raises:
+            InvalidChangeSetError: If the input, base version, or patch is invalid.
+            AnnotationNotFoundError: If the annotation is missing or inaccessible.
+            PermissionDeniedError: If the selected role cannot propose changes.
         """
+        authorize_role(context, PermissionAction.CHANGE_SET_PROPOSE)
         proposal = _validate_input(
             _UpdateProposal,
             {
@@ -256,6 +301,13 @@ class ChangeSetService:
             },
         )
         with self._unit_of_work_factory() as unit_of_work:
+            target = _current_target(unit_of_work.annotations, annotation_id)
+            authorize_annotation(
+                unit_of_work.annotations,
+                context,
+                PermissionAction.CHANGE_SET_PROPOSE,
+                target,
+            )
             base = _base_snapshot(unit_of_work.annotations, annotation_id, base_version)
             _apply_patch(base.annotation_data, proposal.patch)
             record = unit_of_work.change_sets.create(
@@ -273,12 +325,31 @@ class ChangeSetService:
             unit_of_work.commit()
         return result
 
-    def get(self, change_set_id: UUID) -> ChangeSet:
-        """Retrieve proposal and review data, or raise `ChangeSetNotFoundError`."""
+    def get(self, change_set_id: UUID, *, context: RequestContext) -> ChangeSet:
+        """Return proposal and review data within the selected ownership scope.
+
+        Args:
+            change_set_id: Identifier of the proposal to retrieve.
+            context: Authenticated user and selected authorization.
+
+        Returns:
+            Stored proposal, preview, and review information.
+
+        Raises:
+            ChangeSetNotFoundError: If the proposal is missing or inaccessible.
+            PermissionDeniedError: If the selected role cannot read proposals.
+        """
+        authorize_role(context, PermissionAction.CHANGE_SET_READ)
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.change_sets.get(change_set_id)
             if record is None:
                 raise ChangeSetNotFoundError(change_set_id)
+            _authorize_change_set(
+                unit_of_work.annotations,
+                record,
+                context,
+                PermissionAction.CHANGE_SET_READ,
+            )
             return ChangeSet.model_validate(record)
 
     def propose_delete(
@@ -289,7 +360,23 @@ class ChangeSetService:
         reason: str,
         context: RequestContext,
     ) -> ChangeSet:
-        """Store a soft-deletion proposal targeting an existing active snapshot."""
+        """Store a deletion proposal targeting a saved annotation version.
+
+        Args:
+            annotation_id: Identifier of the annotation to delete.
+            base_version: Saved version on which the proposal is based.
+            reason: Nonblank explanation for the proposal.
+            context: Authenticated user and selected authorization.
+
+        Returns:
+            Stored deletion proposal.
+
+        Raises:
+            InvalidChangeSetError: If the input or base version is invalid.
+            AnnotationNotFoundError: If the annotation is missing or inaccessible.
+            PermissionDeniedError: If the selected role cannot propose changes.
+        """
+        authorize_role(context, PermissionAction.CHANGE_SET_PROPOSE)
         proposal = _validate_input(
             _TargetProposal,
             {
@@ -299,6 +386,13 @@ class ChangeSetService:
             },
         )
         with self._unit_of_work_factory() as unit_of_work:
+            target = _current_target(unit_of_work.annotations, annotation_id)
+            authorize_annotation(
+                unit_of_work.annotations,
+                context,
+                PermissionAction.CHANGE_SET_PROPOSE,
+                target,
+            )
             _base_snapshot(unit_of_work.annotations, annotation_id, base_version)
             record = unit_of_work.change_sets.create(
                 operation=ChangeSetOperation.DELETE,
@@ -314,10 +408,31 @@ class ChangeSetService:
             unit_of_work.commit()
         return result
 
-    def preview(self, change_set_id: UUID) -> ChangeSetPreview:
-        """Validate a candidate and save advisory results without changing annotations."""
+    def preview(
+        self, change_set_id: UUID, *, context: RequestContext
+    ) -> ChangeSetPreview:
+        """Validate a candidate and save a preview without changing annotations.
+
+        Args:
+            change_set_id: Identifier of the proposal to preview.
+            context: Authenticated user and selected authorization.
+
+        Returns:
+            Candidate annotation and the conditions that currently prevent acceptance.
+
+        Raises:
+            ChangeSetNotFoundError: If the proposal is missing or inaccessible.
+            ChangeSetStateError: If the proposal has already been reviewed.
+            PermissionDeniedError: If the selected role cannot update proposals.
+        """
+        authorize_role(context, PermissionAction.CHANGE_SET_PROPOSE)
         with self._unit_of_work_factory() as unit_of_work:
-            record = _lock_proposal(unit_of_work, change_set_id)
+            record = _lock_proposal(
+                unit_of_work,
+                change_set_id,
+                context,
+                PermissionAction.CHANGE_SET_PROPOSE,
+            )
             preview = _build_preview(unit_of_work.annotations, record)
             unit_of_work.change_sets.record_preview(
                 change_set_id, preview=preview.model_dump(mode="json")
@@ -337,12 +452,31 @@ class ChangeSetService:
         If a target has changed, commit the stale state and its audit event before
         raising `StaleChangeSetError`, after the unit of work has closed. Other
         validation or duplicate failures roll back and leave the proposal reviewable.
+
+        Args:
+            change_set_id: Identifier of the proposal to accept.
+            context: Authenticated user and selected authorization.
+            review_reason: Optional explanation for the acceptance.
+
+        Returns:
+            Accepted proposal and the annotation version it produced.
+
+        Raises:
+            ChangeSetNotFoundError: If the proposal is missing or inaccessible.
+            ChangeSetStateError: If the proposal has already been reviewed.
+            InvalidChangeSetError: If the candidate is not a valid annotation.
+            DuplicateAnnotationError: If acceptance would create a new duplicate.
+            StaleChangeSetError: If the target changed after the proposal was created.
+            PermissionDeniedError: If the selected role cannot review proposals.
         """
+        authorize_role(context, PermissionAction.CHANGE_SET_REVIEW)
         review = _validate_input(_Acceptance, {"review_reason": review_reason})
         stale_error: StaleChangeSetError | None = None
         result: AcceptedChangeSet | None = None
         with self._unit_of_work_factory() as unit_of_work:
-            record = _lock_proposal(unit_of_work, change_set_id)
+            record = _lock_proposal(
+                unit_of_work, change_set_id, context, PermissionAction.CHANGE_SET_REVIEW
+            )
             try:
                 result = _accept_proposal(
                     unit_of_work, record, context, review.review_reason
@@ -389,10 +523,28 @@ class ChangeSetService:
         review_reason: str,
         context: RequestContext,
     ) -> ChangeSet:
-        """Reject a proposed change with a nonblank explanation and an audit event."""
+        """Reject a proposed change and record its audit event.
+
+        Args:
+            change_set_id: Identifier of the proposal to reject.
+            review_reason: Nonblank explanation for the rejection.
+            context: Authenticated user and selected authorization.
+
+        Returns:
+            Rejected proposal with its review information.
+
+        Raises:
+            ChangeSetNotFoundError: If the proposal is missing or inaccessible.
+            ChangeSetStateError: If the proposal has already been reviewed.
+            InvalidChangeSetError: If the review reason is invalid.
+            PermissionDeniedError: If the selected role cannot review proposals.
+        """
+        authorize_role(context, PermissionAction.CHANGE_SET_REVIEW)
         review = _validate_input(_Rejection, {"review_reason": review_reason})
         with self._unit_of_work_factory() as unit_of_work:
-            _lock_proposal(unit_of_work, change_set_id)
+            _lock_proposal(
+                unit_of_work, change_set_id, context, PermissionAction.CHANGE_SET_REVIEW
+            )
             rejected = unit_of_work.change_sets.reject(
                 change_set_id,
                 reviewed_by=context.actor_id,
@@ -404,6 +556,42 @@ class ChangeSetService:
             result = ChangeSet.model_validate(rejected)
             unit_of_work.commit()
         return result
+
+
+def _authorize_change_set(
+    repository: AnnotationRepository,
+    record: ChangeSetRecord,
+    context: RequestContext,
+    action: PermissionAction,
+) -> None:
+    """Hide proposals outside the caller's selected ownership scope.
+
+    Create proposals use their proposer and intended annotation group. Update and
+    deletion proposals use the current target annotation's ownership.
+
+    Args:
+        repository: Annotation repository used to resolve an existing target.
+        record: Proposal whose ownership is checked.
+        context: Authenticated user and selected authorization.
+        action: Change-set action being attempted.
+
+    Raises:
+        ChangeSetNotFoundError: If the proposal is outside the selected scope or
+            its target annotation is unavailable.
+    """
+    try:
+        if record.operation == ChangeSetOperation.CREATE:
+            authorize(
+                context,
+                action,
+                ResourceOwnership(record.proposed_by, record.owning_group_id),
+            )
+        else:
+            assert record.annotation_id is not None
+            target = _current_target(repository, record.annotation_id)
+            authorize_annotation(repository, context, action, target)
+    except (PermissionDeniedError, AnnotationNotFoundError):
+        raise ChangeSetNotFoundError(record.change_set_id) from None
 
 
 def _accept_proposal(
@@ -427,7 +615,7 @@ def _accept_proposal(
         changed = unit_of_work.annotations.create_direct(
             annotation=validation.annotation,
             owning_group_id=record.owning_group_id,
-            actor_id=context.actor_id,
+            actor_id=record.proposed_by,
             change_source="change_set",
         )
     else:
@@ -494,7 +682,6 @@ def _base_snapshot(
     base_version: int,
 ) -> AnnotationVersionRecord:
     """Require a saved version that can serve as an update or deletion base."""
-    _current_target(repository, annotation_id)
     base = repository.get_version(annotation_id, base_version)
     if base is None:
         raise InvalidChangeSetError(
@@ -613,13 +800,31 @@ def _validate_input[T: BaseModel](model: type[T], payload: object) -> T:
 
 
 def _lock_proposal(
-    unit_of_work: SqlAlchemyUnitOfWork, change_set_id: UUID
+    unit_of_work: SqlAlchemyUnitOfWork,
+    change_set_id: UUID,
+    context: RequestContext,
+    action: PermissionAction,
 ) -> ChangeSetRecord:
-    """Lock a reviewable proposal and translate missing or terminal states."""
+    """Lock a proposal after confirming it is accessible and reviewable.
+
+    Args:
+        unit_of_work: Active transaction containing proposal and annotation access.
+        change_set_id: Identifier of the proposal to lock.
+        context: Authenticated user and selected authorization.
+        action: Change-set action being attempted.
+
+    Returns:
+        Locked proposal in the proposed state.
+
+    Raises:
+        ChangeSetNotFoundError: If the proposal is missing or inaccessible.
+        ChangeSetStateError: If the proposal has already been reviewed.
+    """
     try:
         record = unit_of_work.change_sets.lock_for_review(change_set_id)
     except RepositoryChangeSetNotFoundError:
         raise ChangeSetNotFoundError(change_set_id) from None
+    _authorize_change_set(unit_of_work.annotations, record, context, action)
     if record.state != ChangeSetState.PROPOSED:
         raise ChangeSetStateError(change_set_id, record.state)
     return record
@@ -651,7 +856,7 @@ def _record_audit(
     """Link a transition to its proposal and optional annotation result or observation."""
     AuditService(unit_of_work.audit).record_change_set_transition(
         action=action,
-        actor_id=context.actor_id,
+        context=context,
         change_set_id=record.change_set_id,
         annotation_id=record.annotation_id,
         annotation_version=annotation_version

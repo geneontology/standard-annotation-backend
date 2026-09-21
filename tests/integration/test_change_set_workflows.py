@@ -9,6 +9,11 @@ from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.auth import (
+    AuthorizationRole,
+    AuthorizationScope,
+    RequestContext,
+)
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
@@ -23,18 +28,29 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
-from standard_annotation_backend.services.annotation_service import (
-    AnnotationService,
-    RequestContext,
-)
+from standard_annotation_backend.services.annotation_service import AnnotationService
 from standard_annotation_backend.services.change_set_service import (
     ChangeSet,
     ChangeSetService,
     InvalidChangeSetError,
 )
 
-PROPOSER = RequestContext(actor_id="proposer")
-REVIEWER = RequestContext(actor_id="reviewer")
+PROPOSER = RequestContext(
+    actor_id="proposer",
+    token_id=uuid4(),
+    token_name="Test proposer",
+    role=AuthorizationRole.EDIT,
+    scope=AuthorizationScope.GLOBAL,
+    group_id=None,
+)
+REVIEWER = RequestContext(
+    actor_id="reviewer",
+    token_id=uuid4(),
+    token_name="Test reviewer",
+    role=AuthorizationRole.ADMIN,
+    scope=AuthorizationScope.GLOBAL,
+    group_id=None,
+)
 
 
 def _service(factory: UnitOfWorkFactory) -> ChangeSetService:
@@ -57,12 +73,12 @@ def test_create_preview_preserves_annotations_and_acceptance_records_history(
     assert proposed.state == "proposed"
     assert proposed.annotation_id is None
     assert proposed.proposed_by == "proposer"
-    preview = service.preview(proposed.change_set_id)
+    preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert preview.can_accept
     assert preview.annotation == validated_annotation.model_dump(mode="json")
     assert preview.validation_errors == ()
     assert preview.duplicate_peer_ids == ()
-    stored = service.get(proposed.change_set_id)
+    stored = service.get(proposed.change_set_id, context=PROPOSER)
     assert stored.state == "proposed"
     assert stored.preview == preview
     assert stored.previewed_at is not None
@@ -86,7 +102,7 @@ def test_create_preview_preserves_annotations_and_acceptance_records_history(
         version = session.scalar(select(AnnotationVersionRecord))
         assert version is not None
         assert version.change_source == "change_set"
-        assert version.actor_id == "reviewer"
+        assert version.actor_id == "proposer"
         events = list(
             session.scalars(
                 select(AuditEventRecord).order_by(AuditEventRecord.created_at)
@@ -98,7 +114,16 @@ def test_create_preview_preserves_annotations_and_acceptance_records_history(
         ]
         assert [item.actor_id for item in events] == ["proposer", "reviewer"]
         assert all(item.change_set_id == proposed.change_set_id for item in events)
-        assert all(item.token_id is None for item in events)
+        assert [item.token_id for item in events] == [
+            str(PROPOSER.token_id),
+            str(REVIEWER.token_id),
+        ]
+        assert [item.token_name for item in events] == [
+            "Test proposer",
+            "Test reviewer",
+        ]
+        assert [item.selected_role for item in events] == ["edit", "admin"]
+        assert all(item.selected_scope == "global" for item in events)
         assert events[-1].annotation_id == accepted.annotation_id
         assert events[-1].annotation_version == 1
 
@@ -114,7 +139,7 @@ def test_invalid_create_preview_reports_validation_and_remains_reviewable(
         reason="Candidate needs review",
         context=PROPOSER,
     )
-    preview = service.preview(proposed.change_set_id)
+    preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert not preview.can_accept
     assert any(
         issue["location"] == ("db_object_id",) for issue in preview.validation_errors
@@ -122,7 +147,7 @@ def test_invalid_create_preview_reports_validation_and_remains_reviewable(
     module = import_module("standard_annotation_backend.services.change_set_service")
     with pytest.raises(module.InvalidChangeSetError):
         service.accept(proposed.change_set_id, context=REVIEWER)
-    assert service.get(proposed.change_set_id).state == "proposed"
+    assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
 def test_create_acceptance_rechecks_duplicates_after_successful_preview(
@@ -138,7 +163,7 @@ def test_create_acceptance_rechecks_duplicates_after_successful_preview(
         reason="New evidence",
         context=PROPOSER,
     )
-    assert service.preview(proposed.change_set_id).can_accept
+    assert service.preview(proposed.change_set_id, context=PROPOSER).can_accept
     duplicate = AnnotationService(unit_of_work_factory).create(
         payload=payload,
         owning_group_id="other-group",
@@ -147,10 +172,10 @@ def test_create_acceptance_rechecks_duplicates_after_successful_preview(
     with pytest.raises(DuplicateAnnotationError) as error:
         service.accept(proposed.change_set_id, context=REVIEWER)
     assert error.value.peer_ids == (duplicate.annotation_id,)
-    preview = service.preview(proposed.change_set_id)
+    preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert not preview.can_accept
     assert preview.duplicate_peer_ids == (duplicate.annotation_id,)
-    assert service.get(proposed.change_set_id).state == "proposed"
+    assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
 @pytest.mark.parametrize(
@@ -200,7 +225,7 @@ def test_create_audit_failure_rolls_back_entire_workflow(
             0 if proposed is None else 1
         )
     if proposed is not None:
-        assert service.get(proposed.change_set_id).state == "proposed"
+        assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
 @pytest.mark.parametrize("change_source", ["api", "change_set"])
@@ -246,13 +271,13 @@ def test_update_preview_and_acceptance_use_base_snapshot(
         context=PROPOSER,
     )
     assert proposed.owning_group_id == "target-group"
-    preview = service.preview(proposed.change_set_id)
+    preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert preview.can_accept
     assert preview.before_annotation is not None
     assert preview.annotation is not None
     assert preview.before_annotation["assigned_by"] == "GO_Central"
     assert preview.annotation["assigned_by"] == "NEW"
-    assert annotations.get(target.annotation_id).version == 1
+    assert annotations.get(target.annotation_id, context=PROPOSER).version == 1
     accepted = service.accept(proposed.change_set_id, context=REVIEWER)
     assert accepted.annotation_id == target.annotation_id
     assert accepted.version == 2
@@ -291,7 +316,7 @@ def test_false_boolean_number_test_does_not_persist_proposal_or_audit(
 
     assert raised.value.errors[0]["location"] == ("patch",)
     assert raised.value.errors[0]["type"] == "invalid_patch_operation"
-    assert annotations.get(target.annotation_id) == target
+    assert annotations.get(target.annotation_id, context=PROPOSER) == target
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(ChangeSetRecord)) == 0
         assert list(session.scalars(select(AuditEventRecord.action))) == [
@@ -317,13 +342,13 @@ def test_update_preview_reports_invalid_post_patch_annotation(
         reason="Review candidate",
         context=PROPOSER,
     )
-    preview = service.preview(proposed.change_set_id)
+    preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert not preview.can_accept
     assert preview.validation_errors[0]["location"] == ("db_object_id",)
     module = import_module("standard_annotation_backend.services.change_set_service")
     with pytest.raises(module.InvalidChangeSetError):
         service.accept(proposed.change_set_id, context=REVIEWER)
-    assert service.get(proposed.change_set_id).state == "proposed"
+    assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
 def test_update_preview_uses_historical_base_and_reports_current_version(
@@ -351,7 +376,7 @@ def test_update_preview_uses_historical_base_and_reports_current_version(
         reason="Old snapshot",
         context=PROPOSER,
     )
-    preview = service.preview(proposed.change_set_id)
+    preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert preview.is_stale
     assert not preview.can_accept
     assert preview.current_version == 2
@@ -362,7 +387,7 @@ def test_update_preview_uses_historical_base_and_reports_current_version(
         == preview.annotation["assigned_by"]
         == "GO_Central"
     )
-    assert service.get(proposed.change_set_id).state == "proposed"
+    assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
 @pytest.mark.parametrize("introduce_peer", [False, True])
@@ -413,7 +438,7 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
         reason="Review duplicates",
         context=PROPOSER,
     )
-    preview = service.preview(proposed.change_set_id)
+    preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert legacy_id not in preview.duplicate_peer_ids
     assert preview.duplicate_peer_ids == ((new_peer_id,) if introduce_peer else ())
     assert preview.can_accept is not introduce_peer
@@ -421,7 +446,7 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
         with pytest.raises(DuplicateAnnotationError) as error:
             service.accept(proposed.change_set_id, context=REVIEWER)
         assert error.value.peer_ids == (new_peer_id,)
-        assert service.get(proposed.change_set_id).state == "proposed"
+        assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
     else:
         assert service.accept(proposed.change_set_id, context=REVIEWER).version == 2
 
@@ -525,11 +550,11 @@ def test_delete_preview_and_acceptance_preserve_history(
         context=PROPOSER,
     )
     assert proposal.owning_group_id == "target-group"
-    preview = service.preview(proposal.change_set_id)
+    preview = service.preview(proposal.change_set_id, context=PROPOSER)
     assert preview.can_accept
     assert preview.is_deleted
     assert preview.annotation == validated_annotation.model_dump(mode="json")
-    assert annotations.get(target.annotation_id).version == 1
+    assert annotations.get(target.annotation_id, context=PROPOSER).version == 1
     accepted = service.accept(proposal.change_set_id, context=REVIEWER)
     assert accepted.version == 2
     assert accepted.is_deleted
@@ -633,7 +658,7 @@ def test_stale_acceptance_commits_review_and_audit_before_raising(
     assert error.value.change_set_id == proposal.change_set_id
     assert error.value.expected_version == 1
     assert error.value.current_version == 2
-    stored = service.get(proposal.change_set_id)
+    stored = service.get(proposal.change_set_id, context=PROPOSER)
     assert stored.state == "stale"
     assert stored.reviewed_by == "reviewer"
     assert stored.preview is not None
@@ -688,11 +713,11 @@ def test_terminal_proposals_reject_further_review_operations(
     with pytest.raises(module.ChangeSetStateError) as error:
         getattr(service, operation)(
             proposal.change_set_id,
-            **({} if operation == "preview" else {"context": REVIEWER}),
+            context=REVIEWER,
             **({"review_reason": "Again"} if operation == "reject" else {}),
         )
     assert error.value.state == state
-    assert service.get(proposal.change_set_id).state == state
+    assert service.get(proposal.change_set_id, context=PROPOSER).state == state
 
 
 @pytest.mark.parametrize("operation", ["get", "preview", "accept", "reject"])
@@ -707,7 +732,7 @@ def test_unknown_change_set_has_transport_neutral_not_found_error(
     with pytest.raises(module.ChangeSetNotFoundError) as error:
         getattr(service, operation)(
             missing_id,
-            **({"context": REVIEWER} if operation in {"accept", "reject"} else {}),
+            context=REVIEWER,
             **({"review_reason": "Missing"} if operation == "reject" else {}),
         )
     assert error.value.change_set_id == missing_id
@@ -849,7 +874,7 @@ def test_repository_detected_stale_write_is_persisted_after_intervening_transact
     with pytest.raises(module.StaleChangeSetError) as error:
         service.accept(proposal.change_set_id, context=REVIEWER)
     assert error.value.current_version == 2
-    stored = service.get(proposal.change_set_id)
+    stored = service.get(proposal.change_set_id, context=PROPOSER)
     assert stored.state == "stale"
     assert stored.preview is not None
     assert stored.preview.current_version == 2
@@ -912,7 +937,7 @@ def test_review_audit_failure_rolls_back_annotation_and_review_state(
                 service.accept(proposal.change_set_id, context=REVIEWER)
     finally:
         event.remove(AuditEventRecord, "before_insert", fail_audit)
-    stored = service.get(proposal.change_set_id)
+    stored = service.get(proposal.change_set_id, context=PROPOSER)
     assert stored.state == "proposed"
     assert stored.preview is None
     assert stored.reviewed_at is None
