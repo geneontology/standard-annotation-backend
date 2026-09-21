@@ -107,3 +107,19 @@ CHANGE_SET_REJECT_EXAMPLES: dict[str, Example] = {
         },
     }
 }
+
+ANNOTATION_COMMENT_CREATE_EXAMPLES: dict[str, Example] = {
+    "create-comment": {
+        "summary": "Comment on the current annotation version",
+        "value": {"body": "The cited paper supports this annotation."},
+    }
+}
+
+ANNOTATION_COMMENT_EDIT_EXAMPLES: dict[str, Example] = {
+    "edit-comment": {
+        "summary": "Replace the comment text",
+        "value": {
+            "body": "The cited paper supports this annotation and its extension."
+        },
+    }
+}

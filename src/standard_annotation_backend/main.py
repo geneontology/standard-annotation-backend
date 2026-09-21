@@ -9,6 +9,9 @@ from standard_annotation_backend.api.errors import (
     install_exception_handlers,
     oauth_callback_failure_response,
 )
+from standard_annotation_backend.api.routes.annotation_comments import (
+    router as annotation_comments_router,
+)
 from standard_annotation_backend.api.routes.annotation_versions import (
     router as annotation_versions_router,
 )
@@ -64,6 +67,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 install_exception_handlers(app)
+app.include_router(annotation_comments_router)
 app.include_router(annotation_versions_router)
 app.include_router(annotations_router)
 app.include_router(change_sets_router)

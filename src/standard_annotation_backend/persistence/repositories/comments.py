@@ -18,6 +18,10 @@ from standard_annotation_backend.persistence.repositories.annotations import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
 )
+from standard_annotation_backend.persistence.repositories.pagination import (
+    Page,
+    load_page,
+)
 
 
 class CommentNotFoundError(LookupError):
@@ -63,31 +67,71 @@ class AnnotationCommentRepository:
             statement = statement.where(AnnotationCommentRecord.deleted_at.is_(None))
         return self.session.scalar(statement)
 
+    def get_for_annotation(
+        self,
+        annotation_id: UUID,
+        comment_id: UUID,
+        *,
+        include_deleted: bool = False,
+    ) -> AnnotationCommentRecord | None:
+        """Get a comment only when it belongs to the specified annotation.
+
+        Args:
+            annotation_id: Identifier of the expected parent annotation.
+            comment_id: Identifier of the comment to find.
+            include_deleted: Whether a deleted comment may be returned.
+
+        Returns:
+            The matching comment, or `None` when no visible match exists.
+        """
+        statement = select(AnnotationCommentRecord).where(
+            AnnotationCommentRecord.annotation_id == annotation_id,
+            AnnotationCommentRecord.comment_id == comment_id,
+        )
+        if not include_deleted:
+            statement = statement.where(AnnotationCommentRecord.deleted_at.is_(None))
+        return self.session.scalar(statement)
+
     def list(
         self,
         annotation_id: UUID,
         *,
         include_deleted: bool = False,
-    ) -> tuple[AnnotationCommentRecord, ...]:
-        """List comments attached to an annotation.
+        limit: int,
+        offset: int,
+    ) -> Page[AnnotationCommentRecord]:
+        """List one page of comments attached to an annotation.
 
         Args:
             annotation_id: Identifier of the annotation to list comments for.
             include_deleted: Whether deleted comments should be included.
+            limit: Maximum number of comments to return.
+            offset: Number of matching comments to skip.
 
         Returns:
-            Comments ordered by creation time and identifier.
+            Selected comments and the total number of matches.
+
+        Raises:
+            AnnotationNotFoundError: If the annotation does not exist.
+            AnnotationDeletedError: If the annotation has been deleted.
         """
+        self._lock_active_annotation_for_comment(annotation_id)
         statement = select(AnnotationCommentRecord).where(
             AnnotationCommentRecord.annotation_id == annotation_id
         )
         if not include_deleted:
             statement = statement.where(AnnotationCommentRecord.deleted_at.is_(None))
-        statement = statement.order_by(
-            AnnotationCommentRecord.created_at,
-            AnnotationCommentRecord.comment_id,
+        return load_page(
+            self.session,
+            statement,
+            record_type=AnnotationCommentRecord,
+            order_by=(
+                AnnotationCommentRecord.created_at,
+                AnnotationCommentRecord.comment_id,
+            ),
+            limit=limit,
+            offset=offset,
         )
-        return tuple(self.session.scalars(statement))
 
     def create(
         self,
@@ -115,7 +159,7 @@ class AnnotationCommentRepository:
         """
         self._validate_body(body)
         acquire_global_annotation_write_lock(self.session)
-        annotation = self._get_active_annotation_for_comment(annotation_id)
+        annotation = self._lock_active_annotation_for_comment(annotation_id)
 
         now = datetime.now(UTC)
         comment = AnnotationCommentRecord(
@@ -132,10 +176,17 @@ class AnnotationCommentRepository:
         self.session.flush([comment])
         return comment
 
-    def edit(self, comment_id: UUID, *, body: str) -> AnnotationCommentRecord:
+    def edit(
+        self,
+        annotation_id: UUID,
+        comment_id: UUID,
+        *,
+        body: str,
+    ) -> AnnotationCommentRecord:
         """Change the text of an existing comment.
 
         Args:
+            annotation_id: Identifier of the comment's parent annotation.
             comment_id: Identifier of the comment to edit.
             body: New nonblank comment text.
 
@@ -144,43 +195,55 @@ class AnnotationCommentRepository:
 
         Raises:
             InvalidCommentError: If `body` is blank.
+            AnnotationNotFoundError: If the annotation does not exist.
+            AnnotationDeletedError: If the annotation has been deleted.
             CommentNotFoundError: If the comment is missing or deleted.
         """
         self._validate_body(body)
         acquire_global_annotation_write_lock(self.session)
-        comment = self._get_active_comment_for_change(comment_id)
+        self._lock_active_annotation_for_comment(annotation_id)
+        comment = self._get_active_comment_for_change(annotation_id, comment_id)
         comment.body = body
         comment.updated_at = datetime.now(UTC)
         self.session.flush([comment])
         return comment
 
-    def soft_delete(self, comment_id: UUID) -> AnnotationCommentRecord:
+    def soft_delete(
+        self,
+        annotation_id: UUID,
+        comment_id: UUID,
+    ) -> AnnotationCommentRecord:
         """Mark a comment as deleted without removing its row.
 
         Args:
+            annotation_id: Identifier of the comment's parent annotation.
             comment_id: Identifier of the comment to delete.
 
         Returns:
             The comment record in its deleted state.
 
         Raises:
+            AnnotationNotFoundError: If the annotation does not exist.
+            AnnotationDeletedError: If the annotation has been deleted.
             CommentNotFoundError: If the comment is missing or already deleted.
         """
         acquire_global_annotation_write_lock(self.session)
-        comment = self._get_active_comment_for_change(comment_id)
+        self._lock_active_annotation_for_comment(annotation_id)
+        comment = self._get_active_comment_for_change(annotation_id, comment_id)
         now = datetime.now(UTC)
         comment.updated_at = now
         comment.deleted_at = now
         self.session.flush([comment])
         return comment
 
-    def _get_active_annotation_for_comment(
+    def _lock_active_annotation_for_comment(
         self,
         annotation_id: UUID,
     ) -> AnnotationRecord:
-        """Get the active annotation version that a new comment will reference.
+        """Lock the active annotation that owns a comment operation.
 
-        Other transactions cannot change the annotation until this transaction ends.
+        The shared row lock prevents the annotation from changing between its
+        validation and the rest of the comment operation.
 
         Args:
             annotation_id: Identifier of the annotation being discussed.
@@ -209,11 +272,13 @@ class AnnotationCommentRepository:
 
     def _get_active_comment_for_change(
         self,
+        annotation_id: UUID,
         comment_id: UUID,
     ) -> AnnotationCommentRecord:
         """Get an active comment and prevent concurrent changes to it.
 
         Args:
+            annotation_id: Identifier of the expected parent annotation.
             comment_id: Identifier of the comment being changed.
 
         Returns:
@@ -225,6 +290,7 @@ class AnnotationCommentRepository:
         statement = (
             select(AnnotationCommentRecord)
             .where(
+                AnnotationCommentRecord.annotation_id == annotation_id,
                 AnnotationCommentRecord.comment_id == comment_id,
                 AnnotationCommentRecord.deleted_at.is_(None),
             )
@@ -240,5 +306,6 @@ class AnnotationCommentRepository:
 
     @staticmethod
     def _validate_body(body: str) -> None:
+        """Reject comment text that contains only whitespace."""
         if not body.strip():
             raise InvalidCommentError("comment body must not be blank")

@@ -27,7 +27,7 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories.pagination import (
     Page,
-    _load_page,
+    load_page,
 )
 
 
@@ -248,7 +248,7 @@ class AnnotationRepository:
         statement = select(AnnotationVersionRecord).where(
             AnnotationVersionRecord.annotation_id == annotation_id
         )
-        return _load_page(
+        return load_page(
             self.session,
             statement,
             record_type=AnnotationVersionRecord,
@@ -327,7 +327,7 @@ class AnnotationRepository:
                     )
                 )
 
-        return _load_page(
+        return load_page(
             self.session,
             statement,
             record_type=AnnotationRecord,

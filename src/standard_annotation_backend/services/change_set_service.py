@@ -59,7 +59,7 @@ from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.resource_authorization import (
     authorize_annotation,
 )
-from standard_annotation_backend.validation_types import NonBlankString
+from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 
 class ChangeSetPreview(BaseModel):
@@ -171,8 +171,8 @@ class _CreateProposal(BaseModel):
     model_config = ConfigDict(strict=True, allow_inf_nan=False)
 
     payload: dict[str, JsonValue]
-    owning_group_id: NonBlankString
-    reason: NonBlankString
+    owning_group_id: TrimmedNonBlankString
+    reason: TrimmedNonBlankString
 
 
 class _TargetProposal(BaseModel):
@@ -180,7 +180,7 @@ class _TargetProposal(BaseModel):
 
     annotation_id: UUID
     base_version: Annotated[int, Field(gt=0)]
-    reason: NonBlankString
+    reason: TrimmedNonBlankString
 
 
 class _UpdateProposal(_TargetProposal):
@@ -190,7 +190,7 @@ class _UpdateProposal(_TargetProposal):
 class _Rejection(BaseModel):
     model_config = ConfigDict(strict=True)
 
-    review_reason: NonBlankString
+    review_reason: TrimmedNonBlankString
 
 
 class _Acceptance(BaseModel):

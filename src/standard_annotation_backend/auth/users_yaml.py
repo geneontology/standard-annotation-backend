@@ -21,7 +21,7 @@ from standard_annotation_backend.domain.auth import (
     AuthorizationScope,
 )
 from standard_annotation_backend.domain.validation import ValidationIssue
-from standard_annotation_backend.validation_types import NonBlankString
+from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 
 def _require_yaml_sequence(value: object) -> list[object]:
@@ -52,7 +52,7 @@ class SabAuthorizationEntry(BaseModel):
 
     role: AuthorizationRole
     scope: AuthorizationScope
-    group: NonBlankString | None = None
+    group: TrimmedNonBlankString | None = None
 
     @model_validator(mode="after")
     def validate_group(self) -> Self:
@@ -74,7 +74,7 @@ class UserAccounts(BaseModel):
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
-    github: NonBlankString | None = None
+    github: TrimmedNonBlankString | None = None
 
     @field_validator("github")
     @classmethod

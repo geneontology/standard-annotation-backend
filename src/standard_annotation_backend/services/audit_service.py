@@ -93,3 +93,39 @@ class AuditService:
             annotation_version=annotation_version,
             details={"change_source": "api"},
         )
+
+    def record_annotation_comment_mutation(
+        self,
+        *,
+        action: AuditAction,
+        context: RequestContext,
+        annotation_id: UUID,
+        annotation_version: int,
+        comment_id: UUID,
+    ) -> AuditEventRecord:
+        """Record a successful annotation comment mutation.
+
+        Args:
+            action: Comment operation that completed.
+            context: Authenticated actor and selected authorization.
+            annotation_id: Annotation that owns the comment.
+            annotation_version: Annotation version pinned by the comment.
+            comment_id: Comment created, edited, or deleted.
+
+        Returns:
+            The audit event added to the current transaction.
+        """
+        return self._repository.record(
+            action=action,
+            actor_id=context.actor_id,
+            token_id=str(context.token_id),
+            token_name=context.token_name,
+            selected_role=context.role.value,
+            selected_scope=context.scope.value,
+            selected_group_id=context.group_id,
+            result=AuditResult.SUCCESS,
+            annotation_id=annotation_id,
+            annotation_version=annotation_version,
+            comment_id=comment_id,
+            details={"change_source": "api"},
+        )

@@ -21,7 +21,7 @@ class Page[T]:
     total: int
 
 
-def _load_page[T](
+def load_page[T](
     session: Session,
     statement: Select[tuple[T]],
     *,

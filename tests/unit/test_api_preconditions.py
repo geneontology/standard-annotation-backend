@@ -36,8 +36,8 @@ from standard_annotation_backend.services.annotation_service import (
     CurrentAnnotation,
     EmptyAnnotationPatchError,
     InvalidAnnotationPayloadError,
-    ResultPage,
 )
+from standard_annotation_backend.services.pagination import ResultPage
 
 ANNOTATION_ID = UUID("00000000-0000-0000-0000-000000000401")
 PEER_A = UUID("00000000-0000-0000-0000-000000000402")

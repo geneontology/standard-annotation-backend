@@ -28,7 +28,9 @@ from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.repositories import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
+    CommentNotFoundError,
     DuplicateAnnotationError,
+    InvalidCommentError,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.repositories.auth import (
@@ -242,6 +244,16 @@ def install_exception_handlers(app: FastAPI) -> None:
             status.HTTP_404_NOT_FOUND,
             "annotation_not_found",
             "Annotation was not found",
+        ),
+        CommentNotFoundError: _FixedErrorResponse(
+            status.HTTP_404_NOT_FOUND,
+            "comment_not_found",
+            "Comment was not found",
+        ),
+        InvalidCommentError: _FixedErrorResponse(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "invalid_comment",
+            "Comment body must contain non-whitespace text",
         ),
     }
 

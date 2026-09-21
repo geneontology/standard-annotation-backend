@@ -15,13 +15,13 @@ from standard_annotation_backend.persistence.repositories.auth import (
     SyncUser,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.validation_types import NonBlankString
+from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 
 class _SyncSource(BaseModel):
     """Validate source provenance before any authorization write transaction."""
 
-    source_repository: NonBlankString
+    source_repository: TrimmedNonBlankString
     source_commit_sha: Annotated[
         str, StringConstraints(pattern=r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
     ]

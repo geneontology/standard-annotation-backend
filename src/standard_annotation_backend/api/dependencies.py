@@ -17,6 +17,7 @@ from standard_annotation_backend.services.authentication_service import (
     AuthenticationService,
 )
 from standard_annotation_backend.services.change_set_service import ChangeSetService
+from standard_annotation_backend.services.comment_service import CommentService
 
 _IF_MATCH_PATTERN = re.compile(r'^"([1-9][0-9]*)"$')
 
@@ -180,3 +181,20 @@ def get_change_set_service(
         Service configured to run change-set operations.
     """
     return ChangeSetService(unit_of_work_factory)
+
+
+def get_comment_service(
+    unit_of_work_factory: Annotated[
+        UnitOfWorkFactory,
+        Depends(get_unit_of_work_factory),
+    ],
+) -> CommentService:
+    """Create annotation comment operations for one request.
+
+    Args:
+        unit_of_work_factory: Factory for transaction-scoped repositories.
+
+    Returns:
+        Service configured to run annotation comment operations.
+    """
+    return CommentService(unit_of_work_factory)
