@@ -13,6 +13,10 @@ def test_token_management_routes_are_hidden_from_the_public_contract(
         not {
             "/auth/github/login",
             "/auth/github/callback",
+            "/token-management",
+            "/assets/favicon.svg",
+            "/assets/token-management.css",
+            "/assets/token-management.js",
             "/tokens",
             "/tokens/contexts",
             "/tokens/{token_id}",

@@ -4,6 +4,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from standard_annotation_backend.api.errors import (
     install_exception_handlers,
@@ -20,6 +23,9 @@ from standard_annotation_backend.api.routes.annotations import (
 )
 from standard_annotation_backend.api.routes.change_sets import (
     router as change_sets_router,
+)
+from standard_annotation_backend.api.routes.token_management import (
+    router as token_management_router,
 )
 from standard_annotation_backend.api.routes.tokens import (
     OAUTH_STATE_COOKIE,
@@ -62,7 +68,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="Standard Annotation Backend",
+    description="""[Token Management](/token-management)""",
+    openapi_tags=[
+        {"name": "annotations"},
+        {"name": "annotation comments"},
+        {"name": "change-sets"},
+    ],
     version=get_application_version(),
+    docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
 )
@@ -71,7 +84,13 @@ app.include_router(annotation_comments_router)
 app.include_router(annotation_versions_router)
 app.include_router(annotations_router)
 app.include_router(change_sets_router)
+app.include_router(token_management_router)
 app.include_router(tokens_router)
+app.mount(
+    "/assets",
+    StaticFiles(packages=[("standard_annotation_backend", "static")]),
+    name="assets",
+)
 
 
 @app.middleware("http")
@@ -106,11 +125,19 @@ async def protect_token_management_responses(
         response = oauth_callback_failure_response()
     if (
         path.startswith("/auth/github/")
+        or path.startswith("/assets/")
+        or path.startswith("/token-management")
         or path == "/tokens"
         or path.startswith("/tokens/")
     ):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "connect-src 'self'; img-src 'self'; base-uri 'none'; "
+            "form-action 'self'; frame-ancestors 'none'"
+        )
     if path == "/auth/github/callback":
         response.delete_cookie(
             OAUTH_STATE_COOKIE,
@@ -120,6 +147,22 @@ async def protect_token_management_responses(
             samesite="lax",
         )
     return response
+
+
+@app.get("/docs", include_in_schema=False)
+def swagger_ui(request: Request) -> HTMLResponse:
+    """Return Swagger UI with SAB's packaged favicon."""
+    root_path = request.scope.get("root_path", "").rstrip("/")
+    openapi_url = app.openapi_url
+    if openapi_url is None:
+        raise RuntimeError("Swagger UI requires an OpenAPI URL")
+    return get_swagger_ui_html(
+        openapi_url=root_path + openapi_url,
+        title=f"{app.title} - Swagger UI",
+        swagger_favicon_url=root_path + "/assets/favicon.svg",
+        init_oauth=app.swagger_ui_init_oauth,
+        swagger_ui_parameters=app.swagger_ui_parameters,
+    )
 
 
 @app.get("/health")

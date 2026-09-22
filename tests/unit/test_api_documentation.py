@@ -31,6 +31,10 @@ def test_openapi_displays_installed_application_version(client: TestClient) -> N
     assert response.json()["info"]["version"] == distribution_version(
         "standard-annotation-backend"
     )
+    assert (
+        "[Token Management](/token-management)"
+        in response.json()["info"]["description"]
+    )
 
 
 def test_swagger_ui_remains_available(client: TestClient) -> None:
@@ -39,6 +43,7 @@ def test_swagger_ui_remains_available(client: TestClient) -> None:
 
     assert response.status_code == status.HTTP_200_OK
     assert "Swagger UI" in response.text
+    assert '<link rel="shortcut icon" href="/assets/favicon.svg">' in response.text
 
 
 def test_redoc_is_not_exposed(client: TestClient) -> None:
