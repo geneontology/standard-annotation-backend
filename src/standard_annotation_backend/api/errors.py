@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from standard_annotation_backend.api.csrf import CsrfValidationError
 from standard_annotation_backend.api.models import (
     ApiErrorBody,
     ApiErrorDetails,
@@ -169,6 +170,11 @@ def install_exception_handlers(app: FastAPI) -> None:
             status.HTTP_403_FORBIDDEN,
             "permission_denied",
             "Permission denied",
+        ),
+        CsrfValidationError: _FixedErrorResponse(
+            status.HTTP_403_FORBIDDEN,
+            "invalid_csrf_token",
+            "Token-management request could not be verified",
         ),
         CredentialPersistenceError: _FixedErrorResponse(
             status.HTTP_503_SERVICE_UNAVAILABLE,

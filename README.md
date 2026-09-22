@@ -70,6 +70,23 @@ just sync-authorizations
 
 The command prints the synchronized source commit and resulting counts.
 
+## Create and manage bearer tokens
+
+Configure a GitHub OAuth app with this callback URL for local development:
+
+```text
+http://localhost:8000/auth/github/callback
+```
+
+Set its client ID and secret in `.env` as `SAB_GITHUB_OAUTH_CLIENT_ID` and
+`SAB_GITHUB_OAUTH_CLIENT_SECRET`. After synchronizing authorizations and starting SAB,
+open <http://localhost:8000/token-management> and sign in with an authorized GitHub
+account.
+
+The page creates tokens for one of the signed-in user's current authorization contexts,
+lists token metadata, and revokes existing tokens. A newly created bearer token is shown
+only once, so copy it to secure storage before closing the confirmation.
+
 ## Use a bearer token
 
 Keep tokens out of source files, logs, URLs, and shell history. Assuming an issued token

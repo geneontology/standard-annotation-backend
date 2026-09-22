@@ -7,6 +7,12 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import APIKeyCookie
 
+from standard_annotation_backend.api.csrf import (
+    MANAGEMENT_CSRF_COOKIE,
+    MANAGEMENT_SESSION_COOKIE,
+    management_csrf_token,
+    require_management_csrf,
+)
 from standard_annotation_backend.api.dependencies import get_unit_of_work_factory
 from standard_annotation_backend.api.models import (
     ApiErrorResponse,
@@ -24,7 +30,6 @@ from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFacto
 from standard_annotation_backend.services.token_service import TokenService
 
 OAUTH_STATE_COOKIE = "sab_oauth_state"
-MANAGEMENT_SESSION_COOKIE = "sab_token_management_session"
 OAUTH_STATE_TTL_SECONDS = 600
 
 router = APIRouter(tags=["token-management"], include_in_schema=False)
@@ -133,8 +138,8 @@ def github_login(
 
 @router.get(
     "/auth/github/callback",
-    response_class=Response,
-    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=RedirectResponse,
+    status_code=status.HTTP_303_SEE_OTHER,
     responses={
         status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ApiErrorResponse},
         status.HTTP_400_BAD_REQUEST: {"model": ApiErrorResponse},
@@ -151,7 +156,7 @@ def github_callback(
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
-) -> Response:
+) -> RedirectResponse:
     """Verify browser state and GitHub identity before issuing a management cookie."""
     session = service.complete_login(
         github=github,
@@ -160,7 +165,12 @@ def github_callback(
         expected_state=request.cookies.get(OAUTH_STATE_COOKIE),
         denied=error is not None,
     )
-    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    csrf_token = management_csrf_token(
+        session.raw_secret, request.app.state.settings.application_secret
+    )
+    response = RedirectResponse(
+        "/token-management", status_code=status.HTTP_303_SEE_OTHER
+    )
     response.set_cookie(
         MANAGEMENT_SESSION_COOKIE,
         session.raw_secret,
@@ -168,6 +178,16 @@ def github_callback(
         expires=session.expires_at,
         httponly=True,
         samesite="lax",
+        secure=secure_cookies(request),
+        path="/",
+    )
+    response.set_cookie(
+        MANAGEMENT_CSRF_COOKIE,
+        csrf_token,
+        max_age=int(TOKEN_MANAGEMENT_SESSION_TTL.total_seconds()),
+        expires=session.expires_at,
+        httponly=False,
+        samesite="strict",
         secure=secure_cookies(request),
         path="/",
     )
@@ -227,6 +247,7 @@ def list_tokens(
         status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
     },
+    dependencies=[Depends(require_management_csrf)],
 )
 def create_token(
     body: TokenCreateRequest,
@@ -250,6 +271,7 @@ def create_token(
         status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
     },
+    dependencies=[Depends(require_management_csrf)],
 )
 def revoke_token(
     token_id: UUID,

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Standard Annotation Backend - Token Management</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/token-management.css">
+  <script src="/assets/token-management.js" defer></script>
+</head>
+<body>
+<main id="token-management">
+  <header>
+    <h1>Standard Annotation Backend</h1>
+    <ul class="breadcrumbs">
+      <li>
+        <a href="/docs">Home</a>
+      </li>
+      <li>
+        Token Management
+      </li>
+    </ul>
+  </header>
+
+  <section id="loading" aria-labelledby="loading-heading">
+    <h2 id="loading-heading">Loading token management</h2>
+    <p>Checking your GitHub sign-in and current authorizations…</p>
+  </section>
+
+  <section id="signed-out" aria-labelledby="signed-out-heading" hidden>
+    <h2 id="signed-out-heading">Sign in to continue</h2>
+    <a href="/auth/github/login" class="button">Sign in with GitHub</a>
+  </section>
+
+  <section id="authenticated" hidden aria-labelledby="create-token-heading">
+    <h2 id="create-token-heading">Create a token</h2>
+    <form id="create-token-form">
+      <div class="field">
+        <label for="token-name">Token name</label>
+        <input id="token-name" name="name" maxlength="200" required autocomplete="off">
+        <p class="hint">Use a name that identifies the tool or workflow.</p>
+      </div>
+
+      <div class="field">
+        <label for="authorization-context">Authorization</label>
+        <select id="authorization-context" name="assignment_id" required
+                aria-describedby="has-contexts no-contexts"></select>
+        <p id="has-contexts" class="hint">
+          Choose a role, scope, and group for this token. If you don't see the
+          authorization you need, ask a SAB administrator to review your access.
+          <button id="context-help" type="button" class="link-button">
+            Learn more
+          </button>
+        </p>
+        <p id="no-contexts" class="hint" hidden>
+          No current authorization contexts are available. Ask a SAB administrator to
+          review your access.
+        </p>
+      </div>
+
+      <fieldset>
+        <legend>Expiration</legend>
+        <label><input type="radio" name="expiration" value="week" checked> One
+          week</label>
+        <label><input type="radio" name="expiration" value="month"> One month</label>
+        <label><input type="radio" name="expiration" value="year"> One year</label>
+        <label><input type="radio" name="expiration" value="custom"> Custom</label>
+      </fieldset>
+
+      <div id="custom-expiration-field" class="field" hidden>
+        <label for="custom-expiration">Custom expiration</label>
+        <input id="custom-expiration" type="datetime-local" name="custom_expiration"
+               disabled>
+        <p class="hint">Choose a future time no more than one year from now.</p>
+      </div>
+
+      <button type="submit" class="button">Create token</button>
+    </form>
+
+    <div class="history-heading">
+      <h2>Token history</h2>
+      <button id="refresh-tokens" type="button" class="secondary">Refresh</button>
+    </div>
+    <p id="no-tokens" hidden>You have not created any tokens.</p>
+    <div class="table-scroll">
+      <table id="token-table">
+        <caption class="visually-hidden">Current and historical API tokens</caption>
+        <thead>
+        <tr>
+          <th scope="col">Name</th>
+          <th scope="col">Authorization</th>
+          <th scope="col">Created</th>
+          <th scope="col">Last used</th>
+          <th scope="col">Expires</th>
+          <th scope="col">Status</th>
+          <th scope="col"><span class="visually-hidden">Actions</span></th>
+        </tr>
+        </thead>
+        <tbody id="token-list"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p id="status-message" role="status" aria-live="polite"></p>
+  <p id="error-message" role="alert" aria-live="assertive"></p>
+
+  <dialog id="token-secret-dialog" aria-labelledby="token-secret-heading">
+    <h2 id="token-secret-heading">Copy your new token</h2>
+    <p><strong>This token cannot be shown again.</strong> Store it securely before
+      closing this window.</p>
+    <pre><code id="new-token-secret"></code></pre>
+    <div class="dialog-actions">
+      <button id="copy-token" type="button" class="button">Copy token</button>
+      <button id="close-token-secret" type="button" class="secondary">I have stored it
+      </button>
+    </div>
+  </dialog>
+
+  <dialog id="revoke-token-dialog" aria-labelledby="revoke-token-heading">
+    <h2 id="revoke-token-heading">Revoke this token?</h2>
+    <p id="revoke-token-target"></p>
+    <p>The token will stop authenticating immediately. Its metadata remains in your
+      history.</p>
+    <div class="dialog-actions">
+      <button id="confirm-revoke" type="button" class="danger">Revoke token</button>
+      <button id="cancel-revoke" type="button" class="secondary">Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog id="context-help-dialog" aria-labelledby="context-help-heading">
+    <h2 id="context-help-heading">Authorization contexts</h2>
+    <p>An authorization context is defined by a role, scope, and optional group.</p>
+    <p>Roles define which actions you can perform:</p>
+    <dl>
+      <dt>Read</dt>
+      <dd>May read annotations (including comments and versions) within the specified
+        scope.
+      </dd>
+      <dt>Edit</dt>
+      <dd>May directly create, read, update, and delete annotations and propose change
+        sets to annotations with the specified scope.
+      </dd>
+      <dt>Admin</dt>
+      <dd>Has full control over annotations within the specified scope, including
+        accepting and rejecting change sets.
+      </dd>
+    </dl>
+    <p>Scopes define which annotations you can access:</p>
+    <dl>
+      <dt>Self</dt>
+      <dd>Annotations you created.</dd>
+      <dt>Group</dt>
+      <dd>Annotations created by members of a specific group.</dd>
+      <dt>Global</dt>
+      <dd>All annotations in the system.</dd>
+    </dl>
+    <p>Authorizations with a group or self scope are also tied to a specific group. All
+      annotations created using that authorization will be owned by that group.</p>
+    <p>Authorizations with a global scope are not tied to any group. The owning group
+      must be specified when creating annotations with that authorization.</p>
+    <div class="dialog-actions">
+      <span></span>
+      <button id="context-help-close" type="button" class="secondary">Close</button>
+    </div>
+  </dialog>
+
+  <noscript>
+    <p class="error">JavaScript is required to manage tokens from this page.</p>
+  </noscript>
+</main>
+</body>
+</html>

@@ -23,7 +23,7 @@ FROM base AS vcs-build-base
 USER root
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends git \
+    && apt-get install --yes --no-install-recommends git nodejs \
     && git config --system --add safe.directory /source \
     && rm -rf /var/lib/apt/lists/*
 

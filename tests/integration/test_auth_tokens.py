@@ -91,8 +91,9 @@ def _login(client: TestClient) -> None:
         params={"code": "test-oauth-code", "state": state},
         follow_redirects=False,
     )
-    assert response.status_code == status.HTTP_204_NO_CONTENT
-    assert "location" not in response.headers
+    assert response.status_code == status.HTTP_303_SEE_OTHER
+    assert response.headers["location"] == "/token-management"
+    client.headers["X-CSRF-Token"] = client.cookies["sab_token_management_csrf"]
 
 
 @pytest.fixture
@@ -140,9 +141,9 @@ def test_callback_stores_digest_only_session_and_cookie_policy(
         params={"code": "test-oauth-code", "state": state},
         follow_redirects=False,
     )
-    assert response.status_code == status.HTTP_204_NO_CONTENT
-    assert response.content == b""
-    assert "location" not in response.headers
+    assert response.status_code == status.HTTP_303_SEE_OTHER
+    assert response.headers["location"] == "/token-management"
+    assert "sab_token_management_csrf" in integration_api_client.cookies
     raw = integration_api_client.cookies["sab_token_management_session"]
     assert raw.startswith("sab_session_")
     assert "sab_oauth_state" not in integration_api_client.cookies
@@ -155,6 +156,12 @@ def test_callback_stores_digest_only_session_and_cookie_policy(
     assert "HttpOnly" in session_cookie and "SameSite=lax" in session_cookie
     assert "Path=/" in session_cookie and "Max-Age=900" in session_cookie
     assert "Secure" not in session_cookie
+    csrf_cookie = next(
+        cookie for cookie in cookies if cookie.startswith("sab_token_management_csrf=")
+    )
+    assert "HttpOnly" not in csrf_cookie and "SameSite=strict" in csrf_cookie
+    assert "Path=/" in csrf_cookie and "Max-Age=900" in csrf_cookie
+    assert "Secure" not in csrf_cookie
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["referrer-policy"] == "no-referrer"
     with session_factory() as session:
@@ -163,6 +170,73 @@ def test_callback_stores_digest_only_session_and_cookie_policy(
         assert record.user_id == user_assignments["user_id"]
         assert record.expires_at - record.created_at == timedelta(minutes=15)
         assert session.scalar(select(func.count()).select_from(ApiTokenRecord)) == 0
+
+
+def test_state_changing_management_requests_require_matching_csrf_tokens(
+    management_client: TestClient,
+    user_assignments: dict[str, UUID],
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Creation and revocation reject absent or mismatched CSRF credentials."""
+    csrf_token = management_client.cookies["sab_token_management_csrf"]
+    payload = {
+        "name": "Notebook",
+        "assignment_id": str(user_assignments["assignment_id"]),
+        "expires_at": _future_expiration(),
+    }
+
+    without_header = management_client.post(
+        "/tokens", json=payload, headers={"X-CSRF-Token": ""}
+    )
+    mismatched = management_client.post(
+        "/tokens", json=payload, headers={"X-CSRF-Token": "sab_csrf_wrong"}
+    )
+
+    for response in (without_header, mismatched):
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["content-security-policy"].startswith(
+            "default-src 'none'"
+        )
+        assert response.json() == {
+            "error": {
+                "code": "invalid_csrf_token",
+                "message": "Token-management request could not be verified",
+            }
+        }
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(ApiTokenRecord)) == 0
+
+    raw_session = management_client.cookies["sab_token_management_session"]
+    management_client.cookies.set(
+        "sab_token_management_session", "sab_session_tampered"
+    )
+    session_mismatch = management_client.post(
+        "/tokens", json=payload, headers={"X-CSRF-Token": csrf_token}
+    )
+    assert session_mismatch.status_code == status.HTTP_403_FORBIDDEN
+    assert session_mismatch.json()["error"]["code"] == "invalid_csrf_token"
+    management_client.cookies.set("sab_token_management_session", raw_session)
+
+    created = management_client.post(
+        "/tokens", json=payload, headers={"X-CSRF-Token": csrf_token}
+    )
+    assert created.status_code == status.HTTP_201_CREATED
+    token_id = created.json()["token_id"]
+
+    rejected_revoke = management_client.delete(
+        f"/tokens/{token_id}", headers={"X-CSRF-Token": "sab_csrf_wrong"}
+    )
+    assert rejected_revoke.status_code == status.HTTP_403_FORBIDDEN
+    assert management_client.get("/tokens").json()["items"][0]["revoked_at"] is None
+
+    revoked = management_client.delete(
+        f"/tokens/{token_id}", headers={"X-CSRF-Token": csrf_token}
+    )
+    assert revoked.status_code == status.HTTP_204_NO_CONTENT
+    assert management_client.get("/tokens").json()["items"][0]["revoked_at"] is not None
 
 
 def test_contexts_and_token_creation_are_owned_and_keep_secret_out_of_history(
@@ -216,6 +290,9 @@ def test_contexts_and_token_creation_are_owned_and_keep_secret_out_of_history(
         and "digest" not in listing.json()["items"][0]
     )
     assert listing.json()["items"][0]["token_id"] == str(token_id)
+    reloaded_page = management_client.get("/token-management")
+    assert reloaded_page.status_code == status.HTTP_200_OK
+    assert raw not in reloaded_page.text and digest not in reloaded_page.text
     with unit_of_work_factory() as uow:
         assert uow.auth.get_active_token(digest, now=datetime.now(UTC)) is not None
         assert (
@@ -646,7 +723,8 @@ def test_production_management_session_cookie_is_secure(
         params={"state": state, "code": "test-oauth-code"},
         follow_redirects=False,
     )
-    assert response.status_code == status.HTTP_204_NO_CONTENT
+    assert response.status_code == status.HTTP_303_SEE_OTHER
+    assert response.headers["location"] == "/token-management"
     assert all("Secure" in cookie for cookie in response.headers.get_list("set-cookie"))
 
 
