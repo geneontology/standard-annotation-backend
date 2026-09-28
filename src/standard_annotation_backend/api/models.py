@@ -1,10 +1,10 @@
 """Define typed request and response models for SAB's HTTP APIs.
 
-Response constructors for annotation and comment resources intentionally enumerate
-fields even when service results currently have the same shape. This makes the
-public API boundary explicit, prevents newly added service fields from being exposed
-automatically, and allows service and API models to evolve independently. Their page
-constructors likewise convert each item through its resource constructor.
+Response constructors list fields explicitly even when service results currently
+have the same shape. This prevents newly added service fields from appearing in API
+responses automatically and allows each representation to change independently.
+Page constructors convert each item through its resource constructor for the same
+reason.
 """
 
 from datetime import date, datetime
@@ -20,6 +20,7 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationExtension,
     AnnotationProperties,
 )
+from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.services.annotation_service import (
     AnnotationVersion,
     CurrentAnnotation,
@@ -30,6 +31,7 @@ from standard_annotation_backend.services.change_set_service import (
     ChangeSetPreview,
 )
 from standard_annotation_backend.services.comment_service import AnnotationComment
+from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.token_service import TokenCreateInput
 from standard_annotation_backend.validation_types import NonBlankString
@@ -183,6 +185,43 @@ class AnnotationResource(BaseModel):
             created_at=result.created_at,
             updated_at=result.updated_at,
             annotation=result.annotation,
+        )
+
+
+class JobResource(BaseModel):
+    """Represent job status and results returned by the API."""
+
+    job_id: UUID
+    job_type: JobType
+    status: JobStatus
+    requested_by: str
+    progress: dict[str, object]
+    warnings: tuple[str, ...]
+    result: dict[str, object] | None
+    artifact_uri: str | None
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+    @classmethod
+    def from_service(cls, job: Job) -> Self:
+        """Convert a `JobService` result to a response without worker parameters."""
+        return cls(
+            job_id=job.job_id,
+            job_type=job.job_type,
+            status=job.status,
+            requested_by=job.requested_by,
+            progress=job.progress,
+            warnings=job.warnings,
+            result=job.result,
+            artifact_uri=job.artifact_uri,
+            error=job.error,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            started_at=job.started_at,
+            completed_at=job.completed_at,
         )
 
 

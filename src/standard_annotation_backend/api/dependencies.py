@@ -18,6 +18,7 @@ from standard_annotation_backend.services.authentication_service import (
 )
 from standard_annotation_backend.services.change_set_service import ChangeSetService
 from standard_annotation_backend.services.comment_service import CommentService
+from standard_annotation_backend.services.job_service import JobService
 
 _IF_MATCH_PATTERN = re.compile(r'^"([1-9][0-9]*)"$')
 
@@ -198,3 +199,13 @@ def get_comment_service(
         Service configured to run annotation comment operations.
     """
     return CommentService(unit_of_work_factory)
+
+
+def get_job_service(
+    unit_of_work_factory: Annotated[
+        UnitOfWorkFactory,
+        Depends(get_unit_of_work_factory),
+    ],
+) -> JobService:
+    """Create the job service used by an API request."""
+    return JobService(unit_of_work_factory)

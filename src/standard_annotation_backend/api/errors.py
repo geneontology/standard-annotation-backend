@@ -32,6 +32,7 @@ from standard_annotation_backend.persistence.repositories import (
     CommentNotFoundError,
     DuplicateAnnotationError,
     InvalidCommentError,
+    JobNotFoundError,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.repositories.auth import (
@@ -260,6 +261,11 @@ def install_exception_handlers(app: FastAPI) -> None:
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "invalid_comment",
             "Comment body must contain non-whitespace text",
+        ),
+        JobNotFoundError: _FixedErrorResponse(
+            status.HTTP_404_NOT_FOUND,
+            "job_not_found",
+            "Job was not found",
         ),
     }
 

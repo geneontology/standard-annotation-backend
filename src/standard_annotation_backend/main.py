@@ -24,6 +24,7 @@ from standard_annotation_backend.api.routes.annotations import (
 from standard_annotation_backend.api.routes.change_sets import (
     router as change_sets_router,
 )
+from standard_annotation_backend.api.routes.jobs import router as jobs_router
 from standard_annotation_backend.api.routes.token_management import (
     router as token_management_router,
 )
@@ -73,6 +74,7 @@ app = FastAPI(
         {"name": "annotations"},
         {"name": "annotation comments"},
         {"name": "change-sets"},
+        {"name": "jobs"},
     ],
     version=get_application_version(),
     docs_url=None,
@@ -84,6 +86,7 @@ app.include_router(annotation_comments_router)
 app.include_router(annotation_versions_router)
 app.include_router(annotations_router)
 app.include_router(change_sets_router)
+app.include_router(jobs_router)
 app.include_router(token_management_router)
 app.include_router(tokens_router)
 app.mount(

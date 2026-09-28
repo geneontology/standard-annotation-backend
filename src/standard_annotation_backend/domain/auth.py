@@ -32,6 +32,7 @@ class PermissionAction(StrEnum):
     CHANGE_SET_READ = "change_set.read"
     CHANGE_SET_PROPOSE = "change_set.propose"
     CHANGE_SET_REVIEW = "change_set.review"
+    JOB_READ = "job.read"
 
 
 @dataclass(frozen=True, slots=True)

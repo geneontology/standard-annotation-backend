@@ -52,6 +52,22 @@ services:
       redis:
         condition: service_started
 
+  scheduler:
+    build: .
+    command: celery -A standard_annotation_backend.workers.celery_app:celery_app beat --loglevel=INFO
+    env_file:
+      - .env
+    environment:
+      SAB_DATABASE_URL: postgresql+psycopg://sab:sab@postgres:5432/sab
+      SAB_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
   tools:
     profiles:
       - tools

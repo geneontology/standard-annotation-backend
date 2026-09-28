@@ -24,7 +24,7 @@ development images, and applies database migrations. It does not replace an exis
 `.env` file. Local settings live in `.env`; `.env.example` contains development
 defaults.
 
-Start the web application, PostgreSQL, Redis, and the background worker:
+Start the web application, PostgreSQL, Redis, the background worker, and the scheduler:
 
 ```bash
 just up
@@ -40,8 +40,8 @@ The response should be `{"status":"ok"}`. Open Swagger UI at
 <http://localhost:8000/docs> or inspect the OpenAPI document at
 <http://localhost:8000/openapi.json>.
 
-The web container reloads when files under `src/` change. Restart the worker after
-changing worker code. Follow web application logs with:
+The web container reloads when files under `src/` change. Restart the worker and
+scheduler after changing background-job code. Follow web application logs with:
 
 ```bash
 just logs
