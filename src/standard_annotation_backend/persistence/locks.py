@@ -9,11 +9,14 @@ from uuid import UUID
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.ontology import OntologyKey
+
 GLOBAL_ANNOTATION_WRITE_LOCK_KEY = -(2**63)
 _AUTHORIZATION_SYNC_LOCK_KEY = 0x53414241555448
 _MAX_SIGNATURE_LOCK_KEY = (1 << 63) - 1
 _HEXADECIMAL_CHARACTERS = frozenset(string.hexdigits)
 _JOB_LOCK_PERSON = b"SABJOB"
+_ONTOLOGY_LOCK_PERSON = b"SABONTO"
 
 
 def acquire_authorization_sync_lock(session: Session) -> None:
@@ -130,6 +133,49 @@ def job_lock_key(job_id: UUID) -> int:
         person=_JOB_LOCK_PERSON,
     ).digest()
     return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+def ontology_lock_key(key: str) -> int:
+    """Return a stable PostgreSQL advisory-lock key for an ontology key."""
+    digest = hashlib.blake2b(
+        key.encode("utf-8"), digest_size=8, person=_ONTOLOGY_LOCK_PERSON
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+@contextmanager
+def ontology_load_lock(engine: Engine, key: OntologyKey | str) -> Iterator[bool]:
+    """Try to lock ontology loading for one key until the context exits.
+
+    Args:
+        engine: Database engine used to own the dedicated lock connection.
+        key: Ontology whose loads must not overlap.
+
+    Yields:
+        `True` when this connection owns the lock, otherwise `False`.
+
+    Raises:
+        RuntimeError: If PostgreSQL reports that an owned lock was not released.
+    """
+    key_value = key.value if isinstance(key, OntologyKey) else key
+    lock_key = ontology_lock_key(key_value)
+    with engine.connect() as connection:
+        acquired = bool(
+            connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
+        )
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                released = connection.scalar(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": lock_key},
+                )
+                if released is not True:
+                    raise RuntimeError("ontology load lock was not released")
 
 
 @contextmanager

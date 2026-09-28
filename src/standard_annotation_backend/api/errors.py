@@ -40,8 +40,12 @@ from standard_annotation_backend.persistence.repositories.auth import (
 )
 from standard_annotation_backend.services.annotation_service import (
     AnnotationHistoryNotFoundError,
+    ClosureTermRequiredError,
     EmptyAnnotationPatchError,
     InvalidAnnotationPayloadError,
+    OntologyUnavailableError,
+    UnsupportedClosureFieldError,
+    UnsupportedClosurePredicateError,
 )
 from standard_annotation_backend.services.change_set_service import (
     ChangeSetNotFoundError,
@@ -241,6 +245,26 @@ def install_exception_handlers(app: FastAPI) -> None:
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "empty_annotation_patch",
             "Annotation patch must include at least one field",
+        ),
+        ClosureTermRequiredError: _FixedErrorResponse(
+            status.HTTP_400_BAD_REQUEST,
+            "closure_term_required",
+            "ontology_class_id is required for closure search",
+        ),
+        UnsupportedClosureFieldError: _FixedErrorResponse(
+            status.HTTP_400_BAD_REQUEST,
+            "unsupported_closure_field",
+            "Closure search is supported only for ontology_class_id",
+        ),
+        UnsupportedClosurePredicateError: _FixedErrorResponse(
+            status.HTTP_400_BAD_REQUEST,
+            "unsupported_closure_predicate",
+            "Closure predicate is not loaded for the active ontology",
+        ),
+        OntologyUnavailableError: _FixedErrorResponse(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ontology_unavailable",
+            "The ontology required for closure search is unavailable",
         ),
         AnnotationNotFoundError: _FixedErrorResponse(
             status.HTTP_404_NOT_FOUND,

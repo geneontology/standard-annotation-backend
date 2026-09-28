@@ -514,7 +514,8 @@ POST /exports
   Creates an annotation export job and returns 202 Accepted with a job ID.
 
 POST /ontology-loads
-  Creates a GO ontology load job and returns 202 Accepted with a job ID.
+  Creates an ontology load job for a configured ontology key and returns
+  202 Accepted with a job ID. GO is the first configured ontology.
   The same job type may also be created by a scheduler for periodic loads.
 
 POST /reports/annotation-qc
@@ -557,7 +558,15 @@ A separate QC process may apply the same pairwise duplicate predicate to bootstr
 
 ### Ontology Loading
 
-SAB should load the GO ontology from the latest available `go-edit.obo` file in the [`geneontology/go-ontology`](https://github.com/geneontology/go-ontology) repository and record the source commit hash as the main source metadata. The target is to reload the ontology as frequently as is practical, ideally multiple times per week, though the exact cadence can remain flexible. 
+GO is the first ontology configured for loading. Its initial source is the latest
+available `go-edit.obo` file in the
+[`geneontology/go-ontology`](https://github.com/geneontology/go-ontology) repository,
+and SAB records the source commit hash as the main source metadata. Source adapters,
+the ontology registry, snapshot storage, and load jobs are keyed generically so a
+configured source does not have to be GitHub and additional ontologies can be added
+without redesigning persistence. The set of additional ontologies and their sources is
+deferred. The target is to reload configured ontologies as frequently as is practical,
+with GO initially scheduled multiple times per week.
 
 A successful load should compute closure rows for an approved list of predicates such as `rdfs:subClassOf` and `BFO:0000050` (part of), store source metadata, and mark the new ontology version active only after the load succeeds. A closure row should record the subject term, predicate, object term, and depth, where subject is the more specific matched term and object is the broader queried term.
 

@@ -21,7 +21,21 @@ from standard_annotation_backend.auth.authorization_source import (
     AuthorizationSourceClient,
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.persistence.locks import job_execution_lock
+from standard_annotation_backend.domain.ontology import (
+    OntologyKey,
+    OntologyLoadResult,
+    OntologyParseError,
+)
+from standard_annotation_backend.ontology.obo_parser import parse_obo
+from standard_annotation_backend.ontology.sources import OntologySourceError
+from standard_annotation_backend.persistence.locks import (
+    job_execution_lock,
+    ontology_load_lock,
+)
+from standard_annotation_backend.services.job_service import JobService
+from standard_annotation_backend.services.ontology_load_service import (
+    OntologyCandidateConflictError,
+)
 from standard_annotation_backend.workers.celery_app import celery_app
 from standard_annotation_backend.workers.runtime import worker_runtime
 
@@ -29,7 +43,13 @@ logger = logging.getLogger(__name__)
 
 _SYNC_FAILURE = "Authorization synchronization failed"
 _DISPATCH_FAILURE = "Authorization synchronization could not be dispatched"
-_TASK_UNAVAILABLE = "Authorization synchronization task could not persist state"
+_TASK_UNAVAILABLE = "Worker task could not persist state"
+_ONTOLOGY_FAILURE = "Ontology load failed"
+_ONTOLOGY_DISPATCH_FAILURE = "Ontology load could not be dispatched"
+
+
+class OntologyLoadBusyError(RuntimeError):
+    """Report that another worker is already loading the ontology."""
 
 
 class WorkerTaskUnavailableError(RuntimeError):
@@ -37,6 +57,93 @@ class WorkerTaskUnavailableError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(_TASK_UNAVAILABLE)
+
+
+@celery_app.task(bind=True, max_retries=None, name="sab.ontology_load.run")
+def run_ontology_load(task: Task, job_id: str) -> None:
+    """Run one ontology-load job from retrieval through activation."""
+    failure_type: str | None = None
+    try:
+        durable_job_id = UUID(job_id)
+        with (
+            worker_runtime() as runtime,
+            job_execution_lock(runtime.engine, durable_job_id) as job_acquired,
+        ):
+            if not job_acquired:
+                return
+            job = runtime.jobs.start(durable_job_id)
+            if job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}:
+                return
+            try:
+                if job.job_type is not JobType.ONTOLOGY_LOAD:
+                    raise ValueError("unexpected job type")
+                ontology_key = OntologyKey(job.parameters["ontology"])
+                load_service = runtime.ontology_loads[ontology_key]
+            except (KeyError, TypeError, ValueError):
+                runtime.jobs.fail(durable_job_id, error=_ONTOLOGY_FAILURE)
+                return
+            completed = load_service.completed(durable_job_id)
+            if completed is not None:
+                _finalize_ontology_job(runtime.jobs, durable_job_id, completed)
+                return
+            definition = runtime.ontology_registry.definition(ontology_key)
+            with ontology_load_lock(runtime.engine, ontology_key) as ontology_acquired:
+                if not ontology_acquired:
+                    raise OntologyLoadBusyError
+                try:
+                    document = runtime.ontology_registry.source(ontology_key).fetch()
+                    if load_service.matches_active(document):
+                        result = OntologyLoadResult.unchanged(document)
+                    else:
+                        snapshot = parse_obo(document, definition)
+                        load_service.stage(
+                            job_id=durable_job_id,
+                            document=document,
+                            snapshot=snapshot,
+                        )
+                        result = load_service.activate(
+                            job_id=durable_job_id,
+                            actor_id=job.requested_by,
+                        )
+                except (
+                    OntologyCandidateConflictError,
+                    OntologyParseError,
+                    OntologySourceError,
+                ) as error:
+                    logger.error(
+                        "Ontology load job failed: job_id=%s failure_type=%s",
+                        durable_job_id,
+                        type(error).__name__,
+                    )
+                    runtime.jobs.fail(durable_job_id, error=_ONTOLOGY_FAILURE)
+                    return
+            _finalize_ontology_job(runtime.jobs, durable_job_id, result.to_job_result())
+    except Exception as error:
+        failure_type = type(error).__name__
+    if failure_type is not None:
+        _retry_safely(task, job_id, failure_type)
+
+
+def _finalize_ontology_job(
+    jobs: JobService, job_id: UUID, result: dict[str, object]
+) -> None:
+    """Mark an ontology-load job successful using its stored activation result."""
+    findings = result.get("findings")
+    finding_count = len(findings) if isinstance(findings, list) else 0
+    progress = {
+        "phase": "completed",
+        "annotation_scan_count": result.get("annotation_scan_count", 0),
+        "annotation_update_count": result.get("annotation_update_count", 0),
+        "annotation_skip_count": result.get("annotation_skip_count", 0),
+        "finding_count": finding_count,
+    }
+    warnings = (
+        (f"Ontology load completed with {finding_count} findings",)
+        if finding_count
+        else ()
+    )
+    jobs.update_progress(job_id, progress=progress, warnings=warnings)
+    jobs.succeed(job_id, result=result)
 
 
 def _source_client(parameters: dict[str, object]) -> AuthorizationSourceClient:
@@ -56,7 +163,7 @@ def _source_client(parameters: dict[str, object]) -> AuthorizationSourceClient:
 def _retry_safely(task: Task, job_id: str, failure_type: str) -> None:
     """Request a retry while logging only the job ID and exception type."""
     logger.error(
-        "Authorization synchronization task unavailable: job_id=%s failure_type=%s",
+        "Worker task unavailable: job_id=%s failure_type=%s",
         job_id,
         failure_type,
     )
@@ -182,6 +289,32 @@ def schedule_authorization_sync(task: Task) -> None:
                     type(error).__name__,
                 )
                 runtime.jobs.fail(job.job_id, error=_DISPATCH_FAILURE)
+    except Exception as error:
+        failure_type = type(error).__name__
+    if failure_type is not None:
+        _retry_safely(task, "scheduler", failure_type)
+
+
+@celery_app.task(bind=True, max_retries=None, name="sab.ontology_load.schedule")
+def schedule_ontology_load(task: Task) -> None:
+    """Create and dispatch the scheduled GO ontology-load job."""
+    failure_type: str | None = None
+    try:
+        with worker_runtime() as runtime:
+            job = runtime.jobs.create(
+                job_type=JobType.ONTOLOGY_LOAD,
+                requested_by="scheduler",
+                parameters={"ontology": OntologyKey.GO.value},
+            )
+            try:
+                run_ontology_load.delay(str(job.job_id))
+            except Exception as error:
+                logger.error(
+                    "Ontology load dispatch failed: job_id=%s failure_type=%s",
+                    job.job_id,
+                    type(error).__name__,
+                )
+                runtime.jobs.fail(job.job_id, error=_ONTOLOGY_DISPATCH_FAILURE)
     except Exception as error:
         failure_type = type(error).__name__
     if failure_type is not None:

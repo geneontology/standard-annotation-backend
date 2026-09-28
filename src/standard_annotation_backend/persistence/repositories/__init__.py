@@ -26,6 +26,10 @@ from standard_annotation_backend.persistence.repositories.jobs import (
     JobNotFoundError,
     JobRepository,
 )
+from standard_annotation_backend.persistence.repositories.ontologies import (
+    OntologyRepository,
+    OntologyVersionNotFoundError,
+)
 from standard_annotation_backend.persistence.repositories.pagination import Page
 
 __all__ = [
@@ -46,6 +50,8 @@ __all__ = [
     "InvalidJobTransitionError",
     "JobNotFoundError",
     "JobRepository",
+    "OntologyRepository",
+    "OntologyVersionNotFoundError",
     "Page",
     "StaleAnnotationVersionError",
 ]

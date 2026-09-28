@@ -36,6 +36,9 @@ from standard_annotation_backend.persistence.unit_of_work import (
 )
 
 APPLICATION_TABLES = (
+    "ontology_closure",
+    "ontology_term",
+    "ontology_metadata",
     "api_token",
     "token_management_session",
     "authorization_assignment",

@@ -24,6 +24,12 @@ def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("SAB_AUTHORIZATION_SOURCE_REF", "master")
     monkeypatch.setenv("SAB_AUTHORIZATION_SOURCE_PATH", "metadata/users.yaml")
     monkeypatch.setenv("SAB_AUTHORIZATION_SYNC_CRON", "0 0 * * *")
+    monkeypatch.setenv(
+        "SAB_ONTOLOGY_SOURCES",
+        '{"go":{"source_type":"github","repository":"geneontology/go-ontology",'
+        '"ref":"master","path":"src/ontology/go-edit.obo"}}',
+    )
+    monkeypatch.setenv("SAB_ONTOLOGY_LOAD_CRON", "0 2 * * 1,3,5")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_SECRET", "test-client-secret")
     monkeypatch.setenv(

@@ -1,0 +1,7 @@
+format-version: 1.4
+ontology: go
+
+[Term]
+id: GO:0000001
+name: term with a dangling parent
+is_a: GO:9999999 ! missing term

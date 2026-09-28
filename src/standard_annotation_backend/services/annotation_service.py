@@ -12,6 +12,7 @@ from standard_annotation_backend.domain.auth import (
     authorize_role,
     derive_creation_group,
 )
+from standard_annotation_backend.domain.ontology import OntologyKey
 from standard_annotation_backend.domain.validation import (
     ValidationIssue,
     validate_annotation,
@@ -96,6 +97,22 @@ class InvalidAnnotationPayloadError(ValueError):
 
 class EmptyAnnotationPatchError(ValueError):
     """Report an update request that does not supply any fields to replace."""
+
+
+class ClosureTermRequiredError(ValueError):
+    """Report that a closure predicate was supplied without an ontology term."""
+
+
+class UnsupportedClosureFieldError(ValueError):
+    """Report that closure search was requested for an unsupported field."""
+
+
+class UnsupportedClosurePredicateError(ValueError):
+    """Report that the active ontology does not support a closure predicate."""
+
+
+class OntologyUnavailableError(RuntimeError):
+    """Report that closure search has no active ontology snapshot."""
 
 
 class AnnotationHistoryNotFoundError(LookupError):
@@ -321,6 +338,7 @@ class AnnotationService:
         negation: bool | None = None,
         relation: str | None = None,
         ontology_class_id: str | None = None,
+        ontology_class_id_closure: str | None = None,
         evidence_type: str | None = None,
         annotation_date: date | None = None,
         assigned_by: str | None = None,
@@ -341,6 +359,7 @@ class AnnotationService:
             negation: Negation value to match.
             relation: Relation identifier to match.
             ontology_class_id: Ontology class identifier to match.
+            ontology_class_id_closure: Predicate used for descendant-or-self search.
             evidence_type: Evidence type identifier to match.
             annotation_date: Annotation date to match.
             assigned_by: Assigning organization to match.
@@ -354,12 +373,15 @@ class AnnotationService:
             The requested annotations and pagination information.
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
+        if ontology_class_id_closure is not None and ontology_class_id is None:
+            raise ClosureTermRequiredError
         filters = replace(
             ownership_filters(context),
             db_object_id=db_object_id,
             negation=negation,
             relation=relation,
             ontology_class_id=ontology_class_id,
+            ontology_class_id_closure=ontology_class_id_closure,
             evidence_type=evidence_type,
             annotation_date=annotation_date,
             assigned_by=assigned_by,
@@ -368,6 +390,12 @@ class AnnotationService:
             interacting_taxon_id=interacting_taxon_id,
         )
         with self._unit_of_work_factory() as unit_of_work:
+            if ontology_class_id_closure is not None:
+                active = unit_of_work.ontologies.get_active(OntologyKey.GO)
+                if active is None:
+                    raise OntologyUnavailableError
+                if ontology_class_id_closure not in active.loaded_predicates:
+                    raise UnsupportedClosurePredicateError
             page = unit_of_work.annotations.list_active(
                 filters,
                 limit=limit,

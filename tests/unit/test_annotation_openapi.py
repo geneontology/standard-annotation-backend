@@ -115,6 +115,7 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
         "negation",
         "relation",
         "ontology_class_id",
+        "ontology_class_id_closure",
         "references",
         "evidence_type",
         "with_or_from",
@@ -124,6 +125,12 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
         "limit",
         "offset",
     }
+    closure_parameter = next(
+        parameter
+        for parameter in collection_parameters
+        if parameter["name"] == "ontology_class_id_closure"
+    )
+    assert "descendant-or-self" in closure_parameter["description"]
     for method in ("patch", "delete"):
         parameters = paths["/annotations/{annotation_id}"][method]["parameters"]
         assert any(
