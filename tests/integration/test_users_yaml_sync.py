@@ -1,6 +1,9 @@
 """Verify atomic synchronization of users, grants, provenance, and audit events."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import event, select
@@ -16,6 +19,7 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.authorization_sync_service import (
+    AuthorizationSyncResult,
     AuthorizationSyncService,
 )
 
@@ -230,6 +234,83 @@ def test_successful_sync_commits_exactly_once(
     finally:
         event.remove(Session, "after_commit", committed)
     assert len(commits) == 1
+
+
+def test_repeated_revision_is_idempotent_without_state_or_audit_changes(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Repeating a repository and commit returns the stored result unchanged."""
+    service = _service(unit_of_work_factory)
+    first = service.synchronize(INITIAL, "geneontology/go-site", "a" * 40)
+    before = _snapshot(session_factory)
+
+    repeated = service.synchronize(INITIAL, "geneontology/go-site", "a" * 40)
+
+    assert first.applied is True
+    assert repeated.applied is False
+    assert repeated.sync_id == first.sync_id
+    assert (
+        repeated.user_count,
+        repeated.group_count,
+        repeated.assignment_count,
+    ) == (2, 2, 3)
+    assert _snapshot(session_factory) == before
+
+
+def test_concurrent_same_revision_is_applied_once(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Concurrent requests for one source revision create one sync and audit."""
+    ready = Barrier(2)
+
+    def synchronize() -> AuthorizationSyncResult:
+        ready.wait(timeout=3)
+        return _service(unit_of_work_factory).synchronize(
+            INITIAL, "geneontology/go-site", "a" * 40
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(lambda _: synchronize(), range(2)))
+
+    assert {result.applied for result in results} == {True, False}
+    assert len({result.sync_id for result in results}) == 1
+    with session_factory() as session:
+        assert len(session.scalars(select(AuthorizationSyncRecord)).all()) == 1
+        audits = session.scalars(
+            select(AuditEventRecord).where(
+                AuditEventRecord.action == "authorization.synchronized"
+            )
+        ).all()
+        assert len(audits) == 1
+
+
+def test_worker_sync_audit_retains_actor_and_job_context(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A worker-created sync audit records its actor and job identifier."""
+    job_id = uuid4()
+
+    result = _service(unit_of_work_factory).synchronize(
+        INITIAL,
+        "geneontology/go-site",
+        "a" * 40,
+        actor_id="scheduler",
+        job_id=job_id,
+    )
+
+    assert result.applied is True
+    with session_factory() as session:
+        audit = session.scalar(
+            select(AuditEventRecord).where(
+                AuditEventRecord.action == "authorization.synchronized"
+            )
+        )
+        assert audit is not None
+        assert audit.actor_id == "scheduler"
+        assert audit.job_id == job_id
 
 
 def test_changed_login_creates_new_user_and_deactivates_old_assignments(

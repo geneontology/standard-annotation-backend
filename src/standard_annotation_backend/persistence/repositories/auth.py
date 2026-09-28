@@ -15,6 +15,9 @@ from standard_annotation_backend.domain.auth import (
     AuthorizationScope,
 )
 from standard_annotation_backend.domain.tokens import TokenMetadata
+from standard_annotation_backend.persistence.locks import (
+    acquire_authorization_sync_lock,
+)
 from standard_annotation_backend.persistence.models import (
     ApiTokenRecord,
     AuthorizationAssignmentRecord,
@@ -84,6 +87,14 @@ class SyncUser:
     authorizations: tuple[SyncAuthorization, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class AuthorizationReplacement:
+    """Pair a sync record with whether the current call created it."""
+
+    record: AuthorizationSyncRecord
+    applied: bool
+
+
 class AuthRepository:
     """Keep synchronized grants and credentials in the shared transaction.
 
@@ -101,7 +112,7 @@ class AuthRepository:
         source_repository: str,
         source_commit_sha: str,
         summary: dict[str, object],
-    ) -> AuthorizationSyncRecord:
+    ) -> AuthorizationReplacement:
         """Replace active grants atomically and retain removed grants as history.
 
         A transaction-scoped advisory lock ensures that only one synchronization
@@ -123,9 +134,18 @@ class AuthRepository:
             summary: Credential-free counts to retain with the synchronization.
 
         Returns:
-            Stored synchronization record with its generated identifier and time.
+            Stored synchronization record and whether this call applied it.
         """
-        self.session.execute(select(func.pg_advisory_xact_lock(0x53414241555448)))
+        acquire_authorization_sync_lock(self.session)
+        existing = self.session.scalar(
+            select(AuthorizationSyncRecord).where(
+                AuthorizationSyncRecord.source_repository == source_repository,
+                AuthorizationSyncRecord.source_commit_sha == source_commit_sha,
+            )
+        )
+        if existing is not None:
+            return AuthorizationReplacement(existing, False)
+
         current_users = {
             user.github_login.lower(): user
             for user in self.session.scalars(select(SabUserRecord)).all()
@@ -191,7 +211,7 @@ class AuthRepository:
         )
         self.session.add(sync)
         self.session.flush()
-        return sync
+        return AuthorizationReplacement(sync, True)
 
     def get_user_by_github_login(self, github_login: str) -> SabUserRecord | None:
         """Find an active user using GitHub's case-insensitive login.

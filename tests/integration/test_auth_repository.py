@@ -21,7 +21,9 @@ from standard_annotation_backend.persistence.repositories.auth import (
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 
 
-def _sync(unit_of_work_factory: UnitOfWorkFactory) -> None:
+def _sync(
+    unit_of_work_factory: UnitOfWorkFactory, source_commit_sha: str = "a" * 40
+) -> None:
     with unit_of_work_factory() as uow:
         uow.auth.replace_authorizations(
             users=(
@@ -31,7 +33,7 @@ def _sync(unit_of_work_factory: UnitOfWorkFactory) -> None:
                 SyncUser("other", None, (SyncAuthorization("admin", "global", None),)),
             ),
             source_repository="geneontology/go-site",
-            source_commit_sha="a" * 40,
+            source_commit_sha=source_commit_sha,
             summary={"users": 2},
         )
         uow.commit()
@@ -61,7 +63,7 @@ def test_sync_retains_unchanged_ids_and_preserves_removed_history(
         assert uow.auth.get_active_assignment(user_id, original) is None
         assert uow.auth.get_user_by_github_login("other") is None
         uow.commit()
-    _sync(unit_of_work_factory)
+    _sync(unit_of_work_factory, "c" * 40)
     with unit_of_work_factory() as uow:
         assert uow.auth.list_active_assignments(user_id)[0].assignment_id != original
     with session_factory() as session:
@@ -286,7 +288,7 @@ def test_removed_and_regranted_context_does_not_revive_issued_token(
             users=(), source_repository="repo", source_commit_sha="b" * 40, summary={}
         )
         uow.commit()
-    _sync(unit_of_work_factory)
+    _sync(unit_of_work_factory, "c" * 40)
     with unit_of_work_factory() as uow:
         assert uow.auth.get_active_token("a" * 64, now=now) is None
         entries = uow.auth.list_tokens(owner.user_id)

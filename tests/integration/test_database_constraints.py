@@ -18,6 +18,150 @@ from standard_annotation_backend.persistence.models import (
 )
 
 
+def _job_values(
+    *,
+    job_type: str = "authorization_sync",
+    status: str = "queued",
+) -> dict[str, object]:
+    """Build one valid job row for the requested lifecycle state."""
+    now = datetime.now(UTC)
+    values: dict[str, object] = {
+        "job_type": job_type,
+        "status": status,
+        "requested_by": "scheduler",
+        "parameters": {},
+        "progress": {},
+        "warnings": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    if status == "running":
+        values["started_at"] = now
+    elif status == "succeeded":
+        values.update(started_at=now, completed_at=now, result={})
+    elif status == "failed":
+        values.update(completed_at=now, error="Job dispatch failed")
+    return values
+
+
+@pytest.mark.parametrize(
+    "job_type",
+    [
+        "annotation_import",
+        "annotation_export",
+        "ontology_load",
+        "annotation_qc",
+        "unknown",
+    ],
+)
+def test_job_constraint_rejects_unimplemented_types(
+    database_engine: Engine,
+    job_type: str,
+) -> None:
+    """The database rejects job types without an implemented worker."""
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(JobRecord), _job_values(job_type=job_type))
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "succeeded", "failed"])
+def test_authorization_sync_accepts_each_lifecycle_state(
+    database_engine: Engine,
+    status: str,
+) -> None:
+    """An authorization sync job accepts every defined job status."""
+    with database_engine.begin() as connection:
+        connection.execute(insert(JobRecord), _job_values(status=status))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"status": "cancelled"},
+        {"parameters": []},
+        {"progress": []},
+        {"warnings": {}},
+        {"warnings": ["safe", 7]},
+        {"status": "queued", "started_at": datetime.now(UTC)},
+        {"status": "queued", "completed_at": datetime.now(UTC)},
+        {"status": "queued", "result": {}},
+        {"status": "queued", "error": "failed"},
+        {"status": "running", "started_at": None},
+        {
+            "status": "running",
+            "started_at": datetime.now(UTC),
+            "completed_at": datetime.now(UTC),
+        },
+        {
+            "status": "succeeded",
+            "started_at": datetime.now(UTC),
+            "completed_at": datetime.now(UTC),
+            "result": None,
+        },
+        {
+            "status": "succeeded",
+            "started_at": datetime.now(UTC),
+            "completed_at": datetime.now(UTC),
+            "result": [],
+        },
+        {
+            "status": "succeeded",
+            "started_at": datetime.now(UTC),
+            "completed_at": datetime.now(UTC),
+            "result": {},
+            "error": "failed",
+        },
+        {"status": "failed", "completed_at": datetime.now(UTC), "error": "  "},
+        {"status": "failed", "completed_at": None, "error": "failed"},
+    ],
+)
+def test_job_constraints_reject_invalid_shapes_and_transitions(
+    database_engine: Engine,
+    changes: dict[str, object],
+) -> None:
+    """The database rejects unsupported values and impossible lifecycle rows."""
+    values = _job_values() | changes
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(JobRecord), values)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"started_at": datetime(2026, 1, 1, tzinfo=UTC)},
+        {"completed_at": datetime(2026, 1, 1, tzinfo=UTC)},
+        {
+            "started_at": datetime(2026, 1, 3, tzinfo=UTC),
+            "completed_at": datetime(2026, 1, 2, tzinfo=UTC),
+        },
+    ],
+)
+def test_job_constraints_reject_backwards_lifecycle_timestamps(
+    database_engine: Engine,
+    changes: dict[str, object],
+) -> None:
+    """Lifecycle timestamps cannot precede creation or each other."""
+    values = _job_values(status="succeeded") | {
+        "created_at": datetime(2026, 1, 2, tzinfo=UTC),
+        "updated_at": datetime(2026, 1, 3, tzinfo=UTC),
+    }
+    values.update(changes)
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(JobRecord), values)
+
+
+def test_authorization_source_revision_is_unique(database_engine: Engine) -> None:
+    """A repository and commit identify at most one authorization sync record."""
+    values = {
+        "source_repository": "geneontology/go-site",
+        "source_commit_sha": "a" * 40,
+        "summary": {},
+    }
+    with database_engine.begin() as connection:
+        connection.execute(insert(models.AuthorizationSyncRecord), values)
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(insert(models.AuthorizationSyncRecord), values)
+
+
 def _auth_owner(database_engine: Engine) -> tuple[UUID, UUID, UUID]:
     """Persist a user, group, and valid group-scoped assignment."""
     user_id, group_id, assignment_id = uuid4(), uuid4(), uuid4()
@@ -477,14 +621,16 @@ def test_annotation_constraints_reject_invalid_current_rows(
     """The database rejects invalid versions, states, signatures, and provenance."""
     values = _annotation_values(uuid4()) | changes
     if changes.get("source_import_job_id") is not None:
+        created_at = datetime.now(UTC)
         with database_engine.begin() as connection:
             connection.execute(
                 insert(JobRecord),
                 {
                     "job_id": values["source_import_job_id"],
-                    "job_type": "import",
-                    "status": "completed",
-                    "created_at": datetime.now(UTC),
+                    "job_type": "authorization_sync",
+                    "status": "queued",
+                    "created_at": created_at,
+                    "updated_at": created_at,
                     "requested_by": "test-user",
                 },
             )

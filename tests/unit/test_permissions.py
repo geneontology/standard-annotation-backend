@@ -99,6 +99,23 @@ def test_read_role_allows_each_read_action(action: PermissionAction) -> None:
     )
 
 
+@pytest.mark.parametrize("role", [AuthorizationRole.READ, AuthorizationRole.EDIT])
+def test_job_reads_require_admin_role(role: AuthorizationRole) -> None:
+    """Non-admin roles cannot read system-wide job state."""
+    with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
+        authorize(
+            _context(role, AuthorizationScope.GLOBAL),
+            PermissionAction.JOB_READ,
+            MATCHING_RESOURCE,
+        )
+
+    authorize(
+        _context(AuthorizationRole.ADMIN, AuthorizationScope.GLOBAL),
+        PermissionAction.JOB_READ,
+        MATCHING_RESOURCE,
+    )
+
+
 @pytest.mark.parametrize(
     "action",
     [

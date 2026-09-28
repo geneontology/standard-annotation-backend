@@ -44,15 +44,15 @@ def _create_legacy_annotations(
 ) -> None:
     job_id = uuid4()
     with unit_of_work_factory() as unit_of_work:
-        import_job = JobRecord(
+        source_job = JobRecord(
             job_id=job_id,
-            job_type="import",
-            status="complete",
+            job_type="authorization_sync",
+            status="queued",
             requested_by="importer",
             parameters={},
         )
-        unit_of_work.annotations.session.add(import_job)
-        unit_of_work.annotations.session.flush([import_job])
+        unit_of_work.annotations.session.add(source_job)
+        unit_of_work.annotations.session.flush([source_job])
         for annotation_id, annotation in annotations:
             unit_of_work.annotations.create(
                 annotation=annotation,

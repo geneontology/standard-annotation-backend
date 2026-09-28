@@ -241,9 +241,16 @@ class TokenManagementSessionRecord(Base):
 
 
 class AuthorizationSyncRecord(Base):
-    """Record successful synchronization provenance and a credential-free summary."""
+    """Store the source revision and counts for a successful authorization sync."""
 
     __tablename__ = "authorization_sync"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_repository",
+            "source_commit_sha",
+            name="source_revision_unique",
+        ),
+    )
 
     sync_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
@@ -259,9 +266,54 @@ class AuthorizationSyncRecord(Base):
 
 
 class JobRecord(Base):
-    """Define storage reserved for future background-job work."""
+    """Store the state of one asynchronous operation."""
 
     __tablename__ = "job"
+    __table_args__ = (
+        CheckConstraint(
+            "job_type IN ('authorization_sync')",
+            name="type_allowed",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(parameters) = 'object'",
+            name="parameters_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(progress) = 'object'",
+            name="progress_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(warnings) = 'array' AND NOT "
+            "jsonb_path_exists(warnings, '$[*] ? (@.type() != \"string\")')",
+            name="warnings_string_array",
+        ),
+        CheckConstraint(
+            "result IS NULL OR jsonb_typeof(result) = 'object'",
+            name="result_object",
+        ),
+        CheckConstraint(
+            "(status = 'queued' AND started_at IS NULL "
+            "AND completed_at IS NULL AND result IS NULL AND error IS NULL) OR "
+            "(status = 'running' AND started_at IS NOT NULL "
+            "AND completed_at IS NULL AND result IS NULL AND error IS NULL) OR "
+            "(status = 'succeeded' AND started_at IS NOT NULL "
+            "AND completed_at IS NOT NULL AND result IS NOT NULL "
+            "AND error IS NULL) OR "
+            "(status = 'failed' AND completed_at IS NOT NULL "
+            "AND result IS NULL AND error IS NOT NULL "
+            "AND error ~ '[^[:space:]]')",
+            name="lifecycle_consistent",
+        ),
+        CheckConstraint(
+            "updated_at >= created_at "
+            "AND (started_at IS NULL OR started_at >= created_at) "
+            "AND (completed_at IS NULL OR completed_at >= created_at) "
+            "AND (started_at IS NULL OR completed_at IS NULL "
+            "OR completed_at >= started_at)",
+            name="timestamps_ordered",
+        ),
+        Index("ix_job_status_created_at_job_id", "status", "created_at", "job_id"),
+    )
 
     job_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
@@ -272,10 +324,19 @@ class JobRecord(Base):
     parameters: Mapped[dict[str, object]] = mapped_column(
         JSONB, default=dict, server_default=text("'{}'::jsonb")
     )
-    result: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    progress: Mapped[dict[str, object]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    warnings: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
+    result: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
     artifact_uri: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

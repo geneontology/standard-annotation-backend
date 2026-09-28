@@ -3,7 +3,7 @@ set default-list
 
 # Prepare local settings, build the development images, and migrate the database.
 setup: _ensure-env
-    docker compose build web worker tools
+    docker compose build web worker scheduler tools
     docker compose run --rm web alembic upgrade head
 
 # Start the application and its supporting services.

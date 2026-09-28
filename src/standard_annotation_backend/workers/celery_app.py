@@ -1,8 +1,9 @@
-"""Celery application shared by future asynchronous jobs."""
+"""Configure Celery workers and periodic tasks."""
 
 import logging
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import setup_logging
 
 from standard_annotation_backend.config import (
@@ -26,4 +27,22 @@ def configure_celery_logging(
 celery_app = Celery(
     "standard_annotation_backend",
     broker=settings.redis_url,
+    include=["standard_annotation_backend.workers.tasks"],
+)
+celery_app.conf.update(
+    task_ignore_result=True,
+    result_backend=None,
+    accept_content=["json"],
+    task_serializer="json",
+    result_serializer="json",
+    enable_utc=True,
+    timezone="UTC",
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    beat_schedule={
+        "authorization-sync": {
+            "task": "sab.authorization_sync.schedule",
+            "schedule": crontab.from_string(settings.authorization_sync_cron),
+        }
+    },
 )

@@ -1,11 +1,18 @@
-"""Atomically replace synchronized user authorizations and record provenance."""
+"""Replace synchronized authorizations and record their source revision."""
 
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, StringConstraints, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StringConstraints,
+    ValidationError,
+)
 
 from standard_annotation_backend.auth.users_yaml import parse_users_yaml
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
@@ -19,7 +26,7 @@ from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 
 class _SyncSource(BaseModel):
-    """Validate source provenance before any authorization write transaction."""
+    """Validate the source repository and commit before changing authorizations."""
 
     source_repository: TrimmedNonBlankString
     source_commit_sha: Annotated[
@@ -28,11 +35,28 @@ class _SyncSource(BaseModel):
 
 
 class InvalidAuthorizationSyncSourceError(Exception):
-    """Report malformed provenance without retaining untrusted source values."""
+    """Report an invalid source repository or commit without storing its value."""
 
     def __init__(self, errors: tuple[ValidationIssue, ...]) -> None:
         super().__init__("invalid authorization sync source")
         self.errors = errors
+
+
+class InvalidAuthorizationSyncSummaryError(RuntimeError):
+    """Report invalid counts read from a stored synchronization record."""
+
+    def __init__(self) -> None:
+        super().__init__("stored authorization sync summary is invalid")
+
+
+class _StoredSyncSummary(BaseModel):
+    """Validate counts loaded from an existing synchronization record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    users: Annotated[StrictInt, Field(ge=0)]
+    groups: Annotated[StrictInt, Field(ge=0)]
+    assignments: Annotated[StrictInt, Field(ge=0)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +75,7 @@ class AuthorizationSyncResult:
     user_count: int
     group_count: int
     assignment_count: int
+    applied: bool
 
 
 class AuthorizationSyncService:
@@ -64,9 +89,15 @@ class AuthorizationSyncService:
         self._unit_of_work_factory = unit_of_work_factory
 
     def synchronize(
-        self, yaml_text: str, source_repository: str, source_commit_sha: str
+        self,
+        yaml_text: str,
+        source_repository: str,
+        source_commit_sha: str,
+        *,
+        actor_id: str = "authorization-sync",
+        job_id: UUID | None = None,
     ) -> AuthorizationSyncResult:
-        """Replace users and grants, saving provenance and audit in one commit.
+        """Replace users and grants, saving source details and audit in one commit.
 
         Any persistence or audit failure rolls back the entire operation. Raw
         YAML and unrelated fields are never written to storage or audit records.
@@ -77,11 +108,11 @@ class AuthorizationSyncService:
             source_commit_sha: Full hexadecimal Git commit hash (40 or 64 digits).
 
         Returns:
-            Provenance and normalized active-state counts for the committed sync.
+            Source details and active user, group, and assignment counts.
 
         Raises:
             InvalidUsersDocumentError: If any source entry or YAML is invalid.
-            InvalidAuthorizationSyncSourceError: If provenance is invalid.
+            InvalidAuthorizationSyncSourceError: If the repository or commit is invalid.
         """
         document = parse_users_yaml(yaml_text)
         try:
@@ -129,32 +160,43 @@ class AuthorizationSyncService:
             "assignments": assignment_count,
         }
         with self._unit_of_work_factory() as unit_of_work:
-            record = unit_of_work.auth.replace_authorizations(
+            replacement = unit_of_work.auth.replace_authorizations(
                 users=users,
                 source_repository=source.source_repository,
                 source_commit_sha=source.source_commit_sha.lower(),
                 summary=summary,
             )
+            record = replacement.record
+            if replacement.applied:
+                stored_summary = _StoredSyncSummary.model_validate(summary)
+            else:
+                try:
+                    stored_summary = _StoredSyncSummary.model_validate(record.summary)
+                except ValidationError:
+                    raise InvalidAuthorizationSyncSummaryError from None
             result = AuthorizationSyncResult(
                 sync_id=record.sync_id,
                 source_repository=record.source_repository,
                 source_commit_sha=record.source_commit_sha,
                 synchronized_at=record.synchronized_at,
-                user_count=len(users),
-                group_count=len(groups),
-                assignment_count=assignment_count,
+                user_count=stored_summary.users,
+                group_count=stored_summary.groups,
+                assignment_count=stored_summary.assignments,
+                applied=replacement.applied,
             )
-            unit_of_work.audit.record(
-                action=AuditAction.AUTHORIZATION_SYNCHRONIZED,
-                actor_id="authorization-sync",
-                result=AuditResult.SUCCESS,
-                details={
-                    "sync_id": str(result.sync_id),
-                    "source_repository": result.source_repository,
-                    "source_commit_sha": result.source_commit_sha,
-                    "synchronized_at": result.synchronized_at.isoformat(),
-                    **summary,
-                },
-            )
+            if replacement.applied:
+                unit_of_work.audit.record(
+                    action=AuditAction.AUTHORIZATION_SYNCHRONIZED,
+                    actor_id=actor_id,
+                    result=AuditResult.SUCCESS,
+                    job_id=job_id,
+                    details={
+                        "sync_id": str(result.sync_id),
+                        "source_repository": result.source_repository,
+                        "source_commit_sha": result.source_commit_sha,
+                        "synchronized_at": result.synchronized_at.isoformat(),
+                        **summary,
+                    },
+                )
             unit_of_work.commit()
         return result

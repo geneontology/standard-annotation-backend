@@ -58,14 +58,14 @@ def _create_direct(
         return record.annotation_id
 
 
-def _create_import_job(session_factory: sessionmaker[Session]) -> UUID:
+def _create_source_job(session_factory: sessionmaker[Session]) -> UUID:
     job_id = uuid4()
     with session_factory.begin() as session:
         session.add(
             JobRecord(
                 job_id=job_id,
-                job_type="import",
-                status="complete",
+                job_type="authorization_sync",
+                status="queued",
                 requested_by="importer",
                 parameters={},
             )
@@ -149,7 +149,7 @@ def test_imported_duplicate_peers_coexist_and_find_each_other(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    job_id = _create_import_job(session_factory)
+    job_id = _create_source_job(session_factory)
     first_id = uuid4()
     second_id = uuid4()
     persistence_data = prepare_annotation_for_persistence(validated_annotation)
@@ -195,7 +195,7 @@ def test_invalid_provenance_raises_before_flush(
     record_origin: str | AnnotationOrigin,
     has_import_job: bool,
 ) -> None:
-    job_id = _create_import_job(session_factory) if has_import_job else None
+    job_id = _create_source_job(session_factory) if has_import_job else None
 
     with (
         unit_of_work_factory() as unit_of_work,

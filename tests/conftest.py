@@ -20,6 +20,10 @@ def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("SAB_APPLICATION_SECRET", "test-application-secret")
     monkeypatch.setenv("SAB_ENVIRONMENT", "testing")
     monkeypatch.setenv("SAB_LOG_FORMAT", "console")
+    monkeypatch.setenv("SAB_AUTHORIZATION_SOURCE_REPOSITORY", "geneontology/go-site")
+    monkeypatch.setenv("SAB_AUTHORIZATION_SOURCE_REF", "master")
+    monkeypatch.setenv("SAB_AUTHORIZATION_SOURCE_PATH", "metadata/users.yaml")
+    monkeypatch.setenv("SAB_AUTHORIZATION_SYNC_CRON", "0 0 * * *")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_SECRET", "test-client-secret")
     monkeypatch.setenv(

@@ -30,6 +30,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "anyio<4.15",
+    "celery-types>=0.26.0",
     "pytest",
     "ruff",
     "ty",
