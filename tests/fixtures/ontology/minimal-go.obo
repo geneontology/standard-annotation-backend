@@ -22,7 +22,7 @@ id: GO:0000004
 name: diamond child
 is_a: GO:0000003 ! first child
 is_a: GO:0000005 ! second child
-relationship: BFO:0000050 GO:0000001 ! root process
+relationship: part_of GO:0000001 ! root process
 relationship: RO:0002211 GO:0000001 ! ignored predicate
 
 [Term]
@@ -35,3 +35,7 @@ id: GO:0000006
 name: obsolete process to consider
 is_obsolete: true
 consider: GO:0000001
+
+[Typedef]
+id: part_of
+xref: BFO:0000050

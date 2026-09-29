@@ -6,7 +6,7 @@ from io import BytesIO
 from types import MappingProxyType
 
 import fastobo
-from fastobo import header, term  # ty: ignore[unresolved-import]
+from fastobo import header, term, typedef  # ty: ignore[unresolved-import]
 
 from standard_annotation_backend.domain.ontology import (
     OntologyDefinition,
@@ -34,9 +34,10 @@ def parse_obo(
         The parsed terms, replacement metadata, and approved relation edges.
 
     Raises:
-        OntologyParseError: If syntax is invalid, a closure edge with an allowed
-            target prefix references an undefined term, or a replacement target
-            is undefined.
+        OntologyParseError: If syntax is invalid, a relation alias maps to more
+            than one approved predicate, a closure edge with an allowed target
+            prefix references an undefined term, or a replacement target is
+            undefined.
     """
     if document.ontology_key is not definition.key:
         raise OntologyParseError("ontology document key does not match its definition")
@@ -50,8 +51,22 @@ def parse_obo(
         declared_ontology = _declared_ontology(header_frame)
         terms: dict[str, OntologyTerm] = {}
         edges: set[OntologyEdge] = set()
+        relationship_edges: set[OntologyEdge] = set()
+        typedef_predicates: dict[str, set[str]] = {}
         duplicate_term_id: str | None = None
         for frame in reader:
+            if isinstance(frame, typedef.TypedefFrame):
+                configured_predicates = {
+                    str(clause.xref.id)
+                    for clause in frame
+                    if isinstance(clause, typedef.XrefClause)
+                    and str(clause.xref.id) in definition.closure_predicates
+                }
+                if configured_predicates:
+                    typedef_predicates.setdefault(str(frame.id), set()).update(
+                        configured_predicates
+                    )
+                continue
             if not isinstance(frame, term.TermFrame):
                 continue
             term_id = str(frame.id)
@@ -83,11 +98,8 @@ def parse_obo(
                 elif isinstance(clause, term.RelationshipClause):
                     predicate_id = str(clause.typedef)
                     object_term_id = str(clause.term)
-                    if (
-                        predicate_id in definition.closure_predicates
-                        and _edge_target_is_allowed(object_term_id, definition)
-                    ):
-                        edges.add(
+                    if _edge_target_is_allowed(object_term_id, definition):
+                        relationship_edges.add(
                             OntologyEdge(
                                 subject_term_id=term_id,
                                 predicate_id=predicate_id,
@@ -102,6 +114,14 @@ def parse_obo(
             )
     except (OSError, SyntaxError, TypeError, ValueError) as error:
         raise OntologyParseError("ontology source is not valid OBO") from error
+
+    edges.update(
+        _resolve_relationship_edges(
+            relationship_edges,
+            typedef_predicates,
+            definition,
+        )
+    )
 
     expected_ontology = definition.document_ontology_id or definition.key.value
     if declared_ontology != expected_ontology:
@@ -167,6 +187,41 @@ def _edge_target_is_allowed(
 ) -> bool:
     """Return whether the target belongs to an identifier namespace being loaded."""
     return target.partition(":")[0] in definition.identifier_prefixes
+
+
+def _resolve_relationship_edges(
+    edges: set[OntologyEdge],
+    typedef_predicates: dict[str, set[str]],
+    definition: OntologyDefinition,
+) -> set[OntologyEdge]:
+    """Return configured relationship edges with canonical predicate IDs."""
+    ambiguous_alias = next(
+        (
+            alias
+            for alias, predicates in sorted(typedef_predicates.items())
+            if len(predicates) > 1
+        ),
+        None,
+    )
+    if ambiguous_alias is not None:
+        raise OntologyParseError(
+            f"ontology typedef {ambiguous_alias} maps to multiple closure predicates"
+        )
+
+    resolved: set[OntologyEdge] = set()
+    for edge in edges:
+        predicate_id = edge.predicate_id
+        if predicate_id not in definition.closure_predicates:
+            predicate_id = next(iter(typedef_predicates.get(predicate_id, ())), None)
+        if predicate_id is not None:
+            resolved.add(
+                OntologyEdge(
+                    subject_term_id=edge.subject_term_id,
+                    predicate_id=predicate_id,
+                    object_term_id=edge.object_term_id,
+                )
+            )
+    return resolved
 
 
 def _validate_references(

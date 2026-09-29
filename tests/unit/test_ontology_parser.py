@@ -70,6 +70,34 @@ def test_parse_obo_excludes_relationships_not_approved_for_closure() -> None:
     assert all(edge.predicate_id != "RO:0002211" for edge in snapshot.edges)
 
 
+def test_parse_obo_rejects_an_ambiguous_typedef_mapping() -> None:
+    """A relation alias cannot select more than one configured predicate."""
+    content = b"""\
+format-version: 1.4
+ontology: go
+
+[Term]
+id: GO:0000001
+relationship: part_of GO:0000002
+
+[Term]
+id: GO:0000002
+
+[Typedef]
+id: part_of
+xref: BFO:0000050
+xref: RO:0002211
+"""
+    definition = OntologyDefinition(
+        key=OntologyKey.GO,
+        identifier_prefixes=("GO",),
+        closure_predicates=("BFO:0000050", "RO:0002211"),
+    )
+
+    with pytest.raises(OntologyParseError, match="typedef part_of maps to multiple"):
+        parse_obo(_document("ambiguous-typedef.obo", content=content), definition)
+
+
 def test_parse_obo_excludes_edge_targets_outside_identifier_prefixes() -> None:
     """Edges to identifiers outside the ontology do not enter closure data."""
     content = b"""\
