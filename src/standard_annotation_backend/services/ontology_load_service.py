@@ -1,6 +1,7 @@
 """Stage ontology snapshots and update annotations during activation."""
 
 from dataclasses import replace
+from datetime import datetime
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotations import Annotation
@@ -61,6 +62,22 @@ class OntologyLoadService:
             if record.active:
                 raise RuntimeError("active ontology snapshot has no durable result")
             return None
+
+    def prune(self, *, pruned_at: datetime) -> tuple[UUID, ...]:
+        """Delete eligible snapshot term and closure rows and commit the transaction.
+
+        Args:
+            pruned_at: Time to record on each snapshot that is pruned.
+
+        Returns:
+            Version identifiers for snapshots pruned by this call.
+        """
+        with self._unit_of_work_factory() as unit_of_work:
+            pruned = unit_of_work.ontologies.prune_candidates(
+                self._definition.key, pruned_at
+            )
+            unit_of_work.commit()
+        return pruned
 
     def stage(
         self,

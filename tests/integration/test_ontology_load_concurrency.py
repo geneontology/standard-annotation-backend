@@ -1,5 +1,6 @@
 """Verify ontology loads coordinate safely across PostgreSQL connections."""
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Event
@@ -10,6 +11,7 @@ import pytest
 from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.ontology import (
     OntologyDocument,
@@ -36,6 +38,10 @@ from standard_annotation_backend.persistence.repositories import AnnotationRepos
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.ontology_load_service import (
     OntologyLoadService,
+)
+from standard_annotation_backend.workers.tasks import (
+    WorkerTaskUnavailableError,
+    prune_ontology_snapshots,
 )
 
 OLD_JOB_ID = UUID("00000000-0000-0000-0000-000000000071")
@@ -220,6 +226,35 @@ def test_same_ontology_load_lock_is_released_after_success_and_failure(
         raise RuntimeError("injected")
     with ontology_load_lock(database_engine, OntologyKey.GO) as recovered:
         assert recovered is True
+
+
+def test_pruning_task_retries_until_same_ontology_load_lock_is_available(
+    configured_environment: None,
+    database_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pruning retries while a load holds the same ontology lock, then runs."""
+    monkeypatch.setenv("SAB_DATABASE_URL", os.environ["SAB_TEST_DATABASE_URL"])
+    get_settings.cache_clear()
+    calls: list[datetime] = []
+
+    def record_pruning(
+        _service: OntologyLoadService, *, pruned_at: datetime
+    ) -> tuple[UUID, ...]:
+        calls.append(pruned_at)
+        return ()
+
+    monkeypatch.setattr(OntologyLoadService, "prune", record_pruning)
+
+    with ontology_load_lock(database_engine, OntologyKey.GO) as acquired:
+        assert acquired is True
+        with pytest.raises(WorkerTaskUnavailableError):
+            prune_ontology_snapshots.run(OntologyKey.GO.value)
+        assert calls == []
+
+    prune_ontology_snapshots.run(OntologyKey.GO.value)
+
+    assert len(calls) == 1
 
 
 def test_activation_is_atomically_visible_and_blocks_ordinary_writes(

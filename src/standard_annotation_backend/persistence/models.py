@@ -359,6 +359,10 @@ class OntologyMetadataRecord(Base):
             "'$[*] ? (@.type() != \"string\")')",
             name="loaded_predicates_string_array",
         ),
+        CheckConstraint(
+            "NOT active OR bulk_data_pruned_at IS NULL",
+            name="active_bulk_data_complete",
+        ),
         Index(
             "uq_ontology_metadata_active_key",
             "ontology_key",
@@ -394,6 +398,9 @@ class OntologyMetadataRecord(Base):
     )
     loaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    bulk_data_pruned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
 
 class OntologyTermRecord(Base):

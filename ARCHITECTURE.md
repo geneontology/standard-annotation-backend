@@ -570,6 +570,22 @@ with GO initially scheduled multiple times per week.
 
 A successful load should compute closure rows for an approved list of predicates such as `rdfs:subClassOf` and `BFO:0000050` (part of), store source metadata, and mark the new ontology version active only after the load succeeds. A closure row should record the subject term, predicate, object term, and depth, where subject is the more specific matched term and object is the broader queried term.
 
+Ontology snapshot storage has bounded retention. SAB keeps complete term and closure
+data for the active snapshot of each ontology, its newest successfully activated
+predecessor, and every candidate owned by a queued or running job. Once a snapshot is
+outside that set, cleanup deletes its closure rows before its term rows in one
+transaction and records when the bulk data was pruned. The ontology metadata, durable
+job result, and audit events remain available as historical provenance. A snapshot
+whose bulk data was pruned cannot become active or be used by an operation that needs
+terms or closure.
+
+Pruning and activation use the same per-ontology advisory lock, so cleanup cannot race
+with a load for that ontology. A retryable `sab.ontology_load.prune` Celery task runs
+after ontology jobs become terminal and is also the one-off cleanup entry point for
+data accumulated before the retention policy shipped. Failure to publish or execute
+cleanup leaves the ontology job's terminal status and result unchanged; task retry or
+redelivery attempts cleanup again.
+
 The ontology loading process should also scan the loaded ontology for term replacement metadata. When a current annotation uses a term with a single `replaced_by` value, SAB should update that annotation to use the replacement through the normal mutation path: create a new annotation version and record an audit event tied to the ontology load job. Cases where SAB cannot safely choose an automatic action, such as a term obsoleted without replacement, a term removed from the ontology, or a term with multiple possible alternatives through `consider`, should be reported through QC reporting jobs.
 
 ## Deployment and Operations
