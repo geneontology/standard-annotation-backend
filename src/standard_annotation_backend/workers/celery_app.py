@@ -43,6 +43,10 @@ celery_app.conf.update(
         "authorization-sync": {
             "task": "sab.authorization_sync.schedule",
             "schedule": crontab.from_string(settings.authorization_sync_cron),
-        }
+        },
+        "ontology-load": {
+            "task": "sab.ontology_load.schedule",
+            "schedule": crontab.from_string(settings.ontology_load_cron),
+        },
     },
 )

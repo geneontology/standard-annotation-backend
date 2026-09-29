@@ -33,6 +33,7 @@ class PermissionAction(StrEnum):
     CHANGE_SET_PROPOSE = "change_set.propose"
     CHANGE_SET_REVIEW = "change_set.review"
     JOB_READ = "job.read"
+    ONTOLOGY_LOAD_CREATE = "ontology_load.create"
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +143,10 @@ def authorize_role(context: AuthorizationContext, action: PermissionAction) -> N
     Raises:
         PermissionDeniedError: If the selected role cannot perform the action.
     """
-    if not _role_permits(context.role, action):
+    if not _role_permits(context.role, action) or (
+        action is PermissionAction.ONTOLOGY_LOAD_CREATE
+        and context.scope is not AuthorizationScope.GLOBAL
+    ):
         raise PermissionDeniedError
 
 

@@ -9,6 +9,7 @@ from sqlalchemy import ColumnElement, delete, exists, select
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotations import Annotation, new_annotation_id
+from standard_annotation_backend.domain.ontology import OntologyKey
 from standard_annotation_backend.persistence.annotation_data import (
     AnnotationPersistenceData,
     prepare_annotation_for_persistence,
@@ -24,6 +25,8 @@ from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationStatus,
     AnnotationVersionRecord,
+    OntologyClosureRecord,
+    OntologyMetadataRecord,
 )
 from standard_annotation_backend.persistence.repositories.pagination import (
     Page,
@@ -57,6 +60,7 @@ class AnnotationSearchFilters:
     negation: bool | None = None
     relation: str | None = None
     ontology_class_id: str | None = None
+    ontology_class_id_closure: str | None = None
     evidence_type: str | None = None
     annotation_date: date | None = None
     assigned_by: str | None = None
@@ -305,6 +309,32 @@ class AnnotationRepository:
         ):
             value = getattr(filters, field_name)
             if value is not None:
+                if (
+                    field_name == "ontology_class_id"
+                    and filters.ontology_class_id_closure is not None
+                ):
+                    statement = statement.where(
+                        exists(
+                            select(1)
+                            .select_from(OntologyClosureRecord)
+                            .join(
+                                OntologyMetadataRecord,
+                                OntologyMetadataRecord.version_id
+                                == OntologyClosureRecord.version_id,
+                            )
+                            .where(
+                                OntologyMetadataRecord.ontology_key
+                                == OntologyKey.GO.value,
+                                OntologyMetadataRecord.active.is_(True),
+                                OntologyClosureRecord.subject_term_id
+                                == AnnotationRecord.ontology_class_id,
+                                OntologyClosureRecord.object_term_id == value,
+                                OntologyClosureRecord.predicate_id
+                                == filters.ontology_class_id_closure,
+                            )
+                        )
+                    )
+                    continue
                 statement = statement.where(
                     getattr(AnnotationRecord, field_name) == value
                 )
@@ -335,6 +365,22 @@ class AnnotationRepository:
             limit=limit,
             offset=offset,
         )
+
+    def lock_all_active_for_system_update(self) -> tuple[AnnotationRecord, ...]:
+        """Lock and return all active annotations for a system-wide update."""
+        return tuple(
+            self.session.scalars(
+                select(AnnotationRecord)
+                .where(AnnotationRecord.status == AnnotationStatus.ACTIVE.value)
+                .order_by(AnnotationRecord.annotation_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        )
+
+    def acquire_exclusive_system_update_lock(self) -> None:
+        """Block annotation writes during a system-wide annotation update."""
+        acquire_global_annotation_write_lock(self.session, exclusive=True)
 
     def find_duplicate_peer_ids(
         self,
@@ -717,6 +763,26 @@ class AnnotationRepository:
         self._add_derived_values(record.annotation_id, persistence_data)
         self.session.flush()
         return record
+
+    def apply_system_update(
+        self,
+        record: AnnotationRecord,
+        persistence_data: AnnotationPersistenceData,
+        *,
+        actor_id: str,
+        change_source: str,
+    ) -> AnnotationRecord:
+        """Update one annotation after system-wide validation is complete.
+
+        The caller must hold the exclusive global annotation lock and evaluate
+        duplicate safety for the complete batch before calling this method.
+        """
+        return self._apply_update(
+            record,
+            persistence_data,
+            actor_id=actor_id,
+            change_source=change_source,
+        )
 
     def soft_delete(
         self,

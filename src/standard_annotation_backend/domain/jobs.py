@@ -7,6 +7,7 @@ class JobType(StrEnum):
     """List asynchronous operations that workers can execute."""
 
     AUTHORIZATION_SYNC = "authorization_sync"
+    ONTOLOGY_LOAD = "ontology_load"
 
 
 class JobStatus(StrEnum):

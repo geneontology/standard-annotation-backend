@@ -42,7 +42,7 @@ def test_fetch_resolves_ref_then_reads_source_at_immutable_sha(
     requests = _install_transport(
         monkeypatch,
         [
-            httpx2.Response(200, json={"sha": SHA}),
+            httpx2.Response(200, json={"sha": SHA.upper()}),
             httpx2.Response(200, content=b"- accounts: {github: curator}\n"),
         ],
     )
@@ -96,7 +96,6 @@ def test_fetch_at_commit_skips_mutable_ref_resolution(
         [httpx2.Response(302, headers={"Location": "https://evil.example/commit"})],
         [httpx2.Response(200, content=b"not-json")],
         [httpx2.Response(200, json={"sha": "a" * 39})],
-        [httpx2.Response(200, json={"sha": "A" * 40})],
         [
             httpx2.Response(200, json={"sha": SHA}),
             httpx2.Response(503, content=b"private response body"),

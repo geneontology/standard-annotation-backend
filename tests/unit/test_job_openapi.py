@@ -62,6 +62,7 @@ def test_job_openapi_documents_exact_resource_and_vocabulary(
     assert "parameters" not in resource["properties"]
     assert schema["components"]["schemas"]["JobType"]["enum"] == [
         "authorization_sync",
+        "ontology_load",
     ]
     assert schema["components"]["schemas"]["JobStatus"]["enum"] == [
         "queued",

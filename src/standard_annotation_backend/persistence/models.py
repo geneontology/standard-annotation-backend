@@ -5,12 +5,14 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
     MetaData,
@@ -271,7 +273,7 @@ class JobRecord(Base):
     __tablename__ = "job"
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('authorization_sync')",
+            "job_type IN ('authorization_sync', 'ontology_load')",
             name="type_allowed",
         ),
         CheckConstraint(
@@ -341,6 +343,120 @@ class JobRecord(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OntologyMetadataRecord(Base):
+    """Store source details and activation state for one ontology snapshot."""
+
+    __tablename__ = "ontology_metadata"
+    __table_args__ = (
+        CheckConstraint(
+            "source_checksum ~ '^[0-9a-f]{64}$'", name="source_checksum_format"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(loaded_predicates) = 'array' AND NOT "
+            "jsonb_path_exists(loaded_predicates, "
+            "'$[*] ? (@.type() != \"string\")')",
+            name="loaded_predicates_string_array",
+        ),
+        Index(
+            "uq_ontology_metadata_active_key",
+            "ontology_key",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+        Index(
+            "ix_ontology_metadata_source",
+            "ontology_key",
+            "source_type",
+            "source_locator",
+            "source_revision",
+            "source_checksum",
+        ),
+    )
+
+    version_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    staging_sequence: Mapped[int] = mapped_column(BigInteger, Identity(), unique=True)
+    ontology_key: Mapped[str] = mapped_column(String(100))
+    source_type: Mapped[str] = mapped_column(String(100))
+    source_locator: Mapped[str] = mapped_column(Text)
+    source_revision: Mapped[str] = mapped_column(Text)
+    source_checksum: Mapped[str] = mapped_column(String(64))
+    document_version: Mapped[str | None] = mapped_column(Text)
+    loaded_predicates: Mapped[list[str]] = mapped_column(JSONB)
+    load_result: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    loaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+
+
+class OntologyTermRecord(Base):
+    """Store one term, its obsolete status, and its replacement suggestions."""
+
+    __tablename__ = "ontology_term"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(replaced_by) = 'array' AND NOT "
+            "jsonb_path_exists(replaced_by, '$[*] ? (@.type() != \"string\")')",
+            name="replaced_by_string_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(consider) = 'array' AND NOT "
+            "jsonb_path_exists(consider, '$[*] ? (@.type() != \"string\")')",
+            name="consider_string_array",
+        ),
+    )
+
+    version_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("ontology_metadata.version_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    term_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    obsolete: Mapped[bool] = mapped_column(Boolean)
+    replaced_by: Mapped[list[str]] = mapped_column(JSONB)
+    consider: Mapped[list[str]] = mapped_column(JSONB)
+
+
+class OntologyClosureRecord(Base):
+    """Store the shortest path length between two terms for one predicate."""
+
+    __tablename__ = "ontology_closure"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["version_id", "subject_term_id"],
+            ["ontology_term.version_id", "ontology_term.term_id"],
+            ondelete="CASCADE",
+            name="fk_ontology_closure_subject",
+        ),
+        ForeignKeyConstraint(
+            ["version_id", "object_term_id"],
+            ["ontology_term.version_id", "ontology_term.term_id"],
+            ondelete="CASCADE",
+            name="fk_ontology_closure_object",
+        ),
+        CheckConstraint("depth >= 0", name="depth_nonnegative"),
+        Index(
+            "ix_ontology_closure_object_predicate",
+            "version_id",
+            "object_term_id",
+            "predicate_id",
+        ),
+    )
+
+    version_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    subject_term_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    predicate_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    object_term_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    depth: Mapped[int] = mapped_column(Integer)
 
 
 class AnnotationRecord(Base):

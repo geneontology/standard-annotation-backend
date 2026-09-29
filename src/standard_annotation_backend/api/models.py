@@ -21,6 +21,7 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationProperties,
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.ontology import OntologyKey
 from standard_annotation_backend.services.annotation_service import (
     AnnotationVersion,
     CurrentAnnotation,
@@ -223,6 +224,14 @@ class JobResource(BaseModel):
             started_at=job.started_at,
             completed_at=job.completed_at,
         )
+
+
+class OntologyLoadRequest(BaseModel):
+    """Select a configured ontology for a background load."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ontology: OntologyKey
 
 
 class AnnotationCommentRequest(BaseModel):

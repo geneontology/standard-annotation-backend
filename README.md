@@ -70,6 +70,27 @@ just sync-authorizations
 
 The command prints the synchronized source commit and resulting counts.
 
+## Load configured ontologies
+
+Ontology loads run in the background worker and periodic loads are created by the
+scheduler, so both services started by `just up` must be running. Ontology sources use
+nested `SAB_ONTOLOGY_SOURCES__<KEY>__<FIELD>` variables. Each ontology entry must
+provide its complete source configuration; `.env.example` configures GO with its
+source type, GitHub repository, ref, and path. Deployments may instead set
+`SAB_ONTOLOGY_SOURCES` to an equivalent JSON object. Each fetched document records its
+resolved immutable commit. `SAB_ONTOLOGY_LOAD_CRON` sets the UTC Celery Beat schedule.
+
+An `admin/global` bearer token can request a GO load and then inspect the returned job
+through the common jobs API:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer ${SAB_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"ontology":"go"}' \
+  http://localhost:8000/ontology-loads
+```
+
 ## Create and manage bearer tokens
 
 Configure a GitHub OAuth app with this callback URL for local development:

@@ -49,7 +49,6 @@ def _job_values(
     [
         "annotation_import",
         "annotation_export",
-        "ontology_load",
         "annotation_qc",
         "unknown",
     ],

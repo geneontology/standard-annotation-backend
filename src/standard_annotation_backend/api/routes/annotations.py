@@ -25,7 +25,10 @@ from standard_annotation_backend.api.models import (
     ApiErrorResponse,
 )
 from standard_annotation_backend.domain.auth import RequestContext
-from standard_annotation_backend.services.annotation_service import AnnotationService
+from standard_annotation_backend.services.annotation_service import (
+    AnnotationService,
+    UnsupportedClosureFieldError,
+)
 
 router = APIRouter(
     prefix="/annotations",
@@ -48,6 +51,7 @@ _FILTER_NAMES = frozenset(
         "negation",
         "relation",
         "ontology_class_id",
+        "ontology_class_id_closure",
         "references",
         "evidence_type",
         "with_or_from",
@@ -65,6 +69,17 @@ _UNSUPPORTED_FILTER_NAMES = frozenset(
 def _reject_unknown_query_parameters(request: Request) -> None:
     allowed_names = _FILTER_NAMES | _PAGINATION_NAMES
     names = tuple(name for name, _value in request.query_params.multi_items())
+
+    unsupported_closure = next(
+        (
+            name
+            for name in names
+            if name.endswith("_closure") and name != "ontology_class_id_closure"
+        ),
+        None,
+    )
+    if unsupported_closure is not None:
+        raise UnsupportedClosureFieldError
 
     unsupported_name = next(
         (name for name in names if name in _UNSUPPORTED_FILTER_NAMES),
@@ -90,7 +105,13 @@ def _reject_unknown_query_parameters(request: Request) -> None:
     "",
     response_model=AnnotationPageResponse,
     dependencies=[Depends(_reject_unknown_query_parameters)],
-    responses={status.HTTP_400_BAD_REQUEST: {"model": ApiErrorResponse}},
+    responses={
+        status.HTTP_400_BAD_REQUEST: {"model": ApiErrorResponse},
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ApiErrorResponse,
+            "description": "The ontology required for closure search is unavailable",
+        },
+    },
 )
 def list_annotations(
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
@@ -99,6 +120,15 @@ def list_annotations(
     negation: Annotated[bool | None, Query()] = None,
     relation: Annotated[str | None, Query()] = None,
     ontology_class_id: Annotated[str | None, Query()] = None,
+    ontology_class_id_closure: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Return annotations whose ontology class is a descendant-or-self "
+                "of `ontology_class_id` through this loaded predicate."
+            )
+        ),
+    ] = None,
     references: Annotated[list[str] | None, Query()] = None,
     evidence_type: Annotated[str | None, Query()] = None,
     with_or_from: Annotated[list[str] | None, Query()] = None,
@@ -120,6 +150,7 @@ def list_annotations(
         negation: Negation value to match.
         relation: Relation identifier to match.
         ontology_class_id: Ontology class identifier to match.
+        ontology_class_id_closure: Loaded predicate for descendant-or-self matching.
         references: Reference identifiers that must all be present.
         evidence_type: Evidence type identifier to match.
         with_or_from: Supporting identifiers that must all be present.
@@ -139,6 +170,7 @@ def list_annotations(
             negation=negation,
             relation=relation,
             ontology_class_id=ontology_class_id,
+            ontology_class_id_closure=ontology_class_id_closure,
             references=tuple(references or ()),
             evidence_type=evidence_type,
             with_or_from=tuple(with_or_from or ()),
