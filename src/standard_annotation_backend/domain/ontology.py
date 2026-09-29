@@ -20,7 +20,7 @@ class OntologyKey(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class OntologyDefinition:
-    """Describe the identifiers and closure predicates allowed for an ontology."""
+    """Describe identifiers and relationship handling for an ontology."""
 
     key: OntologyKey
     identifier_prefixes: tuple[str, ...]
@@ -85,6 +85,31 @@ class OntologyParseError(ValueError):
     """Report that source bytes cannot form a complete ontology snapshot."""
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class OntologyLoadWarning:
+    """Describe a nonfatal condition found in loaded ontology data."""
+
+    code: str
+    term_id: str
+    referenced_term_id: str
+
+
+def ontology_load_warnings(
+    terms: Mapping[str, OntologyTerm],
+) -> tuple[OntologyLoadWarning, ...]:
+    """Return warnings for advisory references to terms outside the snapshot."""
+    return tuple(
+        OntologyLoadWarning(
+            code="undefined_consider_target",
+            term_id=term.term_id,
+            referenced_term_id=target,
+        )
+        for term in sorted(terms.values(), key=lambda value: value.term_id)
+        for target in sorted(set(term.consider))
+        if target not in terms
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class OntologyFinding:
     """Describe an ontology condition that prevented an automatic update."""
@@ -137,7 +162,7 @@ class OntologyVersion:
 
 @dataclass(frozen=True, slots=True)
 class OntologyLoadResult:
-    """Summarize ontology activation and the resulting annotation updates."""
+    """Summarize ontology activation, warnings, and annotation updates."""
 
     applied: bool
     ontology_version: OntologyVersion | None
@@ -146,6 +171,7 @@ class OntologyLoadResult:
     annotation_skip_count: int
     findings: tuple[OntologyFinding, ...]
     document: OntologyDocument | None = None
+    ontology_warnings: tuple[OntologyLoadWarning, ...] = ()
 
     @classmethod
     def unchanged(cls, document: OntologyDocument) -> OntologyLoadResult:
@@ -161,14 +187,22 @@ class OntologyLoadResult:
             "annotation_update_count": self.annotation_update_count,
             "annotation_skip_count": self.annotation_skip_count,
             "finding_count": len(self.findings),
+            "ontology_warning_count": len(self.ontology_warnings),
         }
 
     @property
     def warnings(self) -> tuple[str, ...]:
-        """Return one warning when the load produced any findings."""
-        if not self.findings:
-            return ()
-        return (f"Ontology load completed with {len(self.findings)} findings",)
+        """Return concise summaries of ontology warnings and annotation findings."""
+        warnings: list[str] = []
+        if self.ontology_warnings:
+            count = len(self.ontology_warnings)
+            noun = "warning" if count == 1 else "warnings"
+            warnings.append(f"Ontology load completed with {count} ontology {noun}")
+        if self.findings:
+            warnings.append(
+                f"Ontology load completed with {len(self.findings)} findings"
+            )
+        return tuple(warnings)
 
     def to_job_result(self) -> dict[str, object]:
         """Return the complete successful outcome in job-storage format."""
@@ -225,8 +259,20 @@ class OntologyLoadResult:
             "annotation_scan_count": self.annotation_scan_count,
             "annotation_update_count": self.annotation_update_count,
             "annotation_skip_count": self.annotation_skip_count,
+            "ontology_warnings": [
+                _ontology_warning_result(warning) for warning in self.ontology_warnings
+            ],
             "findings": [_finding_result(finding) for finding in self.findings],
         }
+
+
+def _ontology_warning_result(warning: OntologyLoadWarning) -> dict[str, object]:
+    """Convert one ontology warning to data stored in a job result."""
+    return {
+        "code": warning.code,
+        "term_id": warning.term_id,
+        "referenced_term_id": warning.referenced_term_id,
+    }
 
 
 def _finding_result(finding: OntologyFinding) -> dict[str, object]:

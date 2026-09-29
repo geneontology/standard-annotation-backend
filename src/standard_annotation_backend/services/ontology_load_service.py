@@ -15,6 +15,7 @@ from standard_annotation_backend.domain.ontology import (
     OntologyTerm,
     OntologyVersion,
     compute_closure,
+    ontology_load_warnings,
     propose_term_replacements,
 )
 from standard_annotation_backend.persistence.annotation_data import (
@@ -123,8 +124,17 @@ class OntologyLoadService:
                 term_count=len(candidate_terms),
                 closure_count=candidate_closure_count,
             )
+            warnings = ontology_load_warnings(candidate_terms)
             if candidate.active:
-                return OntologyLoadResult(True, version, 0, 0, 0, ())
+                return OntologyLoadResult(
+                    True,
+                    version,
+                    0,
+                    0,
+                    0,
+                    (),
+                    ontology_warnings=warnings,
+                )
             if (
                 previous is not None
                 and previous.staging_sequence > candidate.staging_sequence
@@ -241,6 +251,7 @@ class OntologyLoadService:
                 annotation_update_count=len(accepted),
                 annotation_skip_count=len(skipped_ids - accepted),
                 findings=tuple(findings),
+                ontology_warnings=warnings,
             )
             unit_of_work.ontologies.record_load_result(
                 candidate, result.to_job_result()
@@ -257,6 +268,7 @@ class OntologyLoadService:
                     "annotation_scan_count": result.annotation_scan_count,
                     "annotation_update_count": result.annotation_update_count,
                     "annotation_skip_count": result.annotation_skip_count,
+                    "ontology_warning_count": len(result.ontology_warnings),
                 },
             )
             unit_of_work.commit()

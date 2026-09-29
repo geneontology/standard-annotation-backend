@@ -135,6 +135,40 @@ def test_worker_loads_ontology_then_skips_unchanged_source(
         )
 
 
+def test_worker_reports_an_undefined_consider_target_as_a_warning(
+    ontology_worker_environment: None,
+    unit_of_work_factory: UnitOfWorkFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dangling `consider` target produces a successful job with a warning."""
+    content = b"""\
+format-version: 1.4
+ontology: go
+
+[Term]
+id: GO:0000001
+is_obsolete: true
+consider: GO:9999999
+"""
+    job_id = _create_job(unit_of_work_factory)
+    _install_source(monkeypatch, _source_responses(content))
+
+    run_ontology_load.run(str(job_id))
+
+    job = _load_job(unit_of_work_factory, job_id)
+    assert job.status == JobStatus.SUCCEEDED.value
+    assert job.progress["ontology_warning_count"] == 1
+    assert job.warnings == ["Ontology load completed with 1 ontology warning"]
+    assert job.result is not None
+    assert job.result["ontology_warnings"] == [
+        {
+            "code": "undefined_consider_target",
+            "term_id": "GO:0000001",
+            "referenced_term_id": "GO:9999999",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     "responses",
     [

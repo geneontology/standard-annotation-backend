@@ -34,7 +34,9 @@ def parse_obo(
         The parsed terms, replacement metadata, and approved relation edges.
 
     Raises:
-        OntologyParseError: If syntax is invalid or referenced terms are undefined.
+        OntologyParseError: If syntax is invalid, a closure edge with an allowed
+            target prefix references an undefined term, or a replacement target
+            is undefined.
     """
     if document.ontology_key is not definition.key:
         raise OntologyParseError("ontology document key does not match its definition")
@@ -69,21 +71,27 @@ def parse_obo(
                     isinstance(clause, term.IsAClause)
                     and _SUBCLASS_PREDICATE in definition.closure_predicates
                 ):
-                    edges.add(
-                        OntologyEdge(
-                            subject_term_id=term_id,
-                            predicate_id=_SUBCLASS_PREDICATE,
-                            object_term_id=str(clause.term),
+                    object_term_id = str(clause.term)
+                    if _edge_target_is_allowed(object_term_id, definition):
+                        edges.add(
+                            OntologyEdge(
+                                subject_term_id=term_id,
+                                predicate_id=_SUBCLASS_PREDICATE,
+                                object_term_id=object_term_id,
+                            )
                         )
-                    )
                 elif isinstance(clause, term.RelationshipClause):
                     predicate_id = str(clause.typedef)
-                    if predicate_id in definition.closure_predicates:
+                    object_term_id = str(clause.term)
+                    if (
+                        predicate_id in definition.closure_predicates
+                        and _edge_target_is_allowed(object_term_id, definition)
+                    ):
                         edges.add(
                             OntologyEdge(
                                 subject_term_id=term_id,
                                 predicate_id=predicate_id,
-                                object_term_id=str(clause.term),
+                                object_term_id=object_term_id,
                             )
                         )
             terms[term_id] = OntologyTerm(
@@ -153,15 +161,23 @@ def _declared_ontology(frame: header.HeaderFrame) -> str | None:
     )
 
 
+def _edge_target_is_allowed(
+    target: str,
+    definition: OntologyDefinition,
+) -> bool:
+    """Return whether the target belongs to an identifier namespace being loaded."""
+    return target.partition(":")[0] in definition.identifier_prefixes
+
+
 def _validate_references(
     terms: dict[str, OntologyTerm],
     edges: set[OntologyEdge],
 ) -> None:
-    """Reject edges and replacement metadata that target undefined terms."""
+    """Reject operational references that target undefined terms."""
     targets = {edge.object_term_id for edge in edges} | {
         target
         for ontology_term in terms.values()
-        for target in (*ontology_term.replaced_by, *ontology_term.consider)
+        for target in ontology_term.replaced_by
     }
     undefined = sorted(targets - terms.keys())
     if undefined:

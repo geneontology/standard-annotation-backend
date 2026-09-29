@@ -130,19 +130,27 @@ def _finalize_ontology_job(
     """Mark an ontology-load job successful using its stored activation result."""
     findings = result.get("findings")
     finding_count = len(findings) if isinstance(findings, list) else 0
+    ontology_warnings = result.get("ontology_warnings")
+    ontology_warning_count = (
+        len(ontology_warnings) if isinstance(ontology_warnings, list) else 0
+    )
     progress = {
         "phase": "completed",
         "annotation_scan_count": result.get("annotation_scan_count", 0),
         "annotation_update_count": result.get("annotation_update_count", 0),
         "annotation_skip_count": result.get("annotation_skip_count", 0),
         "finding_count": finding_count,
+        "ontology_warning_count": ontology_warning_count,
     }
-    warnings = (
-        (f"Ontology load completed with {finding_count} findings",)
-        if finding_count
-        else ()
-    )
-    jobs.update_progress(job_id, progress=progress, warnings=warnings)
+    warnings: list[str] = []
+    if ontology_warning_count:
+        noun = "warning" if ontology_warning_count == 1 else "warnings"
+        warnings.append(
+            f"Ontology load completed with {ontology_warning_count} ontology {noun}"
+        )
+    if finding_count:
+        warnings.append(f"Ontology load completed with {finding_count} findings")
+    jobs.update_progress(job_id, progress=progress, warnings=tuple(warnings))
     jobs.succeed(job_id, result=result)
 
 

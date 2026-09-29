@@ -70,6 +70,34 @@ def test_parse_obo_excludes_relationships_not_approved_for_closure() -> None:
     assert all(edge.predicate_id != "RO:0002211" for edge in snapshot.edges)
 
 
+def test_parse_obo_excludes_edge_targets_outside_identifier_prefixes() -> None:
+    """Edges to identifiers outside the ontology do not enter closure data."""
+    content = b"""\
+format-version: 1.4
+ontology: go
+
+[Term]
+id: GO:0000001
+is_a: GO:0000002
+is_a: neverin:10090
+is_a: onlyin:32524
+is_a: external:0000001
+
+[Term]
+id: GO:0000002
+"""
+
+    snapshot = parse_obo(_document("taxonomy.obo", content=content), GO_DEFINITION)
+
+    assert snapshot.edges == (
+        OntologyEdge(
+            subject_term_id="GO:0000001",
+            predicate_id="rdfs:subClassOf",
+            object_term_id="GO:0000002",
+        ),
+    )
+
+
 def test_parse_obo_rejects_an_undefined_edge_target() -> None:
     """A dangling ontology edge cannot produce a partial snapshot."""
     with pytest.raises(OntologyParseError, match="undefined term GO:9999999"):
@@ -91,6 +119,23 @@ replaced_by: GO:9999999
 
     with pytest.raises(OntologyParseError, match="undefined term GO:9999999"):
         parse_obo(_document("replacement.obo", content=content), GO_DEFINITION)
+
+
+def test_parse_obo_retains_an_undefined_consider_target() -> None:
+    """Advisory `consider` identifiers need not name terms in the snapshot."""
+    content = b"""\
+format-version: 1.4
+ontology: go
+
+[Term]
+id: GO:0000001
+is_obsolete: true
+consider: GO:9999999
+"""
+
+    snapshot = parse_obo(_document("consider.obo", content=content), GO_DEFINITION)
+
+    assert snapshot.terms["GO:0000001"].consider == ("GO:9999999",)
 
 
 def test_parse_obo_translates_third_party_syntax_failures() -> None:
