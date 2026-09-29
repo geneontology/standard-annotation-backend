@@ -93,9 +93,13 @@ def _install_source(
     return requests
 
 
-def _source_responses(content: bytes = OBO) -> list[httpx2.Response]:
+def _source_responses(
+    content: bytes = OBO,
+    *,
+    revision: str = SHA,
+) -> list[httpx2.Response]:
     return [
-        httpx2.Response(200, json={"sha": SHA}),
+        httpx2.Response(200, json={"sha": revision}),
         httpx2.Response(200, content=content),
     ]
 
@@ -305,6 +309,65 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
             )
             == 1
         )
+
+
+def test_redelivery_recovers_result_after_a_later_load_becomes_active(
+    ontology_worker_environment: None,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A superseded load still recovers its stored result on redelivery."""
+    first_id = _create_job(unit_of_work_factory)
+    second_id = _create_job(unit_of_work_factory)
+    requests = _install_source(
+        monkeypatch,
+        _source_responses() + _source_responses(revision="b" * 40),
+    )
+    original_succeed = JobService.succeed
+    monkeypatch.setattr(
+        JobService,
+        "succeed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database")),
+    )
+
+    with pytest.raises(WorkerTaskUnavailableError):
+        run_ontology_load.run(str(first_id))
+    monkeypatch.setattr(JobService, "succeed", original_succeed)
+
+    with session_factory() as session:
+        first_version = session.scalar(
+            select(OntologyMetadataRecord).where(
+                OntologyMetadataRecord.job_id == first_id
+            )
+        )
+        assert first_version is not None
+        assert first_version.active is True
+        assert first_version.load_result is not None
+        stored_result = dict(first_version.load_result)
+
+    run_ontology_load.run(str(second_id))
+
+    with session_factory() as session:
+        first_version = session.scalar(
+            select(OntologyMetadataRecord).where(
+                OntologyMetadataRecord.job_id == first_id
+            )
+        )
+        active_version = session.scalar(
+            select(OntologyMetadataRecord).where(
+                OntologyMetadataRecord.active.is_(True)
+            )
+        )
+        assert first_version is not None and first_version.active is False
+        assert active_version is not None and active_version.job_id == second_id
+
+    run_ontology_load.run(str(first_id))
+
+    recovered = _load_job(unit_of_work_factory, first_id)
+    assert recovered.status == JobStatus.SUCCEEDED.value
+    assert recovered.result == stored_result
+    assert len(requests) == 4
 
 
 def test_scheduler_persists_only_key_and_records_dispatch_failure(

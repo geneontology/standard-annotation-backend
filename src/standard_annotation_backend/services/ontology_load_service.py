@@ -51,14 +51,16 @@ class OntologyLoadService:
             return unit_of_work.ontologies.matches_active_source(document)
 
     def completed(self, job_id: UUID) -> dict[str, object] | None:
-        """Return the stored result if this job's snapshot is currently active."""
+        """Return the stored result if this job completed ontology activation."""
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.ontologies.get_by_job(job_id)
-            if record is None or not record.active:
+            if record is None:
                 return None
-            if record.load_result is None:
+            if record.load_result is not None:
+                return dict(record.load_result)
+            if record.active:
                 raise RuntimeError("active ontology snapshot has no durable result")
-            return dict(record.load_result)
+            return None
 
     def stage(
         self,
