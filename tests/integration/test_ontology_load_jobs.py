@@ -27,6 +27,7 @@ from standard_annotation_backend.services.ontology_load_service import (
 )
 from standard_annotation_backend.workers.tasks import (
     WorkerTaskUnavailableError,
+    prune_ontology_snapshots,
     run_ontology_load,
     schedule_ontology_load,
 )
@@ -49,6 +50,12 @@ def ontology_worker_environment(
         yield
     finally:
         get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def suppress_pruning_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ontology worker tests independent of a live Celery broker."""
+    monkeypatch.setattr(prune_ontology_snapshots, "delay", lambda _key: None)
 
 
 def _create_job(factory: UnitOfWorkFactory) -> UUID:
@@ -137,6 +144,80 @@ def test_worker_loads_ontology_then_skips_unchanged_source(
             )
             == 1
         )
+
+
+@pytest.mark.parametrize(
+    ("responses", "expected_status"),
+    [
+        (_source_responses(), JobStatus.SUCCEEDED),
+        (_source_responses(b"[not obo"), JobStatus.FAILED),
+    ],
+)
+def test_terminal_ontology_job_dispatches_pruning_after_status_commit(
+    ontology_worker_environment: None,
+    unit_of_work_factory: UnitOfWorkFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[httpx2.Response],
+    expected_status: JobStatus,
+) -> None:
+    """Successful and failed loads dispatch pruning after storing terminal status."""
+    job_id = _create_job(unit_of_work_factory)
+    _install_source(monkeypatch, responses.copy())
+    observed: list[tuple[str, str]] = []
+
+    def observe_dispatch(key: str) -> None:
+        observed.append((key, _load_job(unit_of_work_factory, job_id).status))
+
+    monkeypatch.setattr(prune_ontology_snapshots, "delay", observe_dispatch)
+
+    run_ontology_load.run(str(job_id))
+
+    assert observed == [("go", expected_status.value)]
+
+
+def test_terminal_redelivery_retries_pruning_dispatch_without_changing_result(
+    ontology_worker_environment: None,
+    unit_of_work_factory: UnitOfWorkFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatch failure preserves job success, and redelivery dispatches pruning."""
+    job_id = _create_job(unit_of_work_factory)
+    _install_source(monkeypatch, _source_responses())
+
+    def fail_dispatch(_key: str) -> None:
+        raise RuntimeError("redis detail")
+
+    monkeypatch.setattr(prune_ontology_snapshots, "delay", fail_dispatch)
+    with pytest.raises(WorkerTaskUnavailableError):
+        run_ontology_load.run(str(job_id))
+    terminal = _load_job(unit_of_work_factory, job_id)
+    assert terminal.status == JobStatus.SUCCEEDED.value
+    assert terminal.result is not None
+    original_result = dict(terminal.result)
+
+    dispatched: list[str] = []
+    monkeypatch.setattr(prune_ontology_snapshots, "delay", dispatched.append)
+    run_ontology_load.run(str(job_id))
+
+    recovered = _load_job(unit_of_work_factory, job_id)
+    assert dispatched == ["go"]
+    assert recovered.status == JobStatus.SUCCEEDED.value
+    assert recovered.result == original_result
+
+
+def test_pruning_task_retries_infrastructure_failure(
+    ontology_worker_environment: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pruning infrastructure failure requests a task retry."""
+    monkeypatch.setattr(
+        OntologyLoadService,
+        "prune",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database")),
+    )
+
+    with pytest.raises(WorkerTaskUnavailableError):
+        prune_ontology_snapshots.run("go")
 
 
 def test_worker_reports_an_undefined_consider_target_as_a_warning(

@@ -1,10 +1,11 @@
 """Persist immutable ontology snapshots in caller-managed transactions."""
 
 from collections.abc import Iterable, Iterator
+from datetime import datetime
 from itertools import islice
 from uuid import UUID
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.ontology import (
@@ -14,6 +15,7 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
 )
 from standard_annotation_backend.persistence.models import (
+    JobRecord,
     OntologyClosureRecord,
     OntologyMetadataRecord,
     OntologyTermRecord,
@@ -24,6 +26,10 @@ _INSERT_BATCH_SIZE = 5_000
 
 class OntologyVersionNotFoundError(LookupError):
     """Report an operation that targets an unknown ontology snapshot."""
+
+
+class OntologySnapshotPrunedError(RuntimeError):
+    """Report that required ontology term or closure rows were deleted."""
 
 
 class OntologyRepository:
@@ -151,13 +157,7 @@ class OntologyRepository:
 
     def activate(self, version_id: UUID) -> OntologyMetadataRecord:
         """Make one snapshot active and deactivate the prior snapshot for its key."""
-        record = self.session.scalar(
-            select(OntologyMetadataRecord)
-            .where(OntologyMetadataRecord.version_id == version_id)
-            .with_for_update()
-        )
-        if record is None:
-            raise OntologyVersionNotFoundError(version_id)
+        record = self._require_complete(version_id, lock=True)
         self.session.execute(
             update(OntologyMetadataRecord)
             .where(
@@ -178,6 +178,72 @@ class OntologyRepository:
         record.load_result = result
         self.session.flush([record])
 
+    def prune_candidates(
+        self, key: OntologyKey, pruned_at: datetime
+    ) -> tuple[UUID, ...]:
+        """Delete term and closure rows for snapshots outside the retention set.
+
+        The active snapshot, newest successfully activated predecessor, and snapshots
+        for queued or running jobs remain complete. Metadata rows are locked until
+        the caller ends the transaction.
+
+        Args:
+            key: Ontology whose stored snapshots should be pruned.
+            pruned_at: Time to record on each snapshot that is pruned.
+
+        Returns:
+            Version identifiers for snapshots pruned by this call.
+        """
+        rows = tuple(
+            self.session.execute(
+                select(OntologyMetadataRecord, JobRecord.status)
+                .join(JobRecord, JobRecord.job_id == OntologyMetadataRecord.job_id)
+                .where(
+                    OntologyMetadataRecord.ontology_key == key.value,
+                    OntologyMetadataRecord.bulk_data_pruned_at.is_(None),
+                )
+                .order_by(OntologyMetadataRecord.staging_sequence)
+                .with_for_update(of=OntologyMetadataRecord)
+                .execution_options(populate_existing=True)
+            )
+        )
+        predecessor = next(
+            (
+                record
+                for record, _ in reversed(rows)
+                if not record.active and record.load_result is not None
+            ),
+            None,
+        )
+        candidates = tuple(
+            record
+            for record, status in rows
+            if not record.active
+            and record is not predecessor
+            and status not in {"queued", "running"}
+        )
+        version_ids = tuple(record.version_id for record in candidates)
+        if not version_ids:
+            return ()
+        # This intentionally physically deletes immutable snapshot data to bound
+        # storage. Standard annotations are managed records and use versioning and
+        # soft deletion instead. Snapshot metadata, job results, and audit events
+        # remain as provenance.
+        self.session.execute(
+            delete(OntologyClosureRecord).where(
+                OntologyClosureRecord.version_id.in_(version_ids)
+            )
+        )
+        self.session.execute(
+            delete(OntologyTermRecord).where(
+                OntologyTermRecord.version_id.in_(version_ids)
+            )
+        )
+        for record in candidates:
+            record.bulk_data_pruned_at = pruned_at
+        self.session.flush(candidates)
+        return version_ids
+
     def closure_supported(self, key: OntologyKey, predicate_id: str) -> bool:
         """Return whether the active snapshot loaded closure for a predicate."""
         active = self.get_active(key)
@@ -185,6 +251,7 @@ class OntologyRepository:
 
     def list_terms(self, version_id: UUID) -> list[OntologyTermRecord]:
         """Return snapshot terms in stable identifier order."""
+        self._require_complete(version_id)
         return list(
             self.session.scalars(
                 select(OntologyTermRecord)
@@ -195,6 +262,7 @@ class OntologyRepository:
 
     def list_closure(self, version_id: UUID) -> list[OntologyClosureRecord]:
         """Return snapshot closure in stable subject, predicate, and object order."""
+        self._require_complete(version_id)
         return list(
             self.session.scalars(
                 select(OntologyClosureRecord)
@@ -209,6 +277,7 @@ class OntologyRepository:
 
     def term_count(self, version_id: UUID) -> int:
         """Return the number of terms in one snapshot without loading them."""
+        self._require_complete(version_id)
         return (
             self.session.scalar(
                 select(func.count())
@@ -220,6 +289,7 @@ class OntologyRepository:
 
     def closure_count(self, version_id: UUID) -> int:
         """Return the number of closure rows without loading them."""
+        self._require_complete(version_id)
         return (
             self.session.scalar(
                 select(func.count())
@@ -228,6 +298,43 @@ class OntologyRepository:
             )
             or 0
         )
+
+    def _require_complete(
+        self, version_id: UUID, *, lock: bool = False
+    ) -> OntologyMetadataRecord:
+        """Lock and return a snapshot whose term and closure rows remain.
+
+        Reads use a shared row lock so pruning cannot delete data before the caller
+        finishes its transaction. Activation requests an exclusive lock. The query
+        refreshes metadata already loaded by this session so pruning committed by
+        another transaction is visible.
+
+        Args:
+            version_id: Snapshot version to check.
+            lock: Whether to use an exclusive lock for activation.
+
+        Returns:
+            Current metadata for the complete snapshot.
+
+        Raises:
+            OntologyVersionNotFoundError: If the snapshot does not exist.
+            OntologySnapshotPrunedError: If its term and closure rows were deleted.
+        """
+        statement = select(OntologyMetadataRecord).where(
+            OntologyMetadataRecord.version_id == version_id
+        )
+        if lock:
+            statement = statement.with_for_update()
+        else:
+            statement = statement.with_for_update(read=True)
+        record = self.session.scalar(
+            statement.execution_options(populate_existing=True)
+        )
+        if record is None:
+            raise OntologyVersionNotFoundError(version_id)
+        if record.bulk_data_pruned_at is not None:
+            raise OntologySnapshotPrunedError(version_id)
+        return record
 
 
 def _batches[T](rows: Iterable[T]) -> Iterator[list[T]]:

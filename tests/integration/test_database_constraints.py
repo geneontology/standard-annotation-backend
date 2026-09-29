@@ -15,6 +15,7 @@ from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
     JobRecord,
+    OntologyMetadataRecord,
 )
 
 
@@ -159,6 +160,34 @@ def test_authorization_source_revision_is_unique(database_engine: Engine) -> Non
         connection.execute(insert(models.AuthorizationSyncRecord), values)
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
         connection.execute(insert(models.AuthorizationSyncRecord), values)
+
+
+def test_active_ontology_snapshot_cannot_be_marked_pruned(
+    database_engine: Engine,
+) -> None:
+    """The database rejects an active snapshot with a pruning time."""
+    job_id = uuid4()
+    now = datetime.now(UTC)
+    with pytest.raises(IntegrityError), database_engine.begin() as connection:
+        connection.execute(
+            insert(JobRecord),
+            _job_values(job_type="ontology_load") | {"job_id": job_id},
+        )
+        connection.execute(
+            insert(OntologyMetadataRecord),
+            {
+                "ontology_key": "go",
+                "source_type": "test",
+                "source_locator": "fixture/go.obo",
+                "source_revision": "revision",
+                "source_checksum": "a" * 64,
+                "loaded_predicates": [],
+                "job_id": job_id,
+                "loaded_at": now,
+                "active": True,
+                "bulk_data_pruned_at": now,
+            },
+        )
 
 
 def _auth_owner(database_engine: Engine) -> tuple[UUID, UUID, UUID]:

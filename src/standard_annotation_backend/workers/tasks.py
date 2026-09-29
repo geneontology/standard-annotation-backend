@@ -12,6 +12,7 @@ redelivers an execution message, it uses the same job identifier.
 """
 
 import logging
+from datetime import UTC, datetime
 from uuid import UUID
 
 from celery import Task
@@ -59,6 +60,40 @@ class WorkerTaskUnavailableError(RuntimeError):
         super().__init__(_TASK_UNAVAILABLE)
 
 
+@celery_app.task(bind=True, max_retries=None, name="sab.ontology_load.prune")
+def prune_ontology_snapshots(task: Task, ontology_key: str) -> None:
+    """Delete unneeded term and closure rows for one configured ontology.
+
+    The task uses the same per-ontology lock as ontology loads and requests a retry
+    when the lock or required infrastructure is unavailable.
+
+    Args:
+        task: Bound Celery task used to request retries.
+        ontology_key: Configured ontology key to clean up.
+    """
+    try:
+        key = OntologyKey(ontology_key)
+    except ValueError:
+        logger.error(
+            "Ontology pruning ignored unknown key: ontology_key=%s", ontology_key
+        )
+        return
+
+    failure_type: str | None = None
+    try:
+        with (
+            worker_runtime() as runtime,
+            ontology_load_lock(runtime.engine, key) as acquired,
+        ):
+            if not acquired:
+                raise OntologyLoadBusyError
+            runtime.ontology_loads[key].prune(pruned_at=datetime.now(UTC))
+    except Exception as error:
+        failure_type = type(error).__name__
+    if failure_type is not None:
+        _retry_safely(task, f"ontology:{ontology_key}", failure_type)
+
+
 @celery_app.task(bind=True, max_retries=None, name="sab.ontology_load.run")
 def run_ontology_load(task: Task, job_id: str) -> None:
     """Run one ontology-load job from retrieval through activation."""
@@ -72,19 +107,22 @@ def run_ontology_load(task: Task, job_id: str) -> None:
             if not job_acquired:
                 return
             job = runtime.jobs.start(durable_job_id)
-            if job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}:
-                return
             try:
                 if job.job_type is not JobType.ONTOLOGY_LOAD:
                     raise ValueError("unexpected job type")
                 ontology_key = OntologyKey(job.parameters["ontology"])
                 load_service = runtime.ontology_loads[ontology_key]
             except (KeyError, TypeError, ValueError):
-                runtime.jobs.fail(durable_job_id, error=_ONTOLOGY_FAILURE)
+                if job.status not in {JobStatus.SUCCEEDED, JobStatus.FAILED}:
+                    runtime.jobs.fail(durable_job_id, error=_ONTOLOGY_FAILURE)
+                return
+            if job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}:
+                prune_ontology_snapshots.delay(ontology_key.value)
                 return
             completed = load_service.completed(durable_job_id)
             if completed is not None:
                 _finalize_ontology_job(runtime.jobs, durable_job_id, completed)
+                prune_ontology_snapshots.delay(ontology_key.value)
                 return
             definition = runtime.ontology_registry.definition(ontology_key)
             with ontology_load_lock(runtime.engine, ontology_key) as ontology_acquired:
@@ -116,8 +154,10 @@ def run_ontology_load(task: Task, job_id: str) -> None:
                         type(error).__name__,
                     )
                     runtime.jobs.fail(durable_job_id, error=_ONTOLOGY_FAILURE)
+                    prune_ontology_snapshots.delay(ontology_key.value)
                     return
             _finalize_ontology_job(runtime.jobs, durable_job_id, result.to_job_result())
+            prune_ontology_snapshots.delay(ontology_key.value)
     except Exception as error:
         failure_type = type(error).__name__
     if failure_type is not None:

@@ -25,10 +25,12 @@ def test_celery_discovers_execution_and_periodic_producer_tasks() -> None:
     assert "sab.authorization_sync.run" in celery_app.tasks
     assert "sab.authorization_sync.schedule" in celery_app.tasks
     assert "sab.ontology_load.run" in celery_app.tasks
+    assert "sab.ontology_load.prune" in celery_app.tasks
     assert "sab.ontology_load.schedule" in celery_app.tasks
     assert celery_app.tasks["sab.authorization_sync.run"].max_retries is None
     assert celery_app.tasks["sab.authorization_sync.schedule"].max_retries is None
     assert celery_app.tasks["sab.ontology_load.run"].max_retries is None
+    assert celery_app.tasks["sab.ontology_load.prune"].max_retries is None
     assert celery_app.tasks["sab.ontology_load.schedule"].max_retries is None
     assert celery_app.conf.beat_schedule == {
         "authorization-sync": {
