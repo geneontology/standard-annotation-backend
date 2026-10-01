@@ -1,5 +1,6 @@
 """Test closure-aware annotation search and its stable public errors."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -16,6 +17,12 @@ from standard_annotation_backend.domain.ontology import (
 )
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+
+
+@pytest.fixture(autouse=True)
+def active_closure_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Seed annotation subjects used to exercise ontology filtering."""
+    seed_active_subjects("UniProtKB:C1", "UniProtKB:C2", "UniProtKB:C3", "UniProtKB:C4")
 
 
 def _annotation(

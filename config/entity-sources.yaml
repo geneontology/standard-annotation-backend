@@ -1,0 +1,19 @@
+# Entity sources that SAB imports into its active entity catalog.
+#
+# Each key is a stable source identifier: lowercase letters, digits, `_`, or `-`,
+# starting with a letter or digit. Keys are stored with published catalogs, so
+# renaming a key retires the old catalog and publishes a new one.
+#
+# Removing a source retires its active catalog on the next "import all" run.
+#
+# Example:
+#
+# sources:
+#   mgi:
+#     format: gpi   # optional; GPI 2.0 is currently the only supported format
+#     url: https://example.org/path/mgi.gpi.gz
+sources:
+  caeel:
+    url: https://current.geneontology.org/annotations/gpi/CAEEL-mod.gpi.gz
+  mouse:
+    url: https://current.geneontology.org/annotations/gpi/MOUSE-mod.gpi.gz

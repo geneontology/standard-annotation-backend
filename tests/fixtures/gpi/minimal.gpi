@@ -1,0 +1,7 @@
+!gpi-version: 2.0
+!generated-by: TestDB
+!date-generated: 2026-09-29
+!project-name: Standard Annotation Backend
+
+! This comment is not a source record.
+UniProtKB:P12345	ABC1	Example protein	ABC1|ALIAS	SO:0001217	NCBITaxon:9606		UniProtKB:P12345		UniProtKB:P12345	

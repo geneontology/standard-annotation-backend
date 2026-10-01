@@ -9,16 +9,22 @@ from sqlalchemy import Engine
 
 from standard_annotation_backend.config import Settings, get_settings
 from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.entity_sources.http import EntitySourceClient
+from standard_annotation_backend.entity_sources.registry import EntitySourceRegistry
 from standard_annotation_backend.ontology.registry import OntologyRegistry
 from standard_annotation_backend.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
+    UnitOfWorkFactory,
     create_unit_of_work_factory,
 )
 from standard_annotation_backend.services.authorization_sync_service import (
     AuthorizationSyncService,
+)
+from standard_annotation_backend.services.entity_import_service import (
+    EntityImportService,
 )
 from standard_annotation_backend.services.job_service import JobService
 from standard_annotation_backend.services.ontology_load_service import (
@@ -32,7 +38,11 @@ class WorkerRuntime:
 
     settings: Settings
     engine: Engine
+    unit_of_work_factory: UnitOfWorkFactory
     jobs: JobService
+    entity_imports: EntityImportService
+    entity_sources: EntitySourceRegistry
+    entity_source_client: EntitySourceClient
     authorization_sync: AuthorizationSyncService
     ontology_registry: OntologyRegistry
     ontology_loads: Mapping[OntologyKey, OntologyLoadService]
@@ -53,7 +63,14 @@ def worker_runtime() -> Iterator[WorkerRuntime]:
             yield WorkerRuntime(
                 settings=settings,
                 engine=engine,
+                unit_of_work_factory=unit_of_work_factory,
                 jobs=JobService(unit_of_work_factory),
+                entity_imports=EntityImportService(unit_of_work_factory),
+                entity_sources=EntitySourceRegistry(settings.entity_sources),
+                entity_source_client=EntitySourceClient(
+                    connect_timeout_seconds=settings.entity_source_connect_timeout_seconds,
+                    read_timeout_seconds=settings.entity_source_read_timeout_seconds,
+                ),
                 authorization_sync=AuthorizationSyncService(unit_of_work_factory),
                 ontology_registry=ontology_registry,
                 ontology_loads={

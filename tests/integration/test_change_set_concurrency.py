@@ -44,6 +44,15 @@ from standard_annotation_backend.services.change_set_service import (
     StaleChangeSetError,
 )
 
+
+@pytest.fixture(autouse=True)
+def active_concurrent_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Seed the subjects used by both competing annotation writes."""
+    seed_active_subjects(
+        "UniProtKB:P12345", "UniProtKB:OTHER", "UniProtKB:FIRST", "UniProtKB:SECOND"
+    )
+
+
 GUARD_SECONDS = 10
 OBSERVATION_SECONDS = 3
 PROPOSER = RequestContext(

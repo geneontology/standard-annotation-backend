@@ -63,7 +63,13 @@ def test_bearer_security_applies_only_to_data_operations(client: TestClient) -> 
     for path, operations in schema["paths"].items():
         for operation in operations.values():
             if path.startswith(
-                ("/annotations", "/change-sets", "/jobs", "/ontology-loads")
+                (
+                    "/annotations",
+                    "/change-sets",
+                    "/entity-imports",
+                    "/jobs",
+                    "/ontology-loads",
+                )
             ):
                 assert operation["security"] == [{"Bearer": []}]
             else:

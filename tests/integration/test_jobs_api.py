@@ -22,6 +22,7 @@ OWN_JOB_ID = UUID("00000000-0000-0000-0000-000000000901")
 OTHER_JOB_ID = UUID("00000000-0000-0000-0000-000000000902")
 FOREIGN_JOB_ID = UUID("00000000-0000-0000-0000-000000000903")
 SCHEDULER_JOB_ID = UUID("00000000-0000-0000-0000-000000000904")
+MGI_ENTITY_IMPORT_JOB_ID = UUID("00000000-0000-0000-0000-000000000906")
 UNKNOWN_JOB_ID = UUID("00000000-0000-0000-0000-000000000999")
 CREATED_AT = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
 JOB_MISSING = {"error": {"code": "job_not_found", "message": "Job was not found"}}
@@ -72,6 +73,24 @@ def seeded_jobs(session_factory: sessionmaker[Session]) -> None:
                     completed_at=CREATED_AT + timedelta(minutes=2),
                 )
             )
+        session.add(
+            JobRecord(
+                job_id=MGI_ENTITY_IMPORT_JOB_ID,
+                job_type="entity_import",
+                status="succeeded",
+                requested_by="entity-import-operator",
+                parameters={"source_key": "mgi"},
+                progress={"phase": "completed"},
+                warnings=[],
+                result={"source_key": "mgi"},
+                artifact_uri=None,
+                error=None,
+                created_at=CREATED_AT,
+                updated_at=CREATED_AT + timedelta(minutes=2),
+                started_at=CREATED_AT + timedelta(minutes=1),
+                completed_at=CREATED_AT + timedelta(minutes=2),
+            )
+        )
 
 
 @pytest.fixture
@@ -120,6 +139,7 @@ def test_global_admin_reads_job_with_safe_complete_response(
     assert "source_token" not in response.text
 
 
+@pytest.mark.parametrize("job_id", [OWN_JOB_ID, UNKNOWN_JOB_ID])
 @pytest.mark.parametrize(
     "context",
     [
@@ -127,6 +147,8 @@ def test_global_admin_reads_job_with_safe_complete_response(
         _context("editor", AuthorizationRole.EDIT, AuthorizationScope.GLOBAL, None),
         _context("admin", AuthorizationRole.ADMIN, AuthorizationScope.SELF, "MGI"),
         _context("admin", AuthorizationRole.ADMIN, AuthorizationScope.GROUP, "MGI"),
+        _context("reader", AuthorizationRole.READ, AuthorizationScope.GROUP, "MGI"),
+        _context("editor", AuthorizationRole.EDIT, AuthorizationScope.GROUP, "MGI"),
     ],
 )
 def test_job_status_requires_global_admin_authorization(
@@ -134,11 +156,16 @@ def test_job_status_requires_global_admin_authorization(
     seeded_jobs: None,
     set_context: None,
     context: RequestContext,
+    job_id: UUID,
 ) -> None:
-    """Neither global scope nor the admin role grants job access by itself."""
+    """Neither global scope nor the admin role grants job access by itself.
+
+    Callers without access receive 403 whether or not the job exists, so the
+    response does not reveal which job IDs exist.
+    """
     _authenticate(context)
 
-    response = integration_api_client.get(f"/jobs/{OWN_JOB_ID}")
+    response = integration_api_client.get(f"/jobs/{job_id}")
 
     assert response.status_code == status.HTTP_403_FORBIDDEN
     assert response.json() == {
@@ -146,7 +173,10 @@ def test_job_status_requires_global_admin_authorization(
     }
 
 
-@pytest.mark.parametrize("job_id", [OTHER_JOB_ID, FOREIGN_JOB_ID, SCHEDULER_JOB_ID])
+@pytest.mark.parametrize(
+    "job_id",
+    [OTHER_JOB_ID, FOREIGN_JOB_ID, SCHEDULER_JOB_ID, MGI_ENTITY_IMPORT_JOB_ID],
+)
 def test_global_admin_reads_jobs_from_every_requester(
     integration_api_client: TestClient,
     seeded_jobs: None,

@@ -30,6 +30,9 @@ def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         '"ref":"master","path":"src/ontology/go-edit.obo"}}',
     )
     monkeypatch.setenv("SAB_ONTOLOGY_LOAD_CRON", "0 2 * * 1,3,5")
+    monkeypatch.setenv("SAB_ENTITY_IMPORT_CRON", "0 3 * * *")
+    monkeypatch.setenv("SAB_ENTITY_SOURCE_CONNECT_TIMEOUT_SECONDS", "10")
+    monkeypatch.setenv("SAB_ENTITY_SOURCE_READ_TIMEOUT_SECONDS", "60")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_SECRET", "test-client-secret")
     monkeypatch.setenv(

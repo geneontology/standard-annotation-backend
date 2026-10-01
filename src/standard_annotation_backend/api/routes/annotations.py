@@ -12,7 +12,11 @@ from standard_annotation_backend.api.dependencies import (
     get_authenticated_context,
     require_expected_version,
 )
-from standard_annotation_backend.api.errors import BEARER_ERROR_RESPONSES, ApiError
+from standard_annotation_backend.api.errors import (
+    ANNOTATION_WRITE_VALIDATION_RESPONSE,
+    BEARER_ERROR_RESPONSES,
+    ApiError,
+)
 from standard_annotation_backend.api.examples import (
     ANNOTATION_CREATE_EXAMPLES,
     ANNOTATION_PATCH_EXAMPLES,
@@ -198,6 +202,7 @@ def list_annotations(
             }
         },
         status.HTTP_409_CONFLICT: {"model": ApiErrorResponse},
+        status.HTTP_422_UNPROCESSABLE_CONTENT: ANNOTATION_WRITE_VALIDATION_RESPONSE,
     },
 )
 def create_annotation(
@@ -270,6 +275,7 @@ def get_annotation(
         status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
         status.HTTP_409_CONFLICT: {"model": ApiErrorResponse},
         status.HTTP_412_PRECONDITION_FAILED: {"model": ApiErrorResponse},
+        status.HTTP_422_UNPROCESSABLE_CONTENT: ANNOTATION_WRITE_VALIDATION_RESPONSE,
         status.HTTP_428_PRECONDITION_REQUIRED: {"model": ApiErrorResponse},
     },
 )

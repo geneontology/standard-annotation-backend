@@ -465,6 +465,8 @@ class ChangeSetService:
             ChangeSetNotFoundError: If the proposal is missing or inaccessible.
             ChangeSetStateError: If the proposal has already been reviewed.
             InvalidChangeSetError: If the candidate is not a valid annotation.
+            UnknownDbObjectIdError: If a create or update has a `db_object_id`
+                that is not in the active entity catalog.
             DuplicateAnnotationError: If acceptance would create a new duplicate.
             StaleChangeSetError: If the target changed after the proposal was created.
             PermissionDeniedError: If the selected role cannot review proposals.
@@ -611,6 +613,8 @@ def _accept_proposal(
     before, validation = _candidate(unit_of_work.annotations, record)
     if validation.annotation is None:
         raise InvalidChangeSetError(validation.errors)
+    if record.operation != ChangeSetOperation.DELETE:
+        unit_of_work.entities.require_active(validation.annotation.db_object_id)
     if record.operation == ChangeSetOperation.CREATE:
         changed = unit_of_work.annotations.create_direct(
             annotation=validation.annotation,

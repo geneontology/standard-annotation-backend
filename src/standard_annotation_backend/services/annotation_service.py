@@ -164,6 +164,8 @@ class AnnotationService:
 
         Raises:
             InvalidAnnotationPayloadError: If the annotation data is invalid.
+            UnknownDbObjectIdError: If `db_object_id` is not in the active entity
+                catalog.
             DuplicateAnnotationError: If an equivalent active annotation exists.
             PermissionDeniedError: If the role or requested creation group is denied.
         """
@@ -174,6 +176,7 @@ class AnnotationService:
         )
         annotation = _validated_annotation(payload)
         with self._unit_of_work_factory() as unit_of_work:
+            unit_of_work.entities.require_active(annotation.db_object_id)
             record = unit_of_work.annotations.create_direct(
                 annotation=annotation,
                 actor_id=context.actor_id,
@@ -244,6 +247,8 @@ class AnnotationService:
             AnnotationNotFoundError: If the annotation is missing or deleted.
             AnnotationDeletedError: If it is deleted after the initial read.
             InvalidAnnotationPayloadError: If the resulting annotation is invalid.
+            UnknownDbObjectIdError: If the updated `db_object_id` is not in the
+                active entity catalog.
             DuplicateAnnotationError: If the change creates a new duplicate.
             StaleAnnotationVersionError: If `expected_version` is no longer current.
         """
@@ -271,6 +276,7 @@ class AnnotationService:
             merged = current.annotation_data.copy()
             merged.update(changes)
             annotation = _validated_annotation(merged)
+            unit_of_work.entities.require_active(annotation.db_object_id)
             updated = unit_of_work.annotations.update_direct(
                 annotation_id,
                 annotation,

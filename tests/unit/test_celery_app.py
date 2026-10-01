@@ -27,11 +27,16 @@ def test_celery_discovers_execution_and_periodic_producer_tasks() -> None:
     assert "sab.ontology_load.run" in celery_app.tasks
     assert "sab.ontology_load.prune" in celery_app.tasks
     assert "sab.ontology_load.schedule" in celery_app.tasks
+    assert "sab.entity_import.run" in celery_app.tasks
+    assert "sab.entity_import.schedule" in celery_app.tasks
+    assert "sab.entity_catalog_retirement.run" in celery_app.tasks
     assert celery_app.tasks["sab.authorization_sync.run"].max_retries is None
     assert celery_app.tasks["sab.authorization_sync.schedule"].max_retries is None
     assert celery_app.tasks["sab.ontology_load.run"].max_retries is None
     assert celery_app.tasks["sab.ontology_load.prune"].max_retries is None
     assert celery_app.tasks["sab.ontology_load.schedule"].max_retries is None
+    assert celery_app.tasks["sab.entity_import.run"].max_retries is None
+    assert celery_app.tasks["sab.entity_catalog_retirement.run"].max_retries is None
     assert celery_app.conf.beat_schedule == {
         "authorization-sync": {
             "task": "sab.authorization_sync.schedule",
@@ -40,5 +45,9 @@ def test_celery_discovers_execution_and_periodic_producer_tasks() -> None:
         "ontology-load": {
             "task": "sab.ontology_load.schedule",
             "schedule": crontab(minute="0", hour="2", day_of_week="1,3,5"),
+        },
+        "entity-import": {
+            "task": "sab.entity_import.schedule",
+            "schedule": crontab(minute="0", hour="3"),
         },
     }

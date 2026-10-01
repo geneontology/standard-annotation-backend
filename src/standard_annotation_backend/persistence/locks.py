@@ -15,8 +15,10 @@ GLOBAL_ANNOTATION_WRITE_LOCK_KEY = -(2**63)
 _AUTHORIZATION_SYNC_LOCK_KEY = 0x53414241555448
 _MAX_SIGNATURE_LOCK_KEY = (1 << 63) - 1
 _HEXADECIMAL_CHARACTERS = frozenset(string.hexdigits)
+_ENTITY_JOB_START_LOCK_KEY = 0x53414245535452  # "SABESTR"
 _JOB_LOCK_PERSON = b"SABJOB"
 _ONTOLOGY_LOCK_PERSON = b"SABONTO"
+_ENTITY_LOCK_PERSON = b"SABENT"
 
 
 def acquire_authorization_sync_lock(session: Session) -> None:
@@ -143,6 +145,45 @@ def ontology_lock_key(key: str) -> int:
     return int.from_bytes(digest, byteorder="big", signed=True)
 
 
+def entity_catalog_lock_key(source_key: str) -> int:
+    """Return the PostgreSQL advisory lock key for one entity source.
+
+    The key is a 64-bit hash of the source key. A BLAKE2 `person` value that only
+    this function uses keeps the keys apart from job and ontology lock keys. If
+    two sources ever hash to the same key, their publications only wait for each
+    other.
+
+    Raises:
+        ValueError: If the source key is blank.
+    """
+    if not source_key.strip():
+        raise ValueError("source key must not be blank")
+    digest = hashlib.blake2b(
+        source_key.encode("utf-8"), digest_size=8, person=_ENTITY_LOCK_PERSON
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+def acquire_entity_catalog_lock(session: Session, source_key: str) -> None:
+    """Make catalog publications and retirements for one entity source run in turn.
+
+    The transaction holds the lock until it commits or rolls back, so only one
+    transaction at a time can replace or retire a source's active catalog.
+    Fetching, parsing, staging, and work for other sources are not blocked.
+
+    Args:
+        session: Session whose transaction owns the lock.
+        source_key: Entity source whose catalog changes must not overlap.
+
+    Raises:
+        ValueError: If the source key is blank.
+    """
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": entity_catalog_lock_key(source_key)},
+    )
+
+
 @contextmanager
 def ontology_load_lock(engine: Engine, key: OntologyKey | str) -> Iterator[bool]:
     """Try to lock ontology loading for one key until the context exits.
@@ -221,3 +262,18 @@ def job_execution_lock(engine: Engine, job_id: UUID) -> Iterator[bool]:
                 )
                 if released is not True:
                     raise RuntimeError("job execution lock was not released")
+
+
+def acquire_entity_job_start_lock(session: Session) -> None:
+    """Make entity import and retirement job creation run one request at a time.
+
+    Without this lock, two requests running at once could each find no active job
+    for a source and each create one.
+
+    Args:
+        session: Session whose transaction owns the lock.
+    """
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": _ENTITY_JOB_START_LOCK_KEY},
+    )

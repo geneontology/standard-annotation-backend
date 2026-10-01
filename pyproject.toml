@@ -13,7 +13,7 @@ dependencies = [
     "celery",
     "fastapi",
     "fastobo==0.14.1",
-    "go-standard-annotation-schema==0.0.4",
+    "go-standard-annotation-schema==0.0.5",
     "httpx2",
     "jsonpatch>=1.33",
     "linkml-runtime",

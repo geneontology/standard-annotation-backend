@@ -1,12 +1,27 @@
 """Configuration loaded from SAB-prefixed environment variables."""
 
 import string
+from collections.abc import Mapping
 from enum import StrEnum
 from functools import lru_cache
-from typing import Annotated, Literal
+from pathlib import Path
+from typing import Annotated, Literal, Self
 
+import yaml
 from celery.schedules import crontab
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    PrivateAttr,
+    SecretStr,
+    StringConstraints,
+    Tag,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from standard_annotation_backend.domain.ontology import OntologyKey
@@ -76,6 +91,80 @@ OntologySourceSettings = Annotated[
 ]
 
 
+SOURCE_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
+
+SourceKey = Annotated[str, StringConstraints(pattern=SOURCE_KEY_PATTERN)]
+
+
+class GpiEntitySourceSettings(BaseModel):
+    """Configure one entity source published as a GPI 2.0 file over HTTPS."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    format: Literal["gpi"] = "gpi"
+    url: AnyHttpUrl
+
+    @field_validator("url")
+    @classmethod
+    def require_https(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        """Require HTTPS for every configured source URL."""
+        if value.scheme != "https":
+            raise ValueError("must use https")
+        return value
+
+
+def _entity_source_format(value: object) -> str | None:
+    """Return an entry's `format` value, or `gpi` when it is omitted.
+
+    Pydantic calls this to choose which settings model validates the entry.
+    """
+    if isinstance(value, Mapping):
+        return str(value.get("format", "gpi"))
+    return str(getattr(value, "format", "gpi"))
+
+
+EntitySourceSettings = Annotated[
+    Annotated[GpiEntitySourceSettings, Tag("gpi")],
+    Discriminator(_entity_source_format),
+]
+
+
+class EntitySourcesFile(BaseModel):
+    """Describe the contents of the entity source registry file."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sources: dict[SourceKey, EntitySourceSettings] = Field(default_factory=dict)
+
+    @field_validator("sources", mode="before")
+    @classmethod
+    def _null_sources_are_empty(cls, value: object) -> object:
+        """Treat a `sources:` key with no value as an empty registry."""
+        return {} if value is None else value
+
+
+def load_entity_sources(path: Path) -> EntitySourcesFile:
+    """Read and validate the entity source registry file.
+
+    An empty file, or one containing only comments, is an empty registry.
+
+    Args:
+        path: Location of the YAML registry file.
+
+    Returns:
+        The validated registry contents.
+
+    Raises:
+        ValueError: If the file cannot be read, is not valid YAML, or does not
+            match the registry schema.
+    """
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        raise ValueError("entity source registry file could not be read") from None
+    return EntitySourcesFile.model_validate({} if raw is None else raw)
+
+
 def _default_ontology_sources() -> dict[OntologyKey, OntologySourceSettings]:
     """Return the default GitHub source configuration for GO."""
     return {
@@ -105,8 +194,19 @@ class Settings(LoggingSettings):
         default_factory=_default_ontology_sources
     )
     ontology_load_cron: TrimmedNonBlankString = "0 2 * * 1,3,5"
+    entity_sources_file: Path = Path("config/entity-sources.yaml")
+    entity_import_cron: TrimmedNonBlankString = "0 3 * * *"
+    entity_source_connect_timeout_seconds: float = Field(
+        default=10, gt=0, allow_inf_nan=False
+    )
+    entity_source_read_timeout_seconds: float = Field(
+        default=60, gt=0, allow_inf_nan=False
+    )
+    _entity_sources: EntitySourcesFile = PrivateAttr()
 
-    @field_validator("authorization_sync_cron", "ontology_load_cron")
+    @field_validator(
+        "authorization_sync_cron", "ontology_load_cron", "entity_import_cron"
+    )
     @classmethod
     def validate_cron(cls, value: str) -> str:
         """Validate a five-field cron expression for Celery Beat."""
@@ -115,6 +215,17 @@ class Settings(LoggingSettings):
         except ValueError:
             raise ValueError("must be a valid five-field cron schedule") from None
         return value
+
+    @model_validator(mode="after")
+    def load_entity_source_registry(self) -> Self:
+        """Read the registry file now, so an invalid file stops process startup."""
+        self._entity_sources = load_entity_sources(self.entity_sources_file)
+        return self
+
+    @property
+    def entity_sources(self) -> Mapping[str, EntitySourceSettings]:
+        """Return configured entity sources keyed by source key."""
+        return self._entity_sources.sources
 
     @field_validator("ontology_sources")
     @classmethod

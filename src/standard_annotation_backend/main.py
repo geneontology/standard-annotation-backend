@@ -24,6 +24,9 @@ from standard_annotation_backend.api.routes.annotations import (
 from standard_annotation_backend.api.routes.change_sets import (
     router as change_sets_router,
 )
+from standard_annotation_backend.api.routes.entity_imports import (
+    router as entity_imports_router,
+)
 from standard_annotation_backend.api.routes.jobs import router as jobs_router
 from standard_annotation_backend.api.routes.ontology_loads import (
     router as ontology_loads_router,
@@ -77,6 +80,10 @@ app = FastAPI(
         {"name": "annotations"},
         {"name": "annotation comments"},
         {"name": "change-sets"},
+        {
+            "name": "entity imports",
+            "description": "Create durable entity catalog imports.",
+        },
         {"name": "jobs"},
         {"name": "ontology loads"},
     ],
@@ -90,6 +97,7 @@ app.include_router(annotation_comments_router)
 app.include_router(annotation_versions_router)
 app.include_router(annotations_router)
 app.include_router(change_sets_router)
+app.include_router(entity_imports_router)
 app.include_router(jobs_router)
 app.include_router(ontology_loads_router)
 app.include_router(token_management_router)

@@ -13,6 +13,8 @@ from standard_annotation_backend.persistence.models import (
     ChangeSetRecord,
 )
 
+pytestmark = pytest.mark.usefixtures("active_annotation_subjects")
+
 ANNOTATION = {
     "db_object_id": "UniProtKB:P12345",
     "relation": "RO:0002331",

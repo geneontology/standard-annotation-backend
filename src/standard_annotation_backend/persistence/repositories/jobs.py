@@ -56,6 +56,19 @@ class JobRepository:
         self.session.flush([record])
         return record
 
+    def find_active(self, *, job_type: JobType, source_key: str) -> JobRecord | None:
+        """Return the oldest queued or running job of a type for one source."""
+        return self.session.scalar(
+            select(JobRecord)
+            .where(
+                JobRecord.job_type == job_type.value,
+                JobRecord.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+                JobRecord.parameters["source_key"].astext == source_key,
+            )
+            .order_by(JobRecord.created_at, JobRecord.job_id)
+            .limit(1)
+        )
+
     def get(self, job_id: UUID) -> JobRecord | None:
         """Return a job by identifier without applying request authorization."""
         return self.session.get(JobRecord, job_id)
@@ -135,7 +148,14 @@ class JobRepository:
         self.session.flush([record])
         return JobMutation(record, True)
 
-    def fail(self, job_id: UUID, *, error: str, now: datetime) -> JobMutation:
+    def fail(
+        self,
+        job_id: UUID,
+        *,
+        error: str,
+        now: datetime,
+        progress: dict[str, object] | None = None,
+    ) -> JobMutation:
         """Finish a queued or running job with a public error message."""
         record = self._lock(job_id)
         status = JobStatus(record.status)
@@ -147,6 +167,8 @@ class JobRepository:
             raise InvalidJobTransitionError("terminal job outcome cannot change")
         record.status = JobStatus.FAILED.value
         record.error = error
+        if progress is not None:
+            record.progress = progress
         record.completed_at = now
         record.updated_at = now
         self.session.flush([record])

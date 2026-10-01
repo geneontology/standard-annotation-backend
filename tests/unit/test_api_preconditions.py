@@ -374,6 +374,27 @@ def test_invalid_annotation_error_preserves_normalized_validation_details() -> N
     }
 
 
+@pytest.mark.parametrize(
+    "path,method",
+    [
+        ("/annotations", "post"),
+        ("/annotations/{annotation_id}", "patch"),
+        ("/change-sets/{change_set_id}/accept", "post"),
+    ],
+)
+def test_write_openapi_documents_unknown_subject_failure(
+    client: TestClient, path: str, method: str
+) -> None:
+    """The OpenAPI 422 response of each write route documents `unknown_db_object_id`."""
+    response = client.get("/openapi.json").json()["paths"][path][method]["responses"][
+        "422"
+    ]
+    assert "unknown_db_object_id" in response["description"]
+    assert response["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ApiErrorResponse"
+    }
+
+
 def test_malformed_query_api_error_keeps_its_stable_code() -> None:
     app = FastAPI()
     install_exception_handlers(app)

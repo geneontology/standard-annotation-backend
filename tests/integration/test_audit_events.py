@@ -20,6 +20,8 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
+pytestmark = pytest.mark.usefixtures("active_annotation_subjects")
+
 UnitOfWorkFactory = Callable[[], SqlAlchemyUnitOfWork]
 
 VALID_ANNOTATION = {
