@@ -21,7 +21,7 @@ from standard_annotation_backend.persistence.models import (
 
 def _job_values(
     *,
-    job_type: str = "authorization_sync",
+    job_type: str = "authorization_refresh",
     status: str = "queued",
 ) -> dict[str, object]:
     """Build one valid job row for the requested lifecycle state."""
@@ -64,11 +64,11 @@ def test_job_constraint_rejects_unimplemented_types(
 
 
 @pytest.mark.parametrize("status", ["queued", "running", "succeeded", "failed"])
-def test_authorization_sync_accepts_each_lifecycle_state(
+def test_refresh_job_accepts_each_lifecycle_state(
     database_engine: Engine,
     status: str,
 ) -> None:
-    """An authorization sync job accepts every defined job status."""
+    """A refresh job accepts every defined job status."""
     with database_engine.begin() as connection:
         connection.execute(insert(JobRecord), _job_values(status=status))
 
@@ -149,19 +149,6 @@ def test_job_constraints_reject_backwards_lifecycle_timestamps(
         connection.execute(insert(JobRecord), values)
 
 
-def test_authorization_source_revision_is_unique(database_engine: Engine) -> None:
-    """A repository and commit identify at most one authorization sync record."""
-    values = {
-        "source_repository": "geneontology/go-site",
-        "source_commit_sha": "a" * 40,
-        "summary": {},
-    }
-    with database_engine.begin() as connection:
-        connection.execute(insert(models.AuthorizationSyncRecord), values)
-    with pytest.raises(IntegrityError), database_engine.begin() as connection:
-        connection.execute(insert(models.AuthorizationSyncRecord), values)
-
-
 def test_active_ontology_snapshot_cannot_be_marked_pruned(
     database_engine: Engine,
 ) -> None:
@@ -171,7 +158,7 @@ def test_active_ontology_snapshot_cannot_be_marked_pruned(
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
         connection.execute(
             insert(JobRecord),
-            _job_values(job_type="ontology_load") | {"job_id": job_id},
+            _job_values(job_type="ontology_refresh") | {"job_id": job_id},
         )
         connection.execute(
             insert(OntologyMetadataRecord),
@@ -183,7 +170,7 @@ def test_active_ontology_snapshot_cannot_be_marked_pruned(
                 "source_checksum": "a" * 64,
                 "loaded_predicates": [],
                 "job_id": job_id,
-                "loaded_at": now,
+                "fetched_at": now,
                 "active": True,
                 "bulk_data_pruned_at": now,
             },
@@ -655,7 +642,7 @@ def test_annotation_constraints_reject_invalid_current_rows(
                 insert(JobRecord),
                 {
                     "job_id": values["source_import_job_id"],
-                    "job_type": "authorization_sync",
+                    "job_type": "authorization_refresh",
                     "status": "queued",
                     "created_at": created_at,
                     "updated_at": created_at,

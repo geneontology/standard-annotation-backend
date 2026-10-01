@@ -18,14 +18,11 @@ from standard_annotation_backend.domain.entities import (
     EntityCatalog,
     EntityCatalogCollisionError,
     EntityCatalogRetirementResult,
-    EntityImportResult,
+    EntityRefreshResult,
     EntityRemovalImpact,
     UnknownDbObjectIdError,
 )
-from standard_annotation_backend.persistence.locks import (
-    acquire_entity_catalog_lock,
-    acquire_entity_job_start_lock,
-)
+from standard_annotation_backend.persistence.locks import acquire_entity_catalog_lock
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationStatus,
@@ -37,7 +34,7 @@ from standard_annotation_backend.persistence.models import (
 )
 
 _INSERT_BATCH_SIZE = 5_000
-_ENTITY_JOB_TYPES = frozenset({"entity_import", "entity_catalog_retirement"})
+_ENTITY_JOB_TYPES = frozenset({"entity_refresh", "entity_retirement"})
 
 
 class EntityRepository:
@@ -45,10 +42,6 @@ class EntityRepository:
 
     def __init__(self, session: Session) -> None:
         self.session = session
-
-    def lock_job_starts(self) -> None:
-        """Hold the entity job-start lock until the transaction ends."""
-        acquire_entity_job_start_lock(self.session)
 
     def active_source_keys(self) -> tuple[str, ...]:
         """Return source keys that currently have an active catalog."""
@@ -194,7 +187,8 @@ class EntityRepository:
         if existing is not None:
             if (
                 existing.source_key != source_key
-                or existing.source_url != catalog.source.source_url
+                or existing.source_locator != catalog.source.source_locator
+                or existing.source_revision != catalog.source.source_revision
                 or existing.source_checksum != catalog.source.source_checksum
                 or existing.source_statistics != statistics
             ):
@@ -207,7 +201,9 @@ class EntityRepository:
         candidate = EntityCatalogSnapshotRecord(
             job_id=job_id,
             source_key=source_key,
-            source_url=catalog.source.source_url,
+            source_type=catalog.source.source_type,
+            source_locator=catalog.source.source_locator,
+            source_revision=catalog.source.source_revision,
             source_checksum=catalog.source.source_checksum,
             source_format=catalog.source_format,
             source_metadata=catalog.source_metadata,
@@ -227,7 +223,7 @@ class EntityRepository:
             self.session.execute(insert(EntityStagingRecord), batch)
         return candidate
 
-    def publish(self, job_id: UUID) -> EntityImportResult:
+    def publish(self, job_id: UUID) -> EntityRefreshResult:
         """Replace a source's active catalog with a job's staged catalog.
 
         The source's catalog lock is held until the transaction ends, so only one
@@ -261,7 +257,7 @@ class EntityRepository:
             raise EntityCandidateConflictError
         acquire_entity_catalog_lock(self.session, candidate.source_key)
         if candidate.publication_result is not None:
-            return EntityImportResult.from_job_result(candidate.publication_result)
+            return EntityRefreshResult.from_job_result(candidate.publication_result)
         if candidate.active or job.status not in {"queued", "running"}:
             raise EntityCandidateConflictError
         current = self.session.scalar(
@@ -311,10 +307,12 @@ class EntityRepository:
             for row in rows
         ):
             self.session.execute(insert(EntitySourceRecord), batch)
-        result = EntityImportResult(
+        result = EntityRefreshResult(
             snapshot_id=candidate.snapshot_id,
             source_key=candidate.source_key,
-            source_url=candidate.source_url,
+            source_type=candidate.source_type,
+            source_locator=candidate.source_locator,
+            source_revision=candidate.source_revision,
             source_checksum=candidate.source_checksum,
             source_record_count=len(rows),
             active_identifier_count=len(new_ids),
@@ -336,7 +334,7 @@ class EntityRepository:
     def completed(self, job_id: UUID) -> dict[str, object] | None:
         """Return a job's stored publication result, or `None` if it has not published.
 
-        The result stays available after a later import replaces the catalog.
+        The result stays available after a later refresh replaces the catalog.
         """
         candidate = self._candidate(job_id)
         if candidate is None:
@@ -346,7 +344,7 @@ class EntityRepository:
         return (
             None
             if candidate.publication_result is None
-            else EntityImportResult.from_job_result(
+            else EntityRefreshResult.from_job_result(
                 candidate.publication_result
             ).to_job_result()
         )

@@ -8,10 +8,15 @@ import pytest
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.persistence.locks import job_execution_lock
 from standard_annotation_backend.persistence.models import AuditEventRecord, JobRecord
-from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.persistence.unit_of_work import (
+    SqlAlchemyUnitOfWork,
+    UnitOfWorkFactory,
+)
 from standard_annotation_backend.services.job_service import (
     InvalidJobTransitionError,
     JobService,
@@ -38,7 +43,7 @@ def test_job_lifecycle_commits_state_and_audit_together(
     """Queue, start, and success transitions retain matching audit history."""
     service = _service(unit_of_work_factory)
     created = service.create(
-        job_type=JobType.AUTHORIZATION_SYNC,
+        job_type=JobType.AUTHORIZATION_REFRESH,
         requested_by="scheduler",
         parameters={
             "source_repository": "geneontology/go-site",
@@ -79,7 +84,7 @@ def test_progress_replaces_counts_and_warnings_for_a_running_job(
     """Progress updates replace the public snapshot without changing state."""
     service = _service(unit_of_work_factory)
     job = service.create(
-        job_type=JobType.AUTHORIZATION_SYNC,
+        job_type=JobType.AUTHORIZATION_REFRESH,
         requested_by="curator",
         parameters={},
     )
@@ -102,7 +107,7 @@ def test_job_can_fail_before_or_after_worker_start(
     """Dispatch and execution failures both become valid terminal job records."""
     service = _service(unit_of_work_factory)
     job = service.create(
-        job_type=JobType.AUTHORIZATION_SYNC,
+        job_type=JobType.AUTHORIZATION_REFRESH,
         requested_by="scheduler",
         parameters={},
     )
@@ -121,7 +126,7 @@ def test_blank_failure_is_rejected_before_state_changes(
     """A job cannot persist a blank or whitespace-only public failure summary."""
     service = _service(unit_of_work_factory)
     job = service.create(
-        job_type=JobType.AUTHORIZATION_SYNC,
+        job_type=JobType.AUTHORIZATION_REFRESH,
         requested_by="scheduler",
         parameters={},
     )
@@ -137,7 +142,7 @@ def test_repeated_transitions_are_idempotent_but_terminal_state_cannot_change(
     """Repeated transitions add no audit event and cannot change a final result."""
     service = _service(unit_of_work_factory)
     job = service.create(
-        job_type=JobType.AUTHORIZATION_SYNC,
+        job_type=JobType.AUTHORIZATION_REFRESH,
         requested_by="scheduler",
         parameters={},
     )
@@ -166,7 +171,7 @@ def test_conflicting_repeated_success_is_rejected(
     """A terminal success cannot be replayed with different public output."""
     service = _service(unit_of_work_factory)
     job = service.create(
-        job_type=JobType.AUTHORIZATION_SYNC,
+        job_type=JobType.AUTHORIZATION_REFRESH,
         requested_by="scheduler",
         parameters={},
     )
@@ -196,7 +201,7 @@ def test_concurrent_start_records_one_transition(
     """Concurrent start requests change and audit the job exactly once."""
     service = _service(unit_of_work_factory)
     job = service.create(
-        job_type=JobType.AUTHORIZATION_SYNC,
+        job_type=JobType.AUTHORIZATION_REFRESH,
         requested_by="scheduler",
         parameters={},
     )
@@ -211,3 +216,107 @@ def test_concurrent_start_records_one_transition(
 
     assert results == (JobStatus.RUNNING, JobStatus.RUNNING)
     assert _audit_actions(session_factory).count("job.started") == 1
+
+
+def _running_refresh(service: JobService) -> UUID:
+    job = service.create(
+        job_type=JobType.ENTITY_REFRESH,
+        requested_by="scheduler",
+        parameters={"source_key": "mgi"},
+    )
+    service.start(job.job_id)
+    return job.job_id
+
+
+def _failure_audits(session_factory: sessionmaker[Session]) -> list[AuditEventRecord]:
+    with session_factory() as session:
+        return list(
+            session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.action == AuditAction.JOB_FAILED
+                )
+            )
+        )
+
+
+def test_failed_refresh_records_code_and_details_with_truncated_audit(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The job keeps every reported issue; its failure audit event keeps the first 10."""
+    service = _service(unit_of_work_factory)
+    job_id = _running_refresh(service)
+    issues = [{"line_number": line} for line in range(12)]
+
+    failed = service.fail_refresh(
+        job_id,
+        error="Entity refresh failed",
+        failure_code=RefreshFailureCode.ROW_VALIDATION,
+        failure_details={"issue_count": 12, "issues": issues},
+    )
+
+    assert failed.status is JobStatus.FAILED
+    assert failed.error == "Entity refresh failed"
+    assert failed.progress == {
+        "phase": "failed",
+        "failure_code": "row_validation",
+        "failure_details": {"issue_count": 12, "issues": issues},
+    }
+    [audit] = _failure_audits(session_factory)
+    assert audit.details["failure_code"] == "row_validation"
+    assert audit.details["failure_details"] == {
+        "issue_count": 12,
+        "issues": issues[:10],
+    }
+
+
+def test_failed_refresh_without_details_records_only_the_code(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A failure without details stores just the phase and failure code."""
+    service = _service(unit_of_work_factory)
+    job_id = _running_refresh(service)
+
+    failed = service.fail_refresh(
+        job_id, error="Entity refresh failed", failure_code=RefreshFailureCode.TIMEOUT
+    )
+
+    assert failed.progress == {"phase": "failed", "failure_code": "timeout"}
+    [audit] = _failure_audits(session_factory)
+    assert "failure_details" not in audit.details
+
+
+def test_failed_refresh_cleanup_commits_with_the_failure(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Cleanup runs in the failure's transaction, so a cleanup error records nothing."""
+    service = _service(unit_of_work_factory)
+    job_id = _running_refresh(service)
+    cleaned: list[UUID] = []
+
+    def broken_cleanup(_uow: SqlAlchemyUnitOfWork) -> None:
+        raise RuntimeError("cleanup storage unavailable")
+
+    with pytest.raises(RuntimeError):
+        service.fail_refresh(
+            job_id,
+            error="Entity refresh failed",
+            failure_code=RefreshFailureCode.SOURCE_ERROR,
+            cleanup=broken_cleanup,
+        )
+
+    assert service.find(job_id).status is JobStatus.RUNNING
+    assert _failure_audits(session_factory) == []
+
+    service.fail_refresh(
+        job_id,
+        error="Entity refresh failed",
+        failure_code=RefreshFailureCode.SOURCE_ERROR,
+        cleanup=lambda _uow: cleaned.append(job_id),
+    )
+
+    assert service.find(job_id).status is JobStatus.FAILED
+    assert cleaned == [job_id]
+    assert len(_failure_audits(session_factory)) == 1

@@ -14,18 +14,19 @@ up:
 down:
     docker compose down
 
-# Follow the web application logs.
+# Follow the web and worker application logs.
 [no-exit-message]
 logs:
-    docker compose logs -f web
+    docker compose logs -f web worker
 
 # Apply all pending database migrations.
 migrate:
     docker compose run --build --rm web alembic upgrade head
 
-# Synchronize local authorization state from the current go-site users.yaml.
-sync-authorizations:
-    docker compose run --build --rm web python -m standard_annotation_backend.cli.authorization_sync
+# Refresh reference data from config/sources.yaml: KIND is authorization, ontology, or entity.
+[positional-arguments]
+refresh KIND *SOURCE:
+    docker compose run --build --rm web python -m standard_annotation_backend.cli.refresh "$@"
 
 # Run tests in a temporary container.
 [positional-arguments]

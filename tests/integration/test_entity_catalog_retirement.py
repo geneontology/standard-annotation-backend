@@ -1,21 +1,16 @@
 """Verify retirement of entity catalogs whose source is no longer configured."""
 
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from types import SimpleNamespace
+from collections.abc import Callable
 from uuid import UUID
 
 import pytest
-from celery import Task
-from celery.exceptions import Retry
+from refresh_helpers import FakeFetchers, build_runner, sources_with_entities
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
-from test_entity_import_service import stage
+from test_entity_refresh_service import stage
 
-from standard_annotation_backend.config import GpiEntitySourceSettings
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.entity_sources.registry import EntitySourceRegistry
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AuditEventRecord,
@@ -24,46 +19,44 @@ from standard_annotation_backend.persistence.models import (
     EntitySourceRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.entity_import_service import (
-    EntityImportService,
+from standard_annotation_backend.refresh import runner as refresh_runner
+from standard_annotation_backend.refresh.runner import RefreshRunner
+from standard_annotation_backend.refresh.sources import RefreshSources
+from standard_annotation_backend.services.entity_refresh_service import (
+    EntityRefreshService,
 )
 from standard_annotation_backend.services.job_service import (
     Job,
     JobService,
     job_from_record,
 )
-from standard_annotation_backend.workers import tasks
 
 
 @pytest.fixture
 def services(
     unit_of_work_factory: UnitOfWorkFactory,
-) -> tuple[JobService, EntityImportService]:
-    return JobService(unit_of_work_factory), EntityImportService(unit_of_work_factory)
+) -> tuple[JobService, EntityRefreshService]:
+    return JobService(unit_of_work_factory), EntityRefreshService(unit_of_work_factory)
 
 
-def _install(
-    monkeypatch: pytest.MonkeyPatch,
-    engine: Engine,
-    jobs: JobService,
-    imports: EntityImportService,
-    registry: EntitySourceRegistry,
-) -> None:
-    @contextmanager
-    def runtime() -> Iterator[object]:
-        yield SimpleNamespace(
-            engine=engine,
-            jobs=jobs,
-            entity_imports=imports,
-            entity_sources=registry,
-            entity_source_client=None,
-        )
+NO_ENTITIES = sources_with_entities({})
+ONLY_MGI = sources_with_entities(
+    {"mgi": {"type": "https", "url": "https://example.org/mgi.gpi"}}
+)
+ONLY_RGD = sources_with_entities(
+    {"rgd": {"type": "https", "url": "https://example.org/rgd.gpi"}}
+)
 
-    monkeypatch.setattr(tasks, "worker_runtime", runtime)
+
+def _runner(
+    engine: Engine, unit_of_work_factory: UnitOfWorkFactory, sources: RefreshSources
+) -> RefreshRunner:
+    """Build a runner whose fetchers fail the test if a source is fetched."""
+    return build_runner(engine, unit_of_work_factory, FakeFetchers({}), sources=sources)
 
 
 def _publish(
-    imports: EntityImportService,
+    imports: EntityRefreshService,
     session_factory: sessionmaker[Session],
     source: str,
     *identifiers: str,
@@ -76,7 +69,7 @@ def _publish(
 
 def _retirement_job(jobs: JobService, source: str) -> UUID:
     return jobs.create(
-        job_type=JobType.ENTITY_CATALOG_RETIREMENT,
+        job_type=JobType.ENTITY_RETIREMENT,
         requested_by="scheduler",
         parameters={"source_key": source},
     ).job_id
@@ -98,7 +91,7 @@ def _retirement_audits(
         return list(
             session.scalars(
                 select(AuditEventRecord).where(
-                    AuditEventRecord.action == AuditAction.ENTITY_CATALOG_RETIRED
+                    AuditEventRecord.action == AuditAction.ENTITY_RETIRED
                 )
             )
         )
@@ -117,10 +110,10 @@ def _active_ids(session_factory: sessionmaker[Session]) -> list[str]:
 
 
 def test_retirement_removes_membership_and_reports_impacts(
-    monkeypatch: pytest.MonkeyPatch,
     database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    services: tuple[JobService, EntityImportService],
+    services: tuple[JobService, EntityRefreshService],
     seed_annotation: Callable[[str], UUID],
 ) -> None:
     """Retiring a source removes its entities and reports affected annotations."""
@@ -128,18 +121,9 @@ def test_retirement_removes_membership_and_reports_impacts(
     _publish(imports, session_factory, "mgi", "MGI:1", "MGI:2")
     _publish(imports, session_factory, "rgd", "RGD:1")
     annotation_id = seed_annotation("MGI:1")  # active annotation on a retired entity
-    _install(
-        monkeypatch,
-        database_engine,
-        jobs,
-        imports,
-        EntitySourceRegistry(
-            {"rgd": GpiEntitySourceSettings(url="https://example.org/rgd.gpi")}
-        ),
-    )
     job_id = _retirement_job(jobs, "mgi")
 
-    tasks.run_entity_catalog_retirement.run(str(job_id))
+    _runner(database_engine, unit_of_work_factory, ONLY_RGD).run_retirement(job_id)
 
     with session_factory() as session:
         assert list(
@@ -163,7 +147,7 @@ def test_retirement_removes_membership_and_reports_impacts(
         audits = list(
             session.scalars(
                 select(AuditEventRecord).where(
-                    AuditEventRecord.action == AuditAction.ENTITY_CATALOG_RETIRED
+                    AuditEventRecord.action == AuditAction.ENTITY_RETIRED
                 )
             )
         )
@@ -172,6 +156,11 @@ def test_retirement_removes_membership_and_reports_impacts(
         record = uow.jobs.get(job_id)
         assert record is not None
         assert record.status == JobStatus.SUCCEEDED.value
+        assert record.progress == {
+            "phase": "completed",
+            "retired": True,
+            "removed_count": 2,
+        }
         assert record.result == {
             "source_key": "mgi",
             "retired": True,
@@ -187,22 +176,24 @@ def test_retirement_removes_membership_and_reports_impacts(
 def test_redelivered_retirement_recovers_result_without_second_audit(
     monkeypatch: pytest.MonkeyPatch,
     database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    services: tuple[JobService, EntityImportService],
+    services: tuple[JobService, EntityRefreshService],
 ) -> None:
-    """A retirement task run again after a lost success update finishes the job.
+    """A retirement job run again after a lost success update finishes the job.
 
     The job succeeds with the result of the committed retirement, and the
     retirement is audited only once.
     """
     jobs, imports = services
     _publish(imports, session_factory, "mgi", "MGI:1")
-    _install(monkeypatch, database_engine, jobs, imports, EntitySourceRegistry({}))
+    runner = _runner(database_engine, unit_of_work_factory, NO_ENTITIES)
     job_id = _retirement_job(jobs, "mgi")
-    original_succeed = jobs.succeed
+    original_succeed = JobService.succeed
     failures = 1
 
     def fail_once(
+        service: JobService,
         received_job_id: UUID,
         *,
         result: dict[str, object],
@@ -213,22 +204,17 @@ def test_redelivered_retirement_recovers_result_without_second_audit(
             failures -= 1
             raise RuntimeError("connection dropped after retirement")
         return original_succeed(
-            received_job_id, result=result, artifact_uri=artifact_uri
+            service, received_job_id, result=result, artifact_uri=artifact_uri
         )
 
-    def retry(*, exc: Exception, countdown: int) -> None:
-        assert countdown == 30
-        raise Retry(exc=exc)
+    monkeypatch.setattr(JobService, "succeed", fail_once)
 
-    monkeypatch.setattr(jobs, "succeed", fail_once)
-    monkeypatch.setattr(tasks.run_entity_catalog_retirement, "retry", retry)
-
-    with pytest.raises(Retry):
-        tasks.run_entity_catalog_retirement.run(str(job_id))
+    with pytest.raises(RuntimeError, match="connection dropped"):
+        runner.run_retirement(job_id)
 
     assert _job_record(jobs, job_id).status == JobStatus.RUNNING
 
-    tasks.run_entity_catalog_retirement.run(str(job_id))
+    runner.run_retirement(job_id)
 
     audits = _retirement_audits(session_factory)
     assert len(audits) == 1
@@ -246,10 +232,10 @@ def test_redelivered_retirement_recovers_result_without_second_audit(
 
 @pytest.mark.parametrize("case", ["configured", "no_catalog"])
 def test_retirement_without_active_catalog_or_of_configured_source_is_a_no_op(
-    monkeypatch: pytest.MonkeyPatch,
     database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    services: tuple[JobService, EntityImportService],
+    services: tuple[JobService, EntityRefreshService],
     case: str,
 ) -> None:
     """Nothing is retired when the source is configured again or has no catalog.
@@ -260,16 +246,13 @@ def test_retirement_without_active_catalog_or_of_configured_source_is_a_no_op(
     jobs, imports = services
     if case == "configured":
         _publish(imports, session_factory, "mgi", "MGI:1")
-        registry = EntitySourceRegistry(
-            {"mgi": GpiEntitySourceSettings(url="https://example.org/mgi.gpi")}
-        )
+        sources = ONLY_MGI
     else:
-        registry = EntitySourceRegistry({})
+        sources = NO_ENTITIES
     active_before = _active_ids(session_factory)
-    _install(monkeypatch, database_engine, jobs, imports, registry)
     job_id = _retirement_job(jobs, "mgi")
 
-    tasks.run_entity_catalog_retirement.run(str(job_id))
+    _runner(database_engine, unit_of_work_factory, sources).run_retirement(job_id)
 
     record = _job_record(jobs, job_id)
     assert record.status == JobStatus.SUCCEEDED
@@ -283,24 +266,26 @@ def test_retirement_without_active_catalog_or_of_configured_source_is_a_no_op(
     [
         {},
         {"source_key": "MGI"},
+        {"source_key": "Bad Key"},
         {"source_key": 7},
         {"source_key": "mgi", "source_url": "https://example.org/x"},
     ],
 )
 @pytest.mark.parametrize(
-    ("task", "job_type"),
+    ("job_type", "error"),
     [
-        (tasks.run_entity_import, JobType.ENTITY_IMPORT),
-        (tasks.run_entity_catalog_retirement, JobType.ENTITY_CATALOG_RETIREMENT),
+        (JobType.ENTITY_REFRESH, "Entity refresh failed"),
+        (JobType.ENTITY_RETIREMENT, "Entity refresh failed"),
     ],
-    ids=["import", "retirement"],
+    ids=["refresh", "retirement"],
 )
 def test_invalid_entity_job_parameters_fail_terminally(
     monkeypatch: pytest.MonkeyPatch,
     database_engine: Engine,
-    services: tuple[JobService, EntityImportService],
-    task: Task,
+    unit_of_work_factory: UnitOfWorkFactory,
+    services: tuple[JobService, EntityRefreshService],
     job_type: JobType,
+    error: str,
     parameters: dict[str, object],
 ) -> None:
     """Entity jobs with malformed stored parameters fail with `invalid_parameters`.
@@ -312,22 +297,30 @@ def test_invalid_entity_job_parameters_fail_terminally(
     def record_log(message: str, *args: object) -> None:
         log_records.append(message % args)
 
-    monkeypatch.setattr(tasks.logger, "error", record_log)
-    jobs, imports = services
-    _install(monkeypatch, database_engine, jobs, imports, EntitySourceRegistry({}))
+    monkeypatch.setattr(refresh_runner.logger, "error", record_log)
+    jobs, _imports = services
+    runner = _runner(database_engine, unit_of_work_factory, ONLY_MGI)
     job_id = jobs.create(
         job_type=job_type,
         requested_by="scheduler",
         parameters=parameters,
     ).job_id
 
-    task.run(str(job_id))
+    if job_type is JobType.ENTITY_RETIREMENT:
+        runner.run_retirement(job_id)
+    else:
+        runner.run(job_id)
 
     record = _job_record(jobs, job_id)
     assert record.status == JobStatus.FAILED
-    assert record.error == "Entity import failed"
-    assert record.progress["failure_code"] == "invalid_parameters"
+    assert record.error == error
+    assert record.progress == {
+        "phase": "failed",
+        "failure_code": "invalid_parameters",
+    }
     logs = "\n".join(log_records)
-    assert "failure_type=ValueError" in logs
+    assert str(job_id) in logs
+    assert "failure_code=invalid_parameters" in logs
     assert "MGI" not in logs
+    assert "Bad Key" not in logs
     assert "example.org" not in logs

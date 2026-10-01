@@ -64,7 +64,7 @@ def _create_source_job(session_factory: sessionmaker[Session]) -> UUID:
         session.add(
             JobRecord(
                 job_id=job_id,
-                job_type="authorization_sync",
+                job_type="authorization_refresh",
                 status="queued",
                 requested_by="importer",
                 parameters={},

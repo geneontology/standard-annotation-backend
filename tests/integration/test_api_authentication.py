@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, status
 from fastapi.testclient import TestClient
+from source_provenance import github_provenance
 from sqlalchemy import Engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -163,8 +164,7 @@ def bearer_token(unit_of_work_factory: UnitOfWorkFactory) -> dict[str, UUID]:
                     "curator", "Curator", (SyncAuthorization("edit", "group", "MGI"),)
                 ),
             ),
-            source_repository="test/repo",
-            source_commit_sha="a" * 40,
+            provenance=github_provenance("a" * 40, "test/repo"),
             summary={},
         )
         owner = uow.auth.get_user_by_github_login("curator")
@@ -484,8 +484,7 @@ def test_other_valid_selections_authenticate(
                     "curator", "Curator", (SyncAuthorization("read", scope, group),)
                 ),
             ),
-            source_repository="test/repo",
-            source_commit_sha="b" * 40,
+            provenance=github_provenance("b" * 40, "test/repo"),
             summary={},
         )
         owner = uow.auth.get_user_by_github_login("curator")

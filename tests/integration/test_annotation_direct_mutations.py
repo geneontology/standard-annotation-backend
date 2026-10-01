@@ -46,7 +46,7 @@ def _create_legacy_annotations(
     with unit_of_work_factory() as unit_of_work:
         source_job = JobRecord(
             job_id=job_id,
-            job_type="authorization_sync",
+            job_type="authorization_refresh",
             status="queued",
             requested_by="importer",
             parameters={},

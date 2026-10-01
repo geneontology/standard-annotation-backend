@@ -12,6 +12,7 @@ from standard_annotation_backend.api.errors import (
     install_exception_handlers,
     oauth_callback_failure_response,
 )
+from standard_annotation_backend.api.routes.admin import router as admin_router
 from standard_annotation_backend.api.routes.annotation_comments import (
     router as annotation_comments_router,
 )
@@ -23,13 +24,6 @@ from standard_annotation_backend.api.routes.annotations import (
 )
 from standard_annotation_backend.api.routes.change_sets import (
     router as change_sets_router,
-)
-from standard_annotation_backend.api.routes.entity_imports import (
-    router as entity_imports_router,
-)
-from standard_annotation_backend.api.routes.jobs import router as jobs_router
-from standard_annotation_backend.api.routes.ontology_loads import (
-    router as ontology_loads_router,
 )
 from standard_annotation_backend.api.routes.token_management import (
     router as token_management_router,
@@ -77,15 +71,26 @@ app = FastAPI(
     title="Standard Annotation Backend",
     description="""[Token Management](/token-management)""",
     openapi_tags=[
-        {"name": "annotations"},
-        {"name": "annotation comments"},
-        {"name": "change-sets"},
         {
-            "name": "entity imports",
-            "description": "Create durable entity catalog imports.",
+            "name": "annotations",
+            "description": "Create, read, search, update, and delete Standard "
+            "Annotations, and read their version history.",
         },
-        {"name": "jobs"},
-        {"name": "ontology loads"},
+        {
+            "name": "annotation comments",
+            "description": "Discuss annotations without changing them.",
+        },
+        {
+            "name": "change-sets",
+            "description": "Propose annotation changes for review, preview them, "
+            "and accept or reject them.",
+        },
+        {
+            "name": "admin operations",
+            "description": "Global-admin operations: refresh authorization, "
+            "ontologies, and entity catalogs from config/sources.yaml, and read "
+            "job status.",
+        },
     ],
     version=get_application_version(),
     docs_url=None,
@@ -93,13 +98,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 install_exception_handlers(app)
+app.include_router(admin_router)
 app.include_router(annotation_comments_router)
 app.include_router(annotation_versions_router)
 app.include_router(annotations_router)
 app.include_router(change_sets_router)
-app.include_router(entity_imports_router)
-app.include_router(jobs_router)
-app.include_router(ontology_loads_router)
 app.include_router(token_management_router)
 app.include_router(tokens_router)
 app.mount(

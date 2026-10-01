@@ -15,14 +15,13 @@ from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 
 from standard_annotation_backend.api.examples import CHANGE_SET_PROPOSAL_EXAMPLES
-from standard_annotation_backend.config import SourceKey
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationExtension,
     AnnotationProperties,
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.refresh.sources import SourceKey
 from standard_annotation_backend.services.annotation_service import (
     AnnotationVersion,
     CurrentAnnotation,
@@ -201,11 +200,12 @@ class JobResource(BaseModel):
     requested_by: str
     progress: dict[str, object] = Field(
         description=(
-            "Type-specific progress. Failed entity jobs include phase='failed', "
+            "Type-specific progress. Failed refresh jobs include phase='failed', "
             "a failure_code, and, when available, failure_details describing the "
             "problem: a message for an invalid header, or issue_count and up to "
             "100 issues (line number, category, and invalid fields) for invalid "
-            "rows."
+            "rows. Refresh jobs whose source document was already active, so "
+            "nothing was applied, include unchanged=true."
         ),
         examples=[
             {
@@ -237,8 +237,8 @@ class JobResource(BaseModel):
     warnings: tuple[str, ...]
     result: dict[str, object] | None = Field(
         description=(
-            "Type-specific durable result. Successful entity imports include "
-            "warning_count and warnings; imports whose source is unchanged "
+            "Type-specific durable result. Successful entity refreshes include "
+            "warning_count and warnings; refreshes whose source is unchanged "
             "return unchanged: true instead."
         ),
         examples=[{"warning_count": 0, "warnings": []}],
@@ -270,16 +270,8 @@ class JobResource(BaseModel):
         )
 
 
-class OntologyLoadRequest(BaseModel):
-    """Select a configured ontology for a background load."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    ontology: OntologyKey
-
-
-class EntityImportRequest(BaseModel):
-    """Request an import of one configured entity source, or of all of them."""
+class RefreshRequest(BaseModel):
+    """Request a refresh of one configured source, or of every source of a kind."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -287,16 +279,16 @@ class EntityImportRequest(BaseModel):
         SourceKey | None,
         Field(
             description=(
-                "Key of a configured entity source. Omit it to import every "
-                "configured source and retire catalogs of removed sources."
+                "Key of a source configured in config/sources.yaml. Omit it to "
+                "refresh every configured source of this kind."
             ),
-            examples=["mouse"],
+            examples=["go"],
         ),
     ] = None
 
 
-class EntityImportJobsResource(BaseModel):
-    """List the jobs created or reused by an entity import request."""
+class RefreshJobsResource(BaseModel):
+    """List the jobs created or reused by a refresh request."""
 
     jobs: list[JobResource]
 

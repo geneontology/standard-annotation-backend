@@ -40,17 +40,20 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     beat_schedule={
-        "authorization-sync": {
-            "task": "sab.authorization_sync.schedule",
-            "schedule": crontab.from_string(settings.authorization_sync_cron),
+        "authorization-refresh": {
+            "task": "sab.refresh.schedule",
+            "schedule": crontab.from_string(settings.authorization_refresh_cron),
+            "args": ("authorization",),
         },
-        "ontology-load": {
-            "task": "sab.ontology_load.schedule",
-            "schedule": crontab.from_string(settings.ontology_load_cron),
+        "ontology-refresh": {
+            "task": "sab.refresh.schedule",
+            "schedule": crontab.from_string(settings.ontology_refresh_cron),
+            "args": ("ontology",),
         },
-        "entity-import": {
-            "task": "sab.entity_import.schedule",
-            "schedule": crontab.from_string(settings.entity_import_cron),
+        "entity-refresh": {
+            "task": "sab.refresh.schedule",
+            "schedule": crontab.from_string(settings.entity_refresh_cron),
+            "args": ("entity",),
         },
     },
 )

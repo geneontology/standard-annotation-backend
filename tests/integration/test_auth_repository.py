@@ -7,6 +7,7 @@ from time import monotonic
 from uuid import uuid4
 
 import pytest
+from source_provenance import github_provenance
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -32,8 +33,7 @@ def _sync(
                 ),
                 SyncUser("other", None, (SyncAuthorization("admin", "global", None),)),
             ),
-            source_repository="geneontology/go-site",
-            source_commit_sha=source_commit_sha,
+            provenance=github_provenance(source_commit_sha, "geneontology/go-site"),
             summary={"users": 2},
         )
         uow.commit()
@@ -55,8 +55,7 @@ def test_sync_retains_unchanged_ids_and_preserves_removed_history(
         assert uow.auth.list_active_assignments(user_id)[0].assignment_id == original
         uow.auth.replace_authorizations(
             users=(SyncUser("curator", "Renamed", ()),),
-            source_repository="geneontology/go-site",
-            source_commit_sha="b" * 40,
+            provenance=github_provenance("b" * 40, "geneontology/go-site"),
             summary={"users": 1},
         )
         assert uow.auth.list_active_assignments(user_id) == ()
@@ -70,10 +69,11 @@ def test_sync_retains_unchanged_ids_and_preserves_removed_history(
         removed = session.get(models.AuthorizationAssignmentRecord, original)
         assert removed is not None
         assert removed.is_active is False
-        sync = session.scalars(select(models.AuthorizationSyncRecord)).first()
+        sync = session.scalars(select(models.AuthorizationRefreshRecord)).first()
         assert sync is not None
-        assert sync.source_repository == "geneontology/go-site"
-        assert sync.source_commit_sha == "a" * 40
+        assert sync.source_type == "github"
+        assert sync.source_locator == "github:geneontology/go-site:metadata/users.yaml"
+        assert sync.source_revision == "a" * 40
         assert sync.summary == {"users": 2}
 
 
@@ -86,19 +86,18 @@ def test_auth_and_audit_share_transaction_and_rollback(
         assert uow.auth.session is uow.audit.session
         uow.auth.replace_authorizations(
             users=(SyncUser("curator", None, ()),),
-            source_repository="repo",
-            source_commit_sha="c" * 40,
+            provenance=github_provenance("c" * 40, "repo"),
             summary={},
         )
         uow.audit.record(
-            action=AuditAction.AUTHORIZATION_SYNCHRONIZED,
+            action=AuditAction.AUTHORIZATION_REFRESHED,
             actor_id="sync",
             result=AuditResult.SUCCESS,
         )
     with session_factory() as session:
         for record in (
             models.SabUserRecord,
-            models.AuthorizationSyncRecord,
+            models.AuthorizationRefreshRecord,
             models.AuditEventRecord,
         ):
             assert session.scalar(select(func.count()).select_from(record)) == 0
@@ -220,8 +219,7 @@ def test_failed_sync_preserves_previous_state_and_provenance(
             users=(
                 SyncUser("new", None, (SyncAuthorization("invalid", "global", None),)),
             ),
-            source_repository="repo",
-            source_commit_sha="b" * 40,
+            provenance=github_provenance("b" * 40, "repo"),
             summary={},
         )
     with unit_of_work_factory() as uow:
@@ -232,7 +230,7 @@ def test_failed_sync_preserves_previous_state_and_provenance(
     with session_factory() as session:
         assert (
             session.scalar(
-                select(func.count()).select_from(models.AuthorizationSyncRecord)
+                select(func.count()).select_from(models.AuthorizationRefreshRecord)
             )
             == 1
         )
@@ -249,8 +247,7 @@ def test_duplicate_grants_in_one_sync_share_assignment_identity(
             users=(
                 SyncUser("curator", None, (grant, grant, global_grant, global_grant)),
             ),
-            source_repository="repo",
-            source_commit_sha="a" * 40,
+            provenance=github_provenance("a" * 40, "repo"),
             summary={},
         )
         owner = uow.auth.get_user_by_github_login("curator")
@@ -285,7 +282,7 @@ def test_removed_and_regranted_context_does_not_revive_issued_token(
         uow.commit()
     with unit_of_work_factory() as uow:
         uow.auth.replace_authorizations(
-            users=(), source_repository="repo", source_commit_sha="b" * 40, summary={}
+            users=(), provenance=github_provenance("b" * 40, "repo"), summary={}
         )
         uow.commit()
     _sync(unit_of_work_factory, "c" * 40)
@@ -317,8 +314,7 @@ def test_concurrent_syncs_replace_the_complete_committed_state(
             users=(
                 SyncUser("first", None, (SyncAuthorization("edit", "group", "MGI"),)),
             ),
-            source_repository="repo",
-            source_commit_sha="a" * 40,
+            provenance=github_provenance("a" * 40, "repo"),
             summary={},
         )
 
@@ -331,8 +327,7 @@ def test_concurrent_syncs_replace_the_complete_committed_state(
                             "second", None, (SyncAuthorization("read", "global", None),)
                         ),
                     ),
-                    source_repository="repo",
-                    source_commit_sha="b" * 40,
+                    provenance=github_provenance("b" * 40, "repo"),
                     summary={},
                 )
                 second.commit()
@@ -370,7 +365,7 @@ def test_concurrent_syncs_replace_the_complete_committed_state(
         assert len(repository.list_active_assignments(owner.user_id)) == 1
         assert (
             session.scalar(
-                select(func.count()).select_from(models.AuthorizationSyncRecord)
+                select(func.count()).select_from(models.AuthorizationRefreshRecord)
             )
             == 2
         )

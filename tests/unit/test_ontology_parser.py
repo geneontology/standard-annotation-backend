@@ -33,7 +33,7 @@ def _document(name: str, *, content: bytes | None = None) -> OntologyDocument:
         source_locator=f"fixture:{name}",
         source_revision="a" * 40,
         source_checksum=sha256(raw).hexdigest(),
-        retrieved_at=datetime(2026, 9, 28, tzinfo=UTC),
+        fetched_at=datetime(2026, 9, 28, tzinfo=UTC),
     )
 
 

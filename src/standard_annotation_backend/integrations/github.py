@@ -37,9 +37,15 @@ class _GitCommit(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class GitHubClient:
-    """Resolve commits and retrieve repository content from GitHub."""
+    """Resolve commits and retrieve repository content from GitHub.
+
+    Attributes:
+        client: HTTP client that sends the requests.
+        timeout: Timeout applied to each request. Defaults to 30 seconds.
+    """
 
     client: httpx2.Client
+    timeout: httpx2.Timeout | float = _REQUEST_TIMEOUT_SECONDS
 
     def resolve_commit(self, repository: str, ref: str) -> str:
         """Resolve a repository ref to a canonical immutable commit SHA.
@@ -58,42 +64,12 @@ class GitHubClient:
             response = self.client.get(
                 f"{_API_URL}/repos/{repository}/commits/{ref}",
                 headers=self._api_headers("application/vnd.github+json"),
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=self.timeout,
                 follow_redirects=False,
             )
             response.raise_for_status()
             return _GitCommit.model_validate(response.json()).sha
         except (httpx2.HTTPError, ValueError, ValidationError):
-            raise GitHubIntegrationError(_SAFE_ERROR) from None
-
-    def fetch_repository_content(
-        self, repository: str, path: str, commit_sha: str
-    ) -> bytes:
-        """Retrieve repository content through GitHub's Contents API.
-
-        Args:
-            repository: GitHub repository in `owner/name` form.
-            path: Repository-relative path to retrieve.
-            commit_sha: Full hexadecimal commit identifier.
-
-        Returns:
-            The response body at the normalized immutable commit.
-
-        Raises:
-            GitHubIntegrationError: If the commit is invalid or retrieval fails.
-        """
-        commit = self._validate_commit(commit_sha)
-        try:
-            response = self.client.get(
-                f"{_API_URL}/repos/{repository}/contents/{path}",
-                params={"ref": commit.sha},
-                headers=self._api_headers("application/vnd.github.raw+json"),
-                timeout=_REQUEST_TIMEOUT_SECONDS,
-                follow_redirects=False,
-            )
-            response.raise_for_status()
-            return response.content
-        except httpx2.HTTPError:
             raise GitHubIntegrationError(_SAFE_ERROR) from None
 
     def fetch_raw_content(self, repository: str, path: str, commit_sha: str) -> bytes:
@@ -114,7 +90,7 @@ class GitHubClient:
         try:
             response = self.client.get(
                 f"{_RAW_URL}/{repository}/{commit.sha}/{path}",
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=self.timeout,
                 follow_redirects=False,
             )
             response.raise_for_status()

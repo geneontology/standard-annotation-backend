@@ -12,20 +12,20 @@ from sqlalchemy.orm import Session
 from standard_annotation_backend.domain.ontology import OntologyKey
 
 GLOBAL_ANNOTATION_WRITE_LOCK_KEY = -(2**63)
-_AUTHORIZATION_SYNC_LOCK_KEY = 0x53414241555448
+_AUTHORIZATION_REFRESH_LOCK_KEY = 0x53414241555448
 _MAX_SIGNATURE_LOCK_KEY = (1 << 63) - 1
 _HEXADECIMAL_CHARACTERS = frozenset(string.hexdigits)
-_ENTITY_JOB_START_LOCK_KEY = 0x53414245535452  # "SABESTR"
+_REFRESH_START_LOCK_KEY = 0x5341425253545254  # "SABRSTRT"
 _JOB_LOCK_PERSON = b"SABJOB"
 _ONTOLOGY_LOCK_PERSON = b"SABONTO"
 _ENTITY_LOCK_PERSON = b"SABENT"
 
 
-def acquire_authorization_sync_lock(session: Session) -> None:
+def acquire_authorization_refresh_lock(session: Session) -> None:
     """Prevent concurrent authorization replacements.
 
     The transaction holds the `SABAUTH` advisory lock from the duplicate-source
-    check through the replacement. A second synchronization waits until the
+    check through the replacement. A second refresh waits until the
     first transaction commits or rolls back.
 
     Args:
@@ -33,7 +33,7 @@ def acquire_authorization_sync_lock(session: Session) -> None:
     """
     session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": _AUTHORIZATION_SYNC_LOCK_KEY},
+        {"lock_key": _AUTHORIZATION_REFRESH_LOCK_KEY},
     )
 
 
@@ -185,12 +185,15 @@ def acquire_entity_catalog_lock(session: Session, source_key: str) -> None:
 
 
 @contextmanager
-def ontology_load_lock(engine: Engine, key: OntologyKey | str) -> Iterator[bool]:
-    """Try to lock ontology loading for one key until the context exits.
+def ontology_refresh_lock(engine: Engine, key: OntologyKey | str) -> Iterator[bool]:
+    """Try to lock ontology refreshing for one key until the context exits.
+
+    The lock is not waited for. If another connection holds it, the context
+    yields `False` at once, and the caller decides whether to retry later.
 
     Args:
         engine: Database engine used to own the dedicated lock connection.
-        key: Ontology whose loads must not overlap.
+        key: Ontology whose refreshes must not overlap.
 
     Yields:
         `True` when this connection owns the lock, otherwise `False`.
@@ -216,7 +219,7 @@ def ontology_load_lock(engine: Engine, key: OntologyKey | str) -> Iterator[bool]
                     {"lock_key": lock_key},
                 )
                 if released is not True:
-                    raise RuntimeError("ontology load lock was not released")
+                    raise RuntimeError("ontology refresh lock was not released")
 
 
 @contextmanager
@@ -264,16 +267,22 @@ def job_execution_lock(engine: Engine, job_id: UUID) -> Iterator[bool]:
                     raise RuntimeError("job execution lock was not released")
 
 
-def acquire_entity_job_start_lock(session: Session) -> None:
-    """Make entity import and retirement job creation run one request at a time.
+def acquire_refresh_start_lock(session: Session) -> None:
+    """Make refresh job creation run one request at a time, for every kind.
 
-    Without this lock, two requests running at once could each find no active job
-    for a source and each create one.
+    Starting a refresh first looks for a queued or running job for each source
+    and creates one only when none exists. Without this lock, two requests
+    running at once could both find no job and both create one.
+
+    One lock covers every kind. Starts are short and rare, so serializing them
+    costs nothing noticeable, and a single key cannot deadlock with itself.
 
     Args:
         session: Session whose transaction owns the lock.
     """
+    # A transaction-level lock: PostgreSQL releases it when the caller's
+    # transaction commits or rolls back, so it cannot outlive the job creation.
     session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": _ENTITY_JOB_START_LOCK_KEY},
+        {"lock_key": _REFRESH_START_LOCK_KEY},
     )

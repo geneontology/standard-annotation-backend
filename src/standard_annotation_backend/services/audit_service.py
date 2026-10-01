@@ -146,10 +146,10 @@ class AuditService:
             annotation_id=annotation_id,
             annotation_version=annotation_version,
             job_id=job_id,
-            details={"change_source": "ontology_load"},
+            details={"change_source": "ontology_refresh"},
         )
 
-    def record_ontology_loaded(
+    def record_ontology_refreshed(
         self,
         *,
         actor_id: str,
@@ -158,31 +158,31 @@ class AuditService:
     ) -> AuditEventRecord:
         """Record a summary of a completed ontology activation."""
         return self._repository.record(
-            action=AuditAction.ONTOLOGY_LOADED,
+            action=AuditAction.ONTOLOGY_REFRESHED,
             actor_id=actor_id,
             result=AuditResult.SUCCESS,
             job_id=job_id,
             details=details,
         )
 
-    def record_entity_catalog_published(
+    def record_entity_refreshed(
         self, *, actor_id: str, job_id: UUID, details: dict[str, object]
     ) -> AuditEventRecord:
         """Record a summary of a catalog publication in the publishing transaction."""
         return self._repository.record(
-            action=AuditAction.ENTITY_CATALOG_PUBLISHED,
+            action=AuditAction.ENTITY_REFRESHED,
             actor_id=actor_id,
             result=AuditResult.SUCCESS,
             job_id=job_id,
             details=details,
         )
 
-    def record_entity_catalog_retired(
+    def record_entity_retired(
         self, *, actor_id: str, job_id: UUID, details: dict[str, object]
     ) -> AuditEventRecord:
         """Record a summary of a catalog retirement in the retiring transaction."""
         return self._repository.record(
-            action=AuditAction.ENTITY_CATALOG_RETIRED,
+            action=AuditAction.ENTITY_RETIRED,
             actor_id=actor_id,
             result=AuditResult.SUCCESS,
             job_id=job_id,

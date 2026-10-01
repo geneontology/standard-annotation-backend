@@ -18,36 +18,41 @@ def test_celery_uses_json_late_acknowledgement_and_no_result_backend() -> None:
     assert celery_app.conf.task_reject_on_worker_lost is True
 
 
-def test_celery_discovers_execution_and_periodic_producer_tasks() -> None:
-    """The worker and Beat register the execution and scheduling tasks."""
+def test_celery_registers_exactly_the_refresh_tasks() -> None:
+    """SAB's task module registers the four refresh tasks and no others."""
     celery_app.loader.import_default_modules()
 
-    assert "sab.authorization_sync.run" in celery_app.tasks
-    assert "sab.authorization_sync.schedule" in celery_app.tasks
-    assert "sab.ontology_load.run" in celery_app.tasks
-    assert "sab.ontology_load.prune" in celery_app.tasks
-    assert "sab.ontology_load.schedule" in celery_app.tasks
-    assert "sab.entity_import.run" in celery_app.tasks
-    assert "sab.entity_import.schedule" in celery_app.tasks
-    assert "sab.entity_catalog_retirement.run" in celery_app.tasks
-    assert celery_app.tasks["sab.authorization_sync.run"].max_retries is None
-    assert celery_app.tasks["sab.authorization_sync.schedule"].max_retries is None
-    assert celery_app.tasks["sab.ontology_load.run"].max_retries is None
-    assert celery_app.tasks["sab.ontology_load.prune"].max_retries is None
-    assert celery_app.tasks["sab.ontology_load.schedule"].max_retries is None
-    assert celery_app.tasks["sab.entity_import.run"].max_retries is None
-    assert celery_app.tasks["sab.entity_catalog_retirement.run"].max_retries is None
+    sab_tasks = {
+        name
+        for name, task in celery_app.tasks.items()
+        if task.__module__ == "standard_annotation_backend.workers.tasks"
+    }
+    assert sab_tasks == {
+        "sab.refresh.run",
+        "sab.refresh.schedule",
+        "sab.entity_retirement.run",
+        "sab.ontology.prune",
+    }
+    for name in sab_tasks:
+        assert celery_app.tasks[name].max_retries is None
+
+
+def test_beat_schedules_one_refresh_per_kind() -> None:
+    """Beat starts each kind through `sab.refresh.schedule` on its own cron."""
     assert celery_app.conf.beat_schedule == {
-        "authorization-sync": {
-            "task": "sab.authorization_sync.schedule",
+        "authorization-refresh": {
+            "task": "sab.refresh.schedule",
             "schedule": crontab(minute="0", hour="0"),
+            "args": ("authorization",),
         },
-        "ontology-load": {
-            "task": "sab.ontology_load.schedule",
+        "ontology-refresh": {
+            "task": "sab.refresh.schedule",
             "schedule": crontab(minute="0", hour="2", day_of_week="1,3,5"),
+            "args": ("ontology",),
         },
-        "entity-import": {
-            "task": "sab.entity_import.schedule",
+        "entity-refresh": {
+            "task": "sab.refresh.schedule",
             "schedule": crontab(minute="0", hour="3"),
+            "args": ("entity",),
         },
     }

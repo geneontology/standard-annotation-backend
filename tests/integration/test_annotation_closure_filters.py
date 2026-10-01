@@ -74,7 +74,7 @@ def _load_active_ontology(unit_of_work_factory: UnitOfWorkFactory) -> None:
         source_locator="fixture/go.obo",
         source_revision="closure-api",
         source_checksum="d" * 64,
-        retrieved_at=now,
+        fetched_at=now,
     )
     term_ids = ("GO:1", "GO:2", "GO:3", "GO:4")
     terms = {term_id: OntologyTerm(term_id, False, (), ()) for term_id in term_ids}
@@ -88,7 +88,7 @@ def _load_active_ontology(unit_of_work_factory: UnitOfWorkFactory) -> None:
     with unit_of_work_factory() as uow:
         job = JobRecord(
             job_id=job_id,
-            job_type="ontology_load",
+            job_type="ontology_refresh",
             status="queued",
             requested_by="test",
             parameters={},

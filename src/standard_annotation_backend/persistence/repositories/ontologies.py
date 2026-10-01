@@ -58,7 +58,7 @@ class OntologyRepository:
             document_version=snapshot.document_version,
             loaded_predicates=list(snapshot.closure_predicates),
             job_id=job_id,
-            loaded_at=document.retrieved_at,
+            fetched_at=document.fetched_at,
             active=False,
         )
         self.session.add(record)
@@ -171,11 +171,11 @@ class OntologyRepository:
         self.session.flush([record])
         return record
 
-    def record_load_result(
+    def record_refresh_result(
         self, record: OntologyMetadataRecord, result: dict[str, object]
     ) -> None:
         """Store a successful activation result in the current transaction."""
-        record.load_result = result
+        record.refresh_result = result
         self.session.flush([record])
 
     def prune_candidates(
@@ -211,7 +211,7 @@ class OntologyRepository:
             (
                 record
                 for record, _ in reversed(rows)
-                if not record.active and record.load_result is not None
+                if not record.active and record.refresh_result is not None
             ),
             None,
         )

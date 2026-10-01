@@ -59,43 +59,45 @@ Stop the environment without deleting PostgreSQL data:
 just down
 ```
 
-## Synchronize authorizations
+## Refresh reference data
 
-Synchronize the current go-site authorization state into the local development database
-after setup and migrations:
+SAB keeps three kinds of reference data current: authorization (go-site
+`users.yaml`), ontologies (GO), and entity catalogs (GPI files). Their sources are
+configured in `config/sources.yaml`. `SAB_SOURCES_FILE` can be used to point to a
+different file. Each entry is a `github` source (`repository`, `ref`, `path`) or an
+`https` source (`url`).
+
+After setup, load authorization into the local database so you can sign in and create
+tokens:
 
 ```bash
-just sync-authorizations
+just refresh authorization
 ```
 
-The command prints the synchronized source commit and resulting counts.
+`just refresh KIND [SOURCE]` refreshes `authorization`, `ontology`, or `entity`
+sources in a one-off container and prints one line per job. Omit `SOURCE` to refresh
+every configured source of that kind. Authorization has a single source, so it takes
+no `SOURCE`.
 
-## Load configured ontologies
-
-Ontology loads run in the background worker and periodic loads are created by the
-scheduler, so both services started by `just up` must be running. Ontology sources use
-nested `SAB_ONTOLOGY_SOURCES__<KEY>__<FIELD>` variables. Each ontology entry must
-provide its complete source configuration; `.env.example` configures GO with its
-source type, GitHub repository, ref, and path. Deployments may instead set
-`SAB_ONTOLOGY_SOURCES` to an equivalent JSON object. Each fetched document records its
-resolved immutable commit. `SAB_ONTOLOGY_LOAD_CRON` sets the UTC Celery Beat schedule.
-
-An `admin/global` bearer token can request a GO load and then inspect the returned job
-through the common jobs API:
+When `just up` is running, the scheduler refreshes each kind on a UTC cron schedule:
+`SAB_AUTHORIZATION_REFRESH_CRON`, `SAB_ONTOLOGY_REFRESH_CRON`, and
+`SAB_ENTITY_REFRESH_CRON`. With an `admin/global` bearer token, you can also start a
+refresh and follow its job through the API:
 
 ```bash
 curl -X POST \
   -H "Authorization: Bearer ${SAB_API_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"ontology":"go"}' \
-  http://localhost:8000/ontology-loads
+  -d '{"source_key":"go"}' \
+  http://localhost:8000/admin/ontology-refreshes
+
+curl -H "Authorization: Bearer ${SAB_API_TOKEN}" \
+  http://localhost:8000/admin/jobs/<job_id>
 ```
 
-## Import entity catalogs
-
-Entity sources are configured in `config/entity-sources.yaml`. A scheduled job
-imports every configured source; a global admin can start an import with
-`POST /entity-imports` (`{}` for all sources or `{"source_key": "mgi"}` for one).
+The routes are `/admin/authorization-refreshes`, `/admin/ontology-refreshes`, and
+`/admin/entity-refreshes`. The authorization route takes no body. For the other two,
+send `{}` to refresh every configured source or `{"source_key": "<key>"}` for one.
 
 ## Create and manage bearer tokens
 
@@ -106,7 +108,7 @@ http://localhost:8000/auth/github/callback
 ```
 
 Set its client ID and secret in `.env` as `SAB_GITHUB_OAUTH_CLIENT_ID` and
-`SAB_GITHUB_OAUTH_CLIENT_SECRET`. After synchronizing authorizations and starting SAB,
+`SAB_GITHUB_OAUTH_CLIENT_SECRET`. After refreshing authorization and starting SAB,
 open <http://localhost:8000/token-management> and sign in with an authorized GitHub
 account.
 

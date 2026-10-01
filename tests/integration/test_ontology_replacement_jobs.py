@@ -12,11 +12,11 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
     OntologyTerm,
 )
-from standard_annotation_backend.ontology.registry import GO_DEFINITION
+from standard_annotation_backend.ontology.definitions import GO_DEFINITION
 from standard_annotation_backend.persistence.models import AnnotationOrigin, JobRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.ontology_load_service import (
-    OntologyLoadService,
+from standard_annotation_backend.services.ontology_refresh_service import (
+    OntologyRefreshService,
 )
 
 OLD_JOB_ID = UUID("00000000-0000-0000-0000-000000000041")
@@ -41,7 +41,7 @@ def _snapshot(revision: str, terms: dict[str, OntologyTerm]) -> OntologySnapshot
         source_locator="fixture/go.obo",
         source_revision=revision,
         source_checksum=("a" if revision == "old" else "b") * 64,
-        retrieved_at=NOW,
+        fetched_at=NOW,
     )
     return OntologySnapshot(document, revision, (), terms, ())
 
@@ -75,7 +75,7 @@ def _prepare(
             session.add(
                 JobRecord(
                     job_id=job_id,
-                    job_type="authorization_sync",
+                    job_type="authorization_refresh",
                     status="queued",
                     requested_by="test",
                     parameters={},
@@ -134,7 +134,7 @@ def test_duplicate_rejections_repeat_to_a_fixed_point(
             "GO:X": _term("GO:X"),
         },
     )
-    service = OntologyLoadService(unit_of_work_factory, GO_DEFINITION)
+    service = OntologyRefreshService(unit_of_work_factory, GO_DEFINITION)
     service.stage(
         job_id=LOAD_JOB_ID,
         document=candidate.document,

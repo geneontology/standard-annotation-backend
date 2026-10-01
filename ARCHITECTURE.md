@@ -45,7 +45,7 @@ The recommended architecture is a conservative Python service stack:
 * [SQLAlchemy](https://www.sqlalchemy.org/) and [Alembic](https://alembic.sqlalchemy.org/en/latest/) for database models and migrations.  
 * [PostgreSQL](https://www.postgresql.org/) as the authoritative database.  
 * JSONB columns for full annotation snapshots and selected flexible metadata.  
-* [Celery](https://docs.celeryq.dev/en/stable/index.html) workers with Redis for asynchronous import/export, ontology loading, and reporting jobs.  
+* [Celery](https://docs.celeryq.dev/en/stable/index.html) workers with Redis for asynchronous import/export, reference data refresh, and reporting jobs.
 * S3-compatible object storage for import files, export files, and large job artifacts.
 
 This approach keeps the operational and application stack based on widely used and maintained technologies, using LinkML where it has direct value.
@@ -129,7 +129,7 @@ change_set
   base annotation version, preview metadata
 
 audit_event
-  operational history across annotations, change sets, jobs, auth syncs, and
+  operational history across annotations, change sets, jobs, authorization refreshes, and
   admin actions; normally append-only, with a bootstrap replacement exception
 
 job
@@ -363,7 +363,7 @@ GitHub OAuth should remain the primary authentication mechanism for users, but i
 
 Authorization should use two axes: role and scope. The role describes what kind of action is allowed. The scope describes which annotations that role applies to. Some scopes are tied to a group. In SAB, a group is the owner of a set of annotations for authorization purposes; group identifiers are stored as SAB metadata, not as fields in the Standard Annotation payload itself.
 
-The user, group, and authorization tables can be populated from SAB-specific entries that can be added to the existing GO `users.yaml` file in [GitHub](https://github.com/geneontology/go-site/blob/master/metadata/users.yaml). Each synchronization should record the source repository, commit SHA, and timestamp. Service-account authorization is deferred until a concrete machine client requires it.
+The user, group, and authorization tables can be populated from SAB-specific entries that can be added to the existing GO `users.yaml` file in [GitHub](https://github.com/geneontology/go-site/blob/master/metadata/users.yaml). Each authorization refresh records its source provenance (type, locator, resolved revision, checksum, and fetch time). Service-account authorization is deferred until a concrete machine client requires it.
 
 The existing `users.yaml` format should evolve. SAB should not remain permanently coupled to Noctua-specific fields like `authorizations.noctua.go.allow-edit`. Instead, the file should add SAB-specific authorization entries so that Noctua authorization and SAB authorization are separate concerns while still using the same reviewed metadata file.
 
@@ -489,7 +489,7 @@ For example, the `curatorB` example above has two SAB authorization entries. The
 
 ### Audit
 
-Audit should be first-class and normally append-only. The `audit_event` table should record important actions even when they do not create annotation versions: token creation/revocation, direct writes, soft deletes, change-set proposal/acceptance/rejection/staleness, imports, exports, authorization syncs, and administrative changes. The only initial exception is pre-cutover bootstrap replacement, which permanently removes annotation-specific audit events associated with the superseded import while retaining the import job's aggregate audit events and report. Failed authentication and authorization attempts should be handled through application or security logs rather than stored as first-class database audit events in the initial design.
+Audit should be first-class and normally append-only. The `audit_event` table should record important actions even when they do not create annotation versions: token creation/revocation, direct writes, soft deletes, change-set proposal/acceptance/rejection/staleness, imports, exports, authorization refreshes, and administrative changes. The only initial exception is pre-cutover bootstrap replacement, which permanently removes annotation-specific audit events associated with the superseded import while retaining the import job's aggregate audit events and report. Failed authentication and authorization attempts should be handled through application or security logs rather than stored as first-class database audit events in the initial design.
 
 Annotation versions, change sets, and audit events should be linked but distinct:
 
@@ -506,7 +506,7 @@ audit_event
 
 ## Import, Export, and Jobs
 
-Imports, exports, ontology loads, and QC reports can be long-running, file-oriented, or scheduled operations, so SAB should run them as asynchronous jobs rather than ordinary request/response work. API requests should create durable job records and return `202 Accepted`; Celery workers should execute the jobs, Redis should serve as the broker, PostgreSQL should store durable job state, and S3-compatible object storage should hold uploaded inputs and generated artifacts where needed.
+Imports, exports, reference data refreshes, and QC reports can be long-running, file-oriented, or scheduled operations, so SAB should run them as asynchronous jobs rather than ordinary request/response work. API requests should create durable job records and return `202 Accepted`; Celery workers should execute the jobs, Redis should serve as the broker, PostgreSQL should store durable job state, and S3-compatible object storage should hold uploaded inputs and generated artifacts where needed.
 
 The common job API should look like:
 
@@ -517,48 +517,69 @@ POST /imports
 POST /exports
   Creates an annotation export job and returns 202 Accepted with a job ID.
 
-POST /ontology-loads
-  Creates an ontology load job for a configured ontology key and returns
-  202 Accepted with a job ID. GO is the first configured ontology.
-  The same job type may also be created by a scheduler for periodic loads.
+POST /admin/authorization-refreshes
+  Global-admin request that refreshes the single authorization source and returns
+  202 Accepted with the created or reused job.
 
-POST /entity-imports
-  Creates entity import jobs for one or all configured entity sources and
-  returns 202 Accepted with the job IDs. A scheduler creates the same jobs
-  periodically.
+POST /admin/ontology-refreshes
+POST /admin/entity-refreshes
+  Global-admin requests that refresh one configured source, or every configured
+  source of the kind, and return 202 Accepted with the created or reused jobs.
 
 POST /reports/annotation-qc
   Creates an annotation QC / semantic validation report job and returns
   202 Accepted with a job ID. The same job type may also be created by a
   scheduler for periodic reports.
 
-GET /jobs/{job_id}
+GET /admin/jobs/{job_id}
   Returns queued/running/succeeded/failed status, progress, counts,
   warnings/errors, and links to outputs where applicable.
 ```
 
 Job handlers should be idempotent where practical and designed for retry without corrupting annotation state.
 
-### Entity Catalogs
+### Reference Data Refreshes
 
-An entity is an annotatable subject identified by `db_object_id`. SAB maintains an
-active catalog of entities supplied by the sources configured in
-`config/entity-sources.yaml`. Sources currently provide GPI 2.0 files; only
-retrieval and parsing depend on that format.
+SAB keeps authorization, ontologies, and entity catalogs current from the sources
+in `config/sources.yaml`. Every kind follows the same pattern. A refresh job
+fetches one source, records its provenance (type, locator, resolved revision,
+checksum, and fetch time), skips the source if that exact document is already
+active, and otherwise validates the complete document before any of it becomes
+active. Invalid documents and unreachable sources fail the job with a stable
+failure code and leave the previous data in place; the next scheduled refresh
+tries again. Jobs start from a schedule, a global-admin API request, or the
+`just refresh` CLI. All three reuse an unfinished job for the same source instead
+of creating another.
 
-A scheduled job, or a global admin request to `POST /entity-imports`, creates one
-`entity_import` job per configured source, plus an `entity_catalog_retirement` job
-for any active catalog whose source is no longer configured. An admin can also
-import a single source. An import skips publication when the file is unchanged;
-otherwise it validates the complete file and replaces that source's catalog in one
-transaction. An invalid file fails the job and leaves the previous catalog active;
-the job records each invalid row's line number and reason.
-An identifier can be active in only one source at a time.
+**Authorization.** The go-site `users.yaml` replaces SAB's users and grants as
+described under Authorization Model.
 
-Direct annotation creates and updates, and accepted create or update change sets,
-require the annotation's `db_object_id` to be in the active catalog; deletes do not.
+**Ontologies.** A refresh stages a complete snapshot with closure rows for the
+approved predicates (`rdfs:subClassOf` and `BFO:0000050`), activates it, and
+updates annotations whose terms have a single `replaced_by` value through the
+normal versioned mutation path. A closure row records the subject term, predicate,
+object term, and depth, where the subject is the more specific term and the object
+is the broader queried term. Cases SAB cannot resolve automatically (a term
+obsoleted without replacement, a removed term, or multiple `consider`
+alternatives) are reported through QC reporting. Complete term and closure data is
+kept only for the active snapshot, its newest successful predecessor, and
+candidates of unfinished jobs. Older snapshots keep their metadata, results, and
+audit events. A snapshot whose bulk data was pruned cannot become active or be used
+by operations that need terms or closure. Pruning and activation take the same
+per-ontology advisory lock, so cleanup cannot race with a refresh of that ontology.
+Pruning runs after each ontology job finishes (`sab.ontology.prune`); a failure to
+schedule or run it leaves the job's status and result unchanged, and pruning is
+retried.
+
+**Entities.** An entity is an annotatable subject identified by `db_object_id`.
+Each configured GPI source supplies a complete catalog. An identifier can be
+active in only one source. An invalid file fails the job, and the job records each
+invalid row's line number and reason. Direct annotation creates and updates, and accepted
+create or update change sets, require an active `db_object_id`; deletes do not.
 Replacing or retiring a catalog never modifies existing annotations. Instead, the
-job result lists the active annotations that reference each removed identifier.
+job result lists the annotations that reference each removed identifier. Removing
+a source from the configuration retires its catalog on the next refresh of all
+entity sources.
 
 ### Annotation Import and Export
 
@@ -566,7 +587,7 @@ Eventually, SAB's PostgreSQL database is the source of truth for Standard Annota
 
 Before cutover, bulk GPAD/GPI import should replace the current imported annotation set in full rather than attempting to merge new source records with existing imported records. This is acceptable during the bootstrap period because SAB-side annotation changes are not treated as long-term authoritative until the chosen cutover date.
 
-A bootstrap import must receive the GPAD data and matching GPI metadata as part of its input. An annotation whose annotated entity is absent from the imported GPI metadata should be rejected and reported at record level without failing the whole import. Alternative annotated-entity metadata sources and later reconciliation behavior are deferred.
+A bootstrap import validates each annotation's `db_object_id` against the active entity catalog. An annotation whose entity is not active is rejected and reported at record level without failing the whole import.
 
 Only one bootstrap import job may stage or publish at a time. Before staging, the worker should acquire a dedicated PostgreSQL session-level advisory lock for the bootstrap-import process and hold it until the job succeeds or fails; loss of the database session releases the lock. This prevents overlapping jobs from publishing source files out of order without blocking normal annotation reads or writes.
 
@@ -585,38 +606,6 @@ Export should derive GPAD/GPI files from current active SAB records. When an exp
 Annotation QC reporting and GORULE-style semantic validation should use the asynchronous job model. Initially, these semantic checks are reporting-only and do not block writes. Selection and versioning of the initial ruleset, and the choice of any future rules that should block synchronously, remain deferred pending domain review. Semantic report infrastructure may proceed, but synchronous GORULE enforcement must wait for that decision. Full QC/report generation should be handled as manually triggered or periodic jobs so that large scans do not block normal API requests.
 
 A separate QC process may apply the same pairwise duplicate predicate to bootstrap-imported data; the import job itself performs no duplicate checks or duplicate rejection. QC should report the annotation pairs that satisfy the predicate. Because reference overlap is not necessarily transitive for multi-reference annotations, QC must not claim that connected components of duplicate pairs are equivalence classes. Report jobs should record the applicable rule set or duplicate-policy version, input selection, source import job or included annotation versions, counts, findings, warnings/errors, and links to report artifacts.
-
-### Ontology Loading
-
-GO is the first ontology configured for loading. Its initial source is the latest
-available `go-edit.obo` file in the
-[`geneontology/go-ontology`](https://github.com/geneontology/go-ontology) repository,
-and SAB records the source commit hash as the main source metadata. Source adapters,
-the ontology registry, snapshot storage, and load jobs are keyed generically so a
-configured source does not have to be GitHub and additional ontologies can be added
-without redesigning persistence. The set of additional ontologies and their sources is
-deferred. The target is to reload configured ontologies as frequently as is practical,
-with GO initially scheduled multiple times per week.
-
-A successful load should compute closure rows for an approved list of predicates such as `rdfs:subClassOf` and `BFO:0000050` (part of), store source metadata, and mark the new ontology version active only after the load succeeds. A closure row should record the subject term, predicate, object term, and depth, where subject is the more specific matched term and object is the broader queried term.
-
-Ontology snapshot storage has bounded retention. SAB keeps complete term and closure
-data for the active snapshot of each ontology, its newest successfully activated
-predecessor, and every candidate owned by a queued or running job. Once a snapshot is
-outside that set, cleanup deletes its closure rows before its term rows in one
-transaction and records when the bulk data was pruned. The ontology metadata, durable
-job result, and audit events remain available as historical provenance. A snapshot
-whose bulk data was pruned cannot become active or be used by an operation that needs
-terms or closure.
-
-Pruning and activation use the same per-ontology advisory lock, so cleanup cannot race
-with a load for that ontology. A retryable `sab.ontology_load.prune` Celery task runs
-after ontology jobs become terminal and is also the one-off cleanup entry point for
-data accumulated before the retention policy shipped. Failure to publish or execute
-cleanup leaves the ontology job's terminal status and result unchanged; task retry or
-redelivery attempts cleanup again.
-
-The ontology loading process should also scan the loaded ontology for term replacement metadata. When a current annotation uses a term with a single `replaced_by` value, SAB should update that annotation to use the replacement through the normal mutation path: create a new annotation version and record an audit event tied to the ontology load job. Cases where SAB cannot safely choose an automatic action, such as a term obsoleted without replacement, a term removed from the ontology, or a term with multiple possible alternatives through `consider`, should be reported through QC reporting jobs.
 
 ## Deployment and Operations
 
@@ -681,7 +670,7 @@ The target should be boring and supportable: a small Python service stack that G
 | Pre-cutover bulk GPAD/GPI import | Settled for the bootstrap period | Project leadership must eventually identify the cutover date, but no further input is needed for pre-cutover behavior. | A dedicated advisory lock permits only one bootstrap import job at a time. The job loads and validates staging tables keyed by job ID. One publication transaction then takes the global annotation-write lock exclusively, permanently deletes the preceding import and its annotation-specific dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. |
 | Duplicate handling during bootstrap import | Settled for the initial implementation | No further input is needed. | Staging and publication perform no duplicate checks or rejection. Staging takes no duplicate locks; publication takes the global annotation-write lock exclusively but takes no signature locks. A separate QC process may apply the settled pairwise predicate and should report duplicate pairs rather than treating connected components as equivalence classes. |
 | Initial Protein2GO-aligned pairwise duplicate policy | Settled for the initial implementation | No further input is needed. The accepted non-transitivity risk should be reviewed if multi-reference source data becomes material. | Implementation may proceed with an indexed base signature and per-reference lookup rows. Creates reject any peer; updates reject only newly introduced peers and may preserve legacy pairs; soft deletes remove conflicts. Every ordinary annotation mutation uses `READ COMMITTED`, takes the global annotation-write lock in shared mode before ordered signature locks, then freshly re-reads state and peers. |
-| Annotated-entity metadata for bootstrap imports | Settled for bootstrap; alternatives are deferred | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | Bootstrap GPAD imports require matching GPI metadata as part of the input. An annotation whose entity is absent from that GPI metadata is rejected and reported at record level. No alternative source or reconciliation workflow is implied. |
+| Annotated-entity metadata for bootstrap imports | Settled for bootstrap; alternatives are deferred | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | Bootstrap GPAD imports validate `db_object_id` against the active entity catalog maintained by entity refreshes. An annotation whose entity is not active is rejected and reported at record level. No alternative source or reconciliation workflow is implied. |
 | Structural validation | Settled for the initial implementation | No further policy input is needed. | Structural schema validation blocks all writes and individual import records. Invalid imported records are isolated and reported instead of failing the whole import. |
 | GORULE-style semantic validation | Settled as initially asynchronous and non-blocking; exact ruleset and future blocking rules are deferred | GO domain reviewers must select and version the initial ruleset and decide whether any future rules should block synchronously. | Semantic reporting infrastructure may proceed. Initially GORULE-style checks do not block writes; synchronous enforcement must wait for the domain decision. |
 

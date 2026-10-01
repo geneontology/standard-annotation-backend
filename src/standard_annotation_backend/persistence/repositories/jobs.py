@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.persistence.locks import acquire_refresh_start_lock
 from standard_annotation_backend.persistence.models import JobRecord
 
 
@@ -56,6 +57,13 @@ class JobRepository:
         self.session.flush([record])
         return record
 
+    def lock_refresh_starts(self) -> None:
+        """Hold the refresh start lock until the transaction ends.
+
+        See `acquire_refresh_start_lock`.
+        """
+        acquire_refresh_start_lock(self.session)
+
     def find_active(self, *, job_type: JobType, source_key: str) -> JobRecord | None:
         """Return the oldest queued or running job of a type for one source."""
         return self.session.scalar(
@@ -101,24 +109,6 @@ class JobRepository:
         if changed:
             record.progress = progress
             record.warnings = list(warnings)
-            record.updated_at = now
-            self.session.flush([record])
-        return JobMutation(record, changed)
-
-    def update_parameters(
-        self,
-        job_id: UUID,
-        *,
-        parameters: dict[str, object],
-        now: datetime,
-    ) -> JobMutation:
-        """Replace worker parameters for a running job under a row lock."""
-        record = self._lock(job_id)
-        if JobStatus(record.status) is not JobStatus.RUNNING:
-            raise InvalidJobTransitionError("only running jobs can update parameters")
-        changed = record.parameters != parameters
-        if changed:
-            record.parameters = parameters
             record.updated_at = now
             self.session.flush([record])
         return JobMutation(record, changed)

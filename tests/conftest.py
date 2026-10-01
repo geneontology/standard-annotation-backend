@@ -20,19 +20,9 @@ def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("SAB_APPLICATION_SECRET", "test-application-secret")
     monkeypatch.setenv("SAB_ENVIRONMENT", "testing")
     monkeypatch.setenv("SAB_LOG_FORMAT", "console")
-    monkeypatch.setenv("SAB_AUTHORIZATION_SOURCE_REPOSITORY", "geneontology/go-site")
-    monkeypatch.setenv("SAB_AUTHORIZATION_SOURCE_REF", "master")
-    monkeypatch.setenv("SAB_AUTHORIZATION_SOURCE_PATH", "metadata/users.yaml")
-    monkeypatch.setenv("SAB_AUTHORIZATION_SYNC_CRON", "0 0 * * *")
-    monkeypatch.setenv(
-        "SAB_ONTOLOGY_SOURCES",
-        '{"go":{"source_type":"github","repository":"geneontology/go-ontology",'
-        '"ref":"master","path":"src/ontology/go-edit.obo"}}',
-    )
-    monkeypatch.setenv("SAB_ONTOLOGY_LOAD_CRON", "0 2 * * 1,3,5")
-    monkeypatch.setenv("SAB_ENTITY_IMPORT_CRON", "0 3 * * *")
-    monkeypatch.setenv("SAB_ENTITY_SOURCE_CONNECT_TIMEOUT_SECONDS", "10")
-    monkeypatch.setenv("SAB_ENTITY_SOURCE_READ_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("SAB_AUTHORIZATION_REFRESH_CRON", "0 0 * * *")
+    monkeypatch.setenv("SAB_ONTOLOGY_REFRESH_CRON", "0 2 * * 1,3,5")
+    monkeypatch.setenv("SAB_ENTITY_REFRESH_CRON", "0 3 * * *")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_SECRET", "test-client-secret")
     monkeypatch.setenv(

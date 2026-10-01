@@ -6,10 +6,10 @@ from enum import StrEnum
 class JobType(StrEnum):
     """List asynchronous operations that workers can execute."""
 
-    AUTHORIZATION_SYNC = "authorization_sync"
-    ENTITY_CATALOG_RETIREMENT = "entity_catalog_retirement"
-    ENTITY_IMPORT = "entity_import"
-    ONTOLOGY_LOAD = "ontology_load"
+    AUTHORIZATION_REFRESH = "authorization_refresh"
+    ENTITY_REFRESH = "entity_refresh"
+    ENTITY_RETIREMENT = "entity_retirement"
+    ONTOLOGY_REFRESH = "ontology_refresh"
 
 
 class JobStatus(StrEnum):

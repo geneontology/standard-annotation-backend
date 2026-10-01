@@ -30,7 +30,7 @@ def _snapshot(
             source_locator="fixture:closure",
             source_revision="a" * 40,
             source_checksum=sha256(content).hexdigest(),
-            retrieved_at=datetime(2026, 9, 28, tzinfo=UTC),
+            fetched_at=datetime(2026, 9, 28, tzinfo=UTC),
         ),
         document_version="test",
         closure_predicates=(

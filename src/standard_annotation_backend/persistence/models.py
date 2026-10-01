@@ -242,26 +242,32 @@ class TokenManagementSessionRecord(Base):
     owner: Mapped[SabUserRecord] = relationship()
 
 
-class AuthorizationSyncRecord(Base):
-    """Store the source revision and counts for a successful authorization sync."""
+class AuthorizationRefreshRecord(Base):
+    """Store the source and counts of an applied authorization refresh.
 
-    __tablename__ = "authorization_sync"
+    The most recent record describes the authorization state now in effect. A
+    refresh whose document matches it is not applied again.
+    """
+
+    __tablename__ = "authorization_refresh"
     __table_args__ = (
-        UniqueConstraint(
-            "source_repository",
-            "source_commit_sha",
-            name="source_revision_unique",
+        CheckConstraint(
+            "source_checksum ~ '^[0-9a-f]{64}$'",
+            name="source_checksum_format",
         ),
     )
 
-    sync_id: Mapped[UUID] = mapped_column(
+    refresh_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    source_repository: Mapped[str] = mapped_column(Text)
-    source_commit_sha: Mapped[str] = mapped_column(Text)
-    synchronized_at: Mapped[datetime] = mapped_column(
+    source_type: Mapped[str] = mapped_column(String(20))
+    source_locator: Mapped[str] = mapped_column(Text)
+    source_revision: Mapped[str | None] = mapped_column(Text)
+    source_checksum: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refreshed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     summary: Mapped[dict[str, object]] = mapped_column(JSONB)
@@ -273,7 +279,7 @@ class JobRecord(Base):
     __tablename__ = "job"
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('authorization_sync', 'entity_catalog_retirement', 'entity_import', 'ontology_load')",
+            "job_type IN ('authorization_refresh', 'entity_refresh', 'entity_retirement', 'ontology_refresh')",
             name="type_allowed",
         ),
         CheckConstraint(
@@ -346,7 +352,7 @@ class JobRecord(Base):
 
 
 class EntityCatalogSnapshotRecord(Base):
-    """Store one entity import's source details, counts, and publication state."""
+    """Store one entity refresh's source details, counts, and publication state."""
 
     __tablename__ = "entity_catalog_snapshot"
     __table_args__ = (
@@ -399,7 +405,9 @@ class EntityCatalogSnapshotRecord(Base):
         unique=True,
     )
     source_key: Mapped[str] = mapped_column(Text)
-    source_url: Mapped[str] = mapped_column(Text)
+    source_type: Mapped[str] = mapped_column(String(20))
+    source_locator: Mapped[str] = mapped_column(Text)
+    source_revision: Mapped[str | None] = mapped_column(Text)
     source_checksum: Mapped[str] = mapped_column(String(64))
     source_format: Mapped[str] = mapped_column(String(20))
     source_metadata: Mapped[dict[str, object]] = mapped_column(JSONB)
@@ -534,17 +542,17 @@ class OntologyMetadataRecord(Base):
     ontology_key: Mapped[str] = mapped_column(String(100))
     source_type: Mapped[str] = mapped_column(String(100))
     source_locator: Mapped[str] = mapped_column(Text)
-    source_revision: Mapped[str] = mapped_column(Text)
+    source_revision: Mapped[str | None] = mapped_column(Text)
     source_checksum: Mapped[str] = mapped_column(String(64))
     document_version: Mapped[str | None] = mapped_column(Text)
     loaded_predicates: Mapped[list[str]] = mapped_column(JSONB)
-    load_result: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    refresh_result: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     job_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         ForeignKey("job.job_id", ondelete="RESTRICT"),
         unique=True,
     )
-    loaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     bulk_data_pruned_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
