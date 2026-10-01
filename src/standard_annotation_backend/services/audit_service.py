@@ -4,7 +4,7 @@ from uuid import UUID
 
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import RequestContext
-from standard_annotation_backend.persistence.models import AuditEventRecord
+from standard_annotation_backend.persistence.models import AuditEventRecord, JobRecord
 from standard_annotation_backend.persistence.repositories import AuditRepository
 
 
@@ -163,4 +163,48 @@ class AuditService:
             result=AuditResult.SUCCESS,
             job_id=job_id,
             details=details,
+        )
+
+    def record_entity_catalog_published(
+        self, *, actor_id: str, job_id: UUID, details: dict[str, object]
+    ) -> AuditEventRecord:
+        """Record a summary of a catalog publication in the publishing transaction."""
+        return self._repository.record(
+            action=AuditAction.ENTITY_CATALOG_PUBLISHED,
+            actor_id=actor_id,
+            result=AuditResult.SUCCESS,
+            job_id=job_id,
+            details=details,
+        )
+
+    def record_entity_catalog_retired(
+        self, *, actor_id: str, job_id: UUID, details: dict[str, object]
+    ) -> AuditEventRecord:
+        """Record a summary of a catalog retirement in the retiring transaction."""
+        return self._repository.record(
+            action=AuditAction.ENTITY_CATALOG_RETIRED,
+            actor_id=actor_id,
+            result=AuditResult.SUCCESS,
+            job_id=job_id,
+            details=details,
+        )
+
+    def record_job_lifecycle(
+        self,
+        *,
+        action: AuditAction,
+        record: JobRecord,
+        details: dict[str, object] | None = None,
+    ) -> AuditEventRecord:
+        """Record a job status change. The caller commits the transaction."""
+        return self._repository.record(
+            action=action,
+            actor_id=record.requested_by,
+            result=AuditResult.SUCCESS,
+            job_id=record.job_id,
+            details={
+                **(details or {}),
+                "job_type": record.job_type,
+                "status": record.status,
+            },
         )

@@ -273,7 +273,7 @@ class JobRecord(Base):
     __tablename__ = "job"
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('authorization_sync', 'ontology_load')",
+            "job_type IN ('authorization_sync', 'entity_catalog_retirement', 'entity_import', 'ontology_load')",
             name="type_allowed",
         ),
         CheckConstraint(
@@ -343,6 +343,154 @@ class JobRecord(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class EntityCatalogSnapshotRecord(Base):
+    """Store one entity import's source details, counts, and publication state."""
+
+    __tablename__ = "entity_catalog_snapshot"
+    __table_args__ = (
+        CheckConstraint(
+            "source_checksum ~ '^[0-9a-f]{64}$'", name="source_checksum_format"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(source_metadata) = 'object'",
+            name="source_metadata_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(source_statistics) = 'object'",
+            name="source_statistics_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(record_statistics) = 'object'",
+            name="record_statistics_object",
+        ),
+        CheckConstraint(
+            "publication_result IS NULL OR jsonb_typeof(publication_result) = 'object'",
+            name="publication_result_object",
+        ),
+        CheckConstraint(
+            "source_key ~ '^[a-z0-9][a-z0-9_-]*$'", name="source_key_format"
+        ),
+        CheckConstraint(
+            "(retired_at IS NULL) = (retired_by_job_id IS NULL) "
+            "AND (retired_at IS NULL) = (retirement_result IS NULL)",
+            name="retirement_complete",
+        ),
+        CheckConstraint("retired_at IS NULL OR NOT active", name="retired_inactive"),
+        CheckConstraint(
+            "retirement_result IS NULL OR jsonb_typeof(retirement_result) = 'object'",
+            name="retirement_result_object",
+        ),
+        Index(
+            "uq_entity_catalog_snapshot_active_source",
+            "source_key",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+    )
+
+    snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    source_key: Mapped[str] = mapped_column(Text)
+    source_url: Mapped[str] = mapped_column(Text)
+    source_checksum: Mapped[str] = mapped_column(String(64))
+    source_format: Mapped[str] = mapped_column(String(20))
+    source_metadata: Mapped[dict[str, object]] = mapped_column(JSONB)
+    source_statistics: Mapped[dict[str, object]] = mapped_column(JSONB)
+    record_statistics: Mapped[dict[str, object]] = mapped_column(JSONB)
+    publication_result: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    staged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retired_by_job_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    retirement_result: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+
+
+class EntityStagingRecord(Base):
+    """Store one validated entity record until its catalog is published."""
+
+    __tablename__ = "entity_staging_record"
+    __table_args__ = (
+        CheckConstraint("line_number > 0", name="line_number_positive"),
+        CheckConstraint("jsonb_typeof(entity) = 'object'", name="entity_object"),
+        Index("ix_entity_staging_record_db_object_id", "db_object_id"),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    line_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    db_object_id: Mapped[str] = mapped_column(Text)
+    entity: Mapped[dict[str, object]] = mapped_column(JSONB)
+
+
+class EntityMembershipRecord(Base):
+    """Record that an entity identifier is active and which source supplies it.
+
+    Annotations deliberately have no foreign key to this table. Replacing or
+    retiring a catalog must be able to remove an identifier while existing
+    annotations and their version history stay unchanged. The rule that a new or
+    updated annotation's `db_object_id` must be active is enforced instead by
+    `EntityRepository.require_active`, which checks the identifier and locks its
+    row while the annotation is saved.
+    """
+
+    __tablename__ = "entity_membership"
+    __table_args__ = (
+        CheckConstraint(
+            "source_key ~ '^[a-z0-9][a-z0-9_-]*$'", name="source_key_format"
+        ),
+        Index("ix_entity_membership_source_key", "source_key"),
+    )
+
+    db_object_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_key: Mapped[str] = mapped_column(Text)
+    snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("entity_catalog_snapshot.snapshot_id", ondelete="RESTRICT"),
+    )
+
+
+class EntitySourceRecord(Base):
+    """Store one source file record for an active entity identifier.
+
+    An identifier may appear on several lines of a source file, so each record is
+    stored separately with its line number. Records are deleted with their
+    membership row when the catalog is replaced or retired.
+    """
+
+    __tablename__ = "entity_source_record"
+    __table_args__ = (
+        CheckConstraint("line_number > 0", name="line_number_positive"),
+        CheckConstraint("jsonb_typeof(entity) = 'object'", name="entity_object"),
+    )
+
+    db_object_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("entity_membership.db_object_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    line_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    entity: Mapped[dict[str, object]] = mapped_column(JSONB)
 
 
 class OntologyMetadataRecord(Base):

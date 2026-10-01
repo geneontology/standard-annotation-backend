@@ -24,6 +24,8 @@ NORMALIZED_VALID_ANNOTATION = Annotation.model_validate(VALID_ANNOTATION).model_
 )
 UNKNOWN_ANNOTATION_ID = UUID("00000000-0000-0000-0000-000000000501")
 
+pytestmark = pytest.mark.usefixtures("active_annotation_subjects")
+
 
 def test_create_and_read_annotation(integration_api_client: TestClient) -> None:
     """Creating an annotation returns identifiers, headers, and readable data."""

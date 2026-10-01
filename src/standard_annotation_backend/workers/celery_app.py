@@ -48,5 +48,9 @@ celery_app.conf.update(
             "task": "sab.ontology_load.schedule",
             "schedule": crontab.from_string(settings.ontology_load_cron),
         },
+        "entity-import": {
+            "task": "sab.entity_import.schedule",
+            "schedule": crontab.from_string(settings.entity_import_cron),
+        },
     },
 )

@@ -20,6 +20,8 @@ from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
 )
 
+pytestmark = pytest.mark.usefixtures("active_annotation_subjects")
+
 VALID_ANNOTATION = {
     "db_object_id": "UniProtKB:P12345",
     "relation": "RO:0002331",

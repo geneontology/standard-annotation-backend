@@ -1,0 +1,8 @@
+!gpi-version: 2.0
+!generated-by: TestDB
+!date-generated: 2026-09-29T10:15:30+00:00
+
+UniProtKB:P12345	ABC1	Example protein		SO:0001217	NCBITaxon:9606		UniProtKB:P12345		UniProtKB:P12345	
+! This comment is not a source record.
+
+UniProtKB:P12345	ABC1-2	Example isoform		SO:0001217	NCBITaxon:9606	UniProtKB:P12345	UniProtKB:P12345		UniProtKB:P12345	

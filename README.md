@@ -91,6 +91,12 @@ curl -X POST \
   http://localhost:8000/ontology-loads
 ```
 
+## Import entity catalogs
+
+Entity sources are configured in `config/entity-sources.yaml`. A scheduled job
+imports every configured source; a global admin can start an import with
+`POST /entity-imports` (`{}` for all sources or `{"source_key": "mgi"}` for one).
+
 ## Create and manage bearer tokens
 
 Configure a GitHub OAuth app with this callback URL for local development:

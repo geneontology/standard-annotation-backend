@@ -1,7 +1,7 @@
 """Verify bearer role and ownership policy through the real database and API."""
 
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -43,6 +43,19 @@ ANNOTATION_MISSING = {
 CHANGE_SET_MISSING = {
     "error": {"code": "change_set_not_found", "message": "Change set was not found"}
 }
+
+
+@pytest.fixture(autouse=True)
+def active_authorization_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Seed subjects so authorized operations reach the ownership workflow."""
+    seed_active_subjects(
+        "UniProtKB:P12345",
+        *(f"UniProtKB:{name}" for name in ("own", "own2", "other", "foreign")),
+        *(f"UniProtKB:proposed-{name}" for name in ("own", "own2", "other", "foreign")),
+        "UniProtKB:create-None",
+        "UniProtKB:create-MGI",
+        "UniProtKB:create-RGD",
+    )
 
 
 @pytest.fixture

@@ -7,10 +7,12 @@ from fastapi import Depends, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from standard_annotation_backend.api.errors import ApiError
+from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
     RequestContext,
 )
+from standard_annotation_backend.entity_sources.registry import EntitySourceRegistry
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_service import AnnotationService
 from standard_annotation_backend.services.authentication_service import (
@@ -209,3 +211,8 @@ def get_job_service(
 ) -> JobService:
     """Create the job service used by an API request."""
     return JobService(unit_of_work_factory)
+
+
+def get_entity_source_registry() -> EntitySourceRegistry:
+    """Return the entity sources configured for this process."""
+    return EntitySourceRegistry(get_settings().entity_sources)

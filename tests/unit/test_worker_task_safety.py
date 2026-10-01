@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from celery import Task
 from celery.exceptions import Retry
 
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
@@ -22,6 +23,15 @@ def _safe_retry(monkeypatch: pytest.MonkeyPatch, task: object) -> None:
     monkeypatch.setattr(task, "retry", retry)
 
 
+def _enable_task_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-enable the task logger so its records reach `caplog`.
+
+    Alembic's logging setup, which integration tests run earlier in the same
+    process, disables loggers that already exist, including this one.
+    """
+    monkeypatch.setattr(tasks.logger, "disabled", False)
+
+
 def _assert_safe_retry(caught: pytest.ExceptionInfo[Retry], logs: str) -> None:
     rendered = "".join(
         traceback.format_exception(
@@ -31,11 +41,29 @@ def _assert_safe_retry(caught: pytest.ExceptionInfo[Retry], logs: str) -> None:
     assert CANARY not in rendered
     assert CANARY not in logs
     assert "could not persist state" in rendered
+    assert "failure_type=RuntimeError" in logs
 
 
+@pytest.mark.parametrize(
+    ("task", "arguments"),
+    [
+        (tasks.run_authorization_sync, (str(uuid4()),)),
+        (tasks.run_entity_import, (str(uuid4()),)),
+        (tasks.run_entity_catalog_retirement, (str(uuid4()),)),
+        (tasks.schedule_entity_imports, ()),
+    ],
+    ids=[
+        "authorization_sync",
+        "entity_import",
+        "entity_catalog_retirement",
+        "entity_import_schedule",
+    ],
+)
 def test_runtime_startup_failure_retries_without_diagnostic_chain(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    task: Task,
+    arguments: tuple[str, ...],
 ) -> None:
     """Database setup failure requests a retry without its error details."""
 
@@ -45,10 +73,11 @@ def test_runtime_startup_failure_retries_without_diagnostic_chain(
         yield
 
     monkeypatch.setattr(tasks, "worker_runtime", unavailable_runtime)
-    _safe_retry(monkeypatch, tasks.run_authorization_sync)
+    _safe_retry(monkeypatch, task)
+    _enable_task_logs(monkeypatch)
 
     with pytest.raises(Retry) as caught:
-        tasks.run_authorization_sync.run(str(uuid4()))
+        task.run(*arguments)
 
     _assert_safe_retry(caught, caplog.text)
 
@@ -92,6 +121,7 @@ def test_failed_failure_persistence_retries_without_diagnostic_chain(
     monkeypatch.setattr(tasks, "job_execution_lock", lock)
     monkeypatch.setattr(tasks.AuthorizationSourceClient, "fetch", source_failure)
     _safe_retry(monkeypatch, tasks.run_authorization_sync)
+    _enable_task_logs(monkeypatch)
 
     with pytest.raises(Retry) as caught:
         tasks.run_authorization_sync.run(str(job_id))

@@ -81,7 +81,11 @@ Structural schema validation blocks all writes and all individual import records
 
 Initially, GORULE-style semantic validation should run asynchronously for reporting and should not block writes. Selection and versioning of the initial ruleset, as well as any future subset of rules that might block synchronously, remain deferred pending domain review. Semantic report infrastructure may proceed independently, but synchronous GORULE enforcement must wait for those decisions.
 
-Except for checking bootstrap GPAD records against the matching GPI metadata supplied with the import, referential validation against external resources is not an initial design consideration. Other referential checks could be added later without major changes to the architecture being proposed now.
+SAB also validates the exact `db_object_id` of direct create/update candidates and
+accepted create/update change sets against the active entity
+catalog described below. This catalog check does not extend to other
+identifier-valued fields. Other referential checks could be added later without
+major changes to the architecture being proposed now.
 
 ## Data Store and Versioning
 
@@ -518,6 +522,11 @@ POST /ontology-loads
   202 Accepted with a job ID. GO is the first configured ontology.
   The same job type may also be created by a scheduler for periodic loads.
 
+POST /entity-imports
+  Creates entity import jobs for one or all configured entity sources and
+  returns 202 Accepted with the job IDs. A scheduler creates the same jobs
+  periodically.
+
 POST /reports/annotation-qc
   Creates an annotation QC / semantic validation report job and returns
   202 Accepted with a job ID. The same job type may also be created by a
@@ -529,6 +538,27 @@ GET /jobs/{job_id}
 ```
 
 Job handlers should be idempotent where practical and designed for retry without corrupting annotation state.
+
+### Entity Catalogs
+
+An entity is an annotatable subject identified by `db_object_id`. SAB maintains an
+active catalog of entities supplied by the sources configured in
+`config/entity-sources.yaml`. Sources currently provide GPI 2.0 files; only
+retrieval and parsing depend on that format.
+
+A scheduled job, or a global admin request to `POST /entity-imports`, creates one
+`entity_import` job per configured source, plus an `entity_catalog_retirement` job
+for any active catalog whose source is no longer configured. An admin can also
+import a single source. An import skips publication when the file is unchanged;
+otherwise it validates the complete file and replaces that source's catalog in one
+transaction. An invalid file fails the job and leaves the previous catalog active;
+the job records each invalid row's line number and reason.
+An identifier can be active in only one source at a time.
+
+Direct annotation creates and updates, and accepted create or update change sets,
+require the annotation's `db_object_id` to be in the active catalog; deletes do not.
+Replacing or retiring a catalog never modifies existing annotations. Instead, the
+job result lists the active annotations that reference each removed identifier.
 
 ### Annotation Import and Export
 

@@ -1,8 +1,31 @@
 """Test the public annotation search API against PostgreSQL data."""
 
+from collections.abc import Callable
+
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def active_search_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Seed the exact subjects used by the successful search examples."""
+    seed_active_subjects(
+        "UniProtKB:P00001",
+        "UniProtKB:P00002",
+        "UniProtKB:P00003",
+        "UniProtKB:F1001",
+        "UniProtKB:F1002",
+        "UniProtKB:C1001",
+        "UniProtKB:C1002",
+        "UniProtKB:C1003",
+        "UniProtKB:M1001",
+        "UniProtKB:M1002",
+        "UniProtKB:R1001",
+        "UniProtKB:R1002",
+        "UniProtKB:R1003",
+        "UniProtKB:U1001",
+    )
 
 
 def _annotation(db_object_id: str) -> dict[str, object]:

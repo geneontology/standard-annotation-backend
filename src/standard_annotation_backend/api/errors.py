@@ -25,6 +25,10 @@ from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
     PermissionDeniedError,
 )
+from standard_annotation_backend.domain.entities import (
+    UnknownDbObjectIdError,
+    UnknownEntitySourceError,
+)
 from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.repositories import (
     AnnotationDeletedError,
@@ -79,6 +83,14 @@ BEARER_ERROR_RESPONSES = {
         "model": ApiErrorResponse,
         "description": "Credential storage is unavailable",
     },
+}
+
+ANNOTATION_WRITE_VALIDATION_RESPONSE = {
+    "model": ApiErrorResponse,
+    "description": (
+        "Request or annotation validation failed. An inactive db_object_id returns "
+        "unknown_db_object_id with one validation issue at db_object_id."
+    ),
 }
 
 
@@ -310,6 +322,42 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     for error_type, error_response in fixed_errors.items():
         app.add_exception_handler(error_type, fixed_error_handler(error_response))
+
+    @app.exception_handler(UnknownDbObjectIdError)
+    def handle_unknown_db_object_id(
+        _request: Request, _error: UnknownDbObjectIdError
+    ) -> JSONResponse:
+        message = "Annotation db_object_id is not in the active entity catalog"
+        return _error_response(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code="unknown_db_object_id",
+            message=message,
+            details=[
+                ApiValidationIssue(
+                    location=("db_object_id",),
+                    message=message,
+                    type="unknown_db_object_id",
+                )
+            ],
+        )
+
+    @app.exception_handler(UnknownEntitySourceError)
+    def handle_unknown_entity_source(
+        _request: Request, _error: UnknownEntitySourceError
+    ) -> JSONResponse:
+        message = "Entity source is not configured"
+        return _error_response(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code="unknown_entity_source",
+            message=message,
+            details=[
+                ApiValidationIssue(
+                    location=("source_key",),
+                    message=message,
+                    type="unknown_entity_source",
+                )
+            ],
+        )
 
     @app.exception_handler(InvalidChangeSetError)
     def handle_invalid_change_set(

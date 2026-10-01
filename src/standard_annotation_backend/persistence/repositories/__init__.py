@@ -21,6 +21,9 @@ from standard_annotation_backend.persistence.repositories.comments import (
     CommentNotFoundError,
     InvalidCommentError,
 )
+from standard_annotation_backend.persistence.repositories.entities import (
+    EntityRepository,
+)
 from standard_annotation_backend.persistence.repositories.jobs import (
     InvalidJobTransitionError,
     JobNotFoundError,
@@ -45,6 +48,7 @@ __all__ = [
     "ChangeSetRepository",
     "CommentNotFoundError",
     "DuplicateAnnotationError",
+    "EntityRepository",
     "InvalidAnnotationProvenanceError",
     "InvalidChangeSetStateError",
     "InvalidCommentError",

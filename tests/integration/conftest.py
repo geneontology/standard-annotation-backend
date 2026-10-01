@@ -2,15 +2,16 @@
 
 import os
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from psycopg import sql
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -19,6 +20,7 @@ from standard_annotation_backend.api.dependencies import (
     get_authenticated_context,
     get_unit_of_work_factory,
 )
+from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
@@ -29,13 +31,95 @@ from standard_annotation_backend.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
+from standard_annotation_backend.persistence.models import (
+    AnnotationOrigin,
+    EntityCatalogSnapshotRecord,
+    EntityMembershipRecord,
+    JobRecord,
+    SabGroupRecord,
+)
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
     create_unit_of_work_factory,
 )
 
+
+@pytest.fixture
+def seed_active_subjects(
+    session_factory: sessionmaker[Session],
+) -> Callable[..., None]:
+    """Return a helper that makes the given identifiers active in the entity catalog.
+
+    The helper writes catalog rows directly, so it records no import audit events.
+    """
+
+    def seed(*identifiers: str) -> None:
+        now = datetime.now(UTC)
+        with session_factory() as session:
+            job_id, snapshot_id = uuid4(), uuid4()
+            source_key = f"seed-{uuid4().hex}"
+            session.add(
+                JobRecord(
+                    job_id=job_id,
+                    job_type="entity_import",
+                    status="succeeded",
+                    requested_by="test-supplier",
+                    parameters={"source_key": source_key},
+                    progress={},
+                    warnings=[],
+                    created_at=now,
+                    updated_at=now,
+                    started_at=now,
+                    completed_at=now,
+                    result={},
+                )
+            )
+            session.flush()
+            session.add(
+                EntityCatalogSnapshotRecord(
+                    snapshot_id=snapshot_id,
+                    job_id=job_id,
+                    source_key=source_key,
+                    source_url="https://example.org/test.gpi",
+                    source_checksum="a" * 64,
+                    source_format="gpi-2.0",
+                    source_metadata={},
+                    source_statistics={},
+                    record_statistics={},
+                    fetched_at=now,
+                    staged_at=now,
+                    published_at=now,
+                    active=True,
+                )
+            )
+            session.flush()
+            session.add_all(
+                [
+                    EntityMembershipRecord(
+                        db_object_id=identifier,
+                        source_key=source_key,
+                        snapshot_id=snapshot_id,
+                    )
+                    for identifier in identifiers
+                ]
+            )
+            session.commit()
+
+    return seed
+
+
+@pytest.fixture
+def active_annotation_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Seed the subjects used by existing successful annotation workflow tests."""
+    seed_active_subjects("UniProtKB:P12345", "UniProtKB:Q99999")
+
+
 APPLICATION_TABLES = (
+    "entity_source_record",
+    "entity_membership",
+    "entity_staging_record",
+    "entity_catalog_snapshot",
     "ontology_closure",
     "ontology_term",
     "ontology_metadata",
@@ -205,3 +289,48 @@ def truncate_application_tables(database_engine: Engine) -> Iterator[None]:
     with database_engine.begin() as connection:
         table_list = ", ".join(f'"{table}"' for table in APPLICATION_TABLES)
         connection.exec_driver_sql(f"TRUNCATE TABLE {table_list} CASCADE")
+
+
+@pytest.fixture
+def seed_annotation(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> Callable[[str], UUID]:
+    """Provide a helper that creates one active direct annotation for a subject."""
+    with session_factory() as session:
+        if (
+            session.scalar(
+                select(SabGroupRecord).where(SabGroupRecord.group_key == "MGI")
+            )
+            is None
+        ):
+            session.add(SabGroupRecord(group_key="MGI"))
+            session.commit()
+    counter = iter(range(1, 1_000_000))
+
+    def seed(db_object_id: str) -> UUID:
+        annotation_id = uuid4()
+        annotation = Annotation.model_validate(
+            {
+                "db_object_id": db_object_id,
+                "relation": "RO:0002331",
+                "ontology_class_id": "GO:0008150",
+                "references": [f"PMID:{next(counter)}"],
+                "evidence_type": "ECO:0000314",
+                "annotation_date": "2026-09-29",
+                "assigned_by": "MGI",
+            }
+        )
+        with unit_of_work_factory() as uow:
+            uow.annotations.create(
+                annotation=annotation,
+                actor_id="curator",
+                change_source="test",
+                owning_group_id="MGI",
+                record_origin=AnnotationOrigin.DIRECT,
+                annotation_id=annotation_id,
+            )
+            uow.commit()
+        return annotation_id
+
+    return seed

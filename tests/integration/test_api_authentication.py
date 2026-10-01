@@ -121,6 +121,7 @@ def test_authentication_override_runs_once_and_preserves_context_identity(
 
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.usefixtures("active_annotation_subjects")
 def test_application_routes_resolve_authentication_override_once(
     integration_api_client: TestClient,
     validated_annotation: Annotation,
@@ -433,6 +434,7 @@ def test_last_use_failure_aborts_authentication_without_disclosing_credentials(
             session.execute(text("DROP FUNCTION task5_reject_token_use()"))
 
 
+@pytest.mark.usefixtures("active_annotation_subjects")
 def test_authenticated_write_records_user_and_failed_operation_retains_last_use(
     bearer_client: TestClient,
     bearer_token: dict[str, UUID],

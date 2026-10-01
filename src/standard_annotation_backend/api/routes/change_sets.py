@@ -9,7 +9,10 @@ from standard_annotation_backend.api.dependencies import (
     get_authenticated_context,
     get_change_set_service,
 )
-from standard_annotation_backend.api.errors import BEARER_ERROR_RESPONSES
+from standard_annotation_backend.api.errors import (
+    ANNOTATION_WRITE_VALIDATION_RESPONSE,
+    BEARER_ERROR_RESPONSES,
+)
 from standard_annotation_backend.api.examples import (
     CHANGE_SET_ACCEPT_EXAMPLES,
     CHANGE_SET_REJECT_EXAMPLES,
@@ -121,7 +124,10 @@ def preview_change_set(
 @router.post(
     "/{change_set_id}/accept",
     response_model=AcceptedChangeSetResource,
-    responses={status.HTTP_409_CONFLICT: {"model": ApiErrorResponse}},
+    responses={
+        status.HTTP_409_CONFLICT: {"model": ApiErrorResponse},
+        status.HTTP_422_UNPROCESSABLE_CONTENT: ANNOTATION_WRITE_VALIDATION_RESPONSE,
+    },
 )
 def accept_change_set(
     change_set_id: UUID,

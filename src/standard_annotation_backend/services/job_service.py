@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from standard_annotation_backend.domain.audit import AuditAction, AuditResult
+from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
     AuthorizationScope,
     PermissionAction,
@@ -15,11 +15,11 @@ from standard_annotation_backend.domain.auth import (
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.repositories import (
-    AuditRepository,
     InvalidJobTransitionError,
     JobNotFoundError,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.audit_service import AuditService
 
 __all__ = ["InvalidJobTransitionError", "Job", "JobNotFoundError", "JobService"]
 
@@ -44,7 +44,7 @@ class Job:
     completed_at: datetime | None
 
 
-def _job(record: JobRecord) -> Job:
+def job_from_record(record: JobRecord) -> Job:
     """Convert a stored job record to a service result."""
     return Job(
         job_id=record.job_id,
@@ -86,8 +86,10 @@ class JobService:
                 parameters=parameters,
                 now=now,
             )
-            self._audit(unit_of_work.audit, record, AuditAction.JOB_QUEUED)
-            result = _job(record)
+            AuditService(unit_of_work.audit).record_job_lifecycle(
+                action=AuditAction.JOB_QUEUED, record=record
+            )
+            result = job_from_record(record)
             unit_of_work.commit()
         return result
 
@@ -101,17 +103,17 @@ class JobService:
             record = unit_of_work.jobs.get(job_id)
             if record is None:
                 raise JobNotFoundError(job_id)
-            return _job(record)
+            return job_from_record(record)
 
     def start(self, job_id: UUID) -> Job:
         """Start a queued job or return its unchanged later state."""
         with self._unit_of_work_factory() as unit_of_work:
             mutation = unit_of_work.jobs.start(job_id, now=datetime.now(UTC))
             if mutation.changed:
-                self._audit(
-                    unit_of_work.audit, mutation.record, AuditAction.JOB_STARTED
+                AuditService(unit_of_work.audit).record_job_lifecycle(
+                    action=AuditAction.JOB_STARTED, record=mutation.record
                 )
-            result = _job(mutation.record)
+            result = job_from_record(mutation.record)
             unit_of_work.commit()
         return result
 
@@ -130,7 +132,7 @@ class JobService:
                 warnings=warnings,
                 now=datetime.now(UTC),
             )
-            result = _job(mutation.record)
+            result = job_from_record(mutation.record)
             unit_of_work.commit()
         return result
 
@@ -147,7 +149,7 @@ class JobService:
                 parameters=parameters,
                 now=datetime.now(UTC),
             )
-            result = _job(mutation.record)
+            result = job_from_record(mutation.record)
             unit_of_work.commit()
         return result
 
@@ -167,10 +169,10 @@ class JobService:
                 now=datetime.now(UTC),
             )
             if mutation.changed:
-                self._audit(
-                    unit_of_work.audit, mutation.record, AuditAction.JOB_SUCCEEDED
+                AuditService(unit_of_work.audit).record_job_lifecycle(
+                    action=AuditAction.JOB_SUCCEEDED, record=mutation.record
                 )
-            completed = _job(mutation.record)
+            completed = job_from_record(mutation.record)
             unit_of_work.commit()
         return completed
 
@@ -186,25 +188,9 @@ class JobService:
                 now=datetime.now(UTC),
             )
             if mutation.changed:
-                self._audit(unit_of_work.audit, mutation.record, AuditAction.JOB_FAILED)
-            failed = _job(mutation.record)
+                AuditService(unit_of_work.audit).record_job_lifecycle(
+                    action=AuditAction.JOB_FAILED, record=mutation.record
+                )
+            failed = job_from_record(mutation.record)
             unit_of_work.commit()
         return failed
-
-    @staticmethod
-    def _audit(
-        repository: AuditRepository,
-        record: JobRecord,
-        action: AuditAction,
-    ) -> None:
-        """Record one lifecycle event through the shared audit repository."""
-        repository.record(
-            action=action,
-            actor_id=record.requested_by,
-            result=AuditResult.SUCCESS,
-            job_id=record.job_id,
-            details={
-                "job_type": record.job_type,
-                "status": record.status,
-            },
-        )

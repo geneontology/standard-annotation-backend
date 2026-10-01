@@ -47,6 +47,7 @@ COPY --chown=sab:sab pyproject.toml uv.lock README.md ./
 COPY --chown=sab:sab src ./src
 COPY --chown=sab:sab alembic.ini ./
 COPY --chown=sab:sab alembic ./alembic
+COPY --chown=sab:sab config ./config
 
 FROM base AS runtime
 
@@ -55,6 +56,7 @@ COPY --chown=sab:sab pyproject.toml uv.lock README.md ./
 COPY --chown=sab:sab src ./src
 COPY --chown=sab:sab alembic.ini ./
 COPY --chown=sab:sab alembic ./alembic
+COPY --chown=sab:sab config ./config
 
 EXPOSE 8000
 

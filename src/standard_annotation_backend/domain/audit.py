@@ -26,6 +26,8 @@ class AuditAction(StrEnum):
     IMPORT_COMPLETED = "import.completed"
     EXPORT_COMPLETED = "export.completed"
     ONTOLOGY_LOADED = "ontology.loaded"
+    ENTITY_CATALOG_PUBLISHED = "entity.catalog_published"
+    ENTITY_CATALOG_RETIRED = "entity.catalog_retired"
     ADMINISTRATIVE_CHANGE = "administrative.change"
 
 

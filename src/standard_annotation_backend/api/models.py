@@ -15,6 +15,7 @@ from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 
 from standard_annotation_backend.api.examples import CHANGE_SET_PROPOSAL_EXAMPLES
+from standard_annotation_backend.config import SourceKey
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationExtension,
@@ -35,7 +36,9 @@ from standard_annotation_backend.services.comment_service import AnnotationComme
 from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.token_service import TokenCreateInput
-from standard_annotation_backend.validation_types import NonBlankString
+from standard_annotation_backend.validation_types import (
+    NonBlankString,
+)
 
 
 class ChangeSetCreateRequest(BaseModel):
@@ -196,9 +199,50 @@ class JobResource(BaseModel):
     job_type: JobType
     status: JobStatus
     requested_by: str
-    progress: dict[str, object]
+    progress: dict[str, object] = Field(
+        description=(
+            "Type-specific progress. Failed entity jobs include phase='failed', "
+            "a failure_code, and, when available, failure_details describing the "
+            "problem: a message for an invalid header, or issue_count and up to "
+            "100 issues (line number, category, and invalid fields) for invalid "
+            "rows."
+        ),
+        examples=[
+            {
+                "phase": "failed",
+                "failure_code": "row_validation",
+                "failure_details": {
+                    "issue_count": 1,
+                    "issues": [
+                        {
+                            "line_number": 412,
+                            "category": "validation",
+                            "message": None,
+                            "fields": [
+                                {
+                                    "field": "db_object_symbol",
+                                    "message": (
+                                        "Value error, Invalid db_object_symbol "
+                                        "format: A raw rejected symbol"
+                                    ),
+                                    "value": "A raw rejected symbol",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
     warnings: tuple[str, ...]
-    result: dict[str, object] | None
+    result: dict[str, object] | None = Field(
+        description=(
+            "Type-specific durable result. Successful entity imports include "
+            "warning_count and warnings; imports whose source is unchanged "
+            "return unchanged: true instead."
+        ),
+        examples=[{"warning_count": 0, "warnings": []}],
+    )
     artifact_uri: str | None
     error: str | None
     created_at: datetime
@@ -232,6 +276,29 @@ class OntologyLoadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ontology: OntologyKey
+
+
+class EntityImportRequest(BaseModel):
+    """Request an import of one configured entity source, or of all of them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_key: Annotated[
+        SourceKey | None,
+        Field(
+            description=(
+                "Key of a configured entity source. Omit it to import every "
+                "configured source and retire catalogs of removed sources."
+            ),
+            examples=["mouse"],
+        ),
+    ] = None
+
+
+class EntityImportJobsResource(BaseModel):
+    """List the jobs created or reused by an entity import request."""
+
+    jobs: list[JobResource]
 
 
 class AnnotationCommentRequest(BaseModel):

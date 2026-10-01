@@ -1,6 +1,6 @@
 """Test annotation operations independently from HTTP and PostgreSQL."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from types import TracebackType
 from typing import cast
@@ -16,6 +16,7 @@ from standard_annotation_backend.domain.auth import (
     PermissionDeniedError,
     RequestContext,
 )
+from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
 from standard_annotation_backend.persistence.repositories import (
     AnnotationNotFoundError,
     AnnotationSearchFilters,
@@ -343,9 +344,19 @@ class FakeAuditRepository:
 
 
 @dataclass(slots=True)
+class FakeEntityRepository:
+    active_ids: set[str] = field(default_factory=lambda: {"UniProtKB:P12345"})
+
+    def require_active(self, db_object_id: str) -> None:
+        if db_object_id not in self.active_ids:
+            raise UnknownDbObjectIdError(db_object_id)
+
+
+@dataclass(slots=True)
 class FakeUnitOfWork:
     annotations: FakeAnnotationRepository
     audit: FakeAuditRepository
+    entities: FakeEntityRepository = field(default_factory=FakeEntityRepository)
     commit_count: int = 0
 
     @property

@@ -12,6 +12,8 @@ redelivers an execution message, it uses the same job identifier.
 """
 
 import logging
+import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -21,19 +23,37 @@ from celery.exceptions import Reject, Retry
 from standard_annotation_backend.auth.authorization_source import (
     AuthorizationSourceClient,
 )
+from standard_annotation_backend.domain.entities import (
+    EntityCandidateConflictError,
+    EntityCatalog,
+    EntityCatalogCollisionError,
+    EntityImportFailureCode,
+    UnknownEntitySourceError,
+)
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.ontology import (
     OntologyKey,
     OntologyLoadResult,
     OntologyParseError,
 )
+from standard_annotation_backend.entity_sources.http import (
+    EntitySourceDocument,
+    EntitySourceError,
+)
+from standard_annotation_backend.gpi.parser import GpiParseError, parse_gpi
 from standard_annotation_backend.ontology.obo_parser import parse_obo
 from standard_annotation_backend.ontology.sources import OntologySourceError
 from standard_annotation_backend.persistence.locks import (
     job_execution_lock,
     ontology_load_lock,
 )
-from standard_annotation_backend.services.job_service import JobService
+from standard_annotation_backend.services.entity_import_run_service import (
+    EntityImportRunService,
+)
+from standard_annotation_backend.services.entity_import_service import (
+    EntityImportService,
+)
+from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.ontology_load_service import (
     OntologyCandidateConflictError,
 )
@@ -47,6 +67,10 @@ _DISPATCH_FAILURE = "Authorization synchronization could not be dispatched"
 _TASK_UNAVAILABLE = "Worker task could not persist state"
 _ONTOLOGY_FAILURE = "Ontology load failed"
 _ONTOLOGY_DISPATCH_FAILURE = "Ontology load could not be dispatched"
+_ENTITY_IMPORT_FAILURE = "Entity import failed"
+_LOGGED_ROW_ISSUES = 5
+
+SOURCE_KEY = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
 
 class OntologyLoadBusyError(RuntimeError):
@@ -58,6 +82,298 @@ class WorkerTaskUnavailableError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(_TASK_UNAVAILABLE)
+
+
+def _entity_job_source_key(parameters: dict[str, object]) -> str:
+    """Return the `source_key` from an entity job's stored parameters.
+
+    Raises:
+        ValueError: If the parameters are anything other than a valid `source_key`.
+    """
+    source_key = parameters.get("source_key")
+    if (
+        set(parameters) != {"source_key"}
+        or not isinstance(source_key, str)
+        or SOURCE_KEY.fullmatch(source_key) is None
+    ):
+        raise ValueError("invalid persisted entity job parameters")
+    return source_key
+
+
+def _parse_entity_source(
+    source_format: str, document: EntitySourceDocument
+) -> EntityCatalog:
+    """Parse retrieved text with the parser for the source's format."""
+    parsers: dict[str, Callable[[EntitySourceDocument], EntityCatalog]] = {
+        "gpi": parse_gpi
+    }
+    return parsers[source_format](document)
+
+
+def _entity_import_progress(phase: str, catalog: EntityCatalog) -> dict[str, object]:
+    """Build a job's progress for one phase from catalog counts only."""
+    return {
+        "phase": phase,
+        "source_record_count": len(catalog.records),
+        "active_identifier_count": len(
+            {record.entity.db_object_id for record in catalog.records}
+        ),
+        "warning_count": len(catalog.warnings),
+    }
+
+
+def _finalize_entity_import_job(
+    jobs: JobService, job_id: UUID, result: dict[str, object]
+) -> None:
+    """Record a job's final progress and result, and mark it succeeded."""
+    if result.get("unchanged") is True:
+        jobs.update_progress(
+            job_id, progress={"phase": "completed", "unchanged": True}, warnings=()
+        )
+        jobs.succeed(job_id, result=result)
+        return
+    warnings = result.get("warnings")
+    removal_impacts = result.get("removal_impacts")
+    if not isinstance(warnings, list) or not all(
+        isinstance(warning, str) for warning in warnings
+    ):
+        raise ValueError("invalid durable entity import warnings")
+    if not isinstance(removal_impacts, list):
+        raise ValueError("invalid durable entity import removal impacts")
+    jobs.update_progress(
+        job_id,
+        progress={
+            "phase": "completed",
+            "source_record_count": result.get("source_record_count", 0),
+            "active_identifier_count": result.get("active_identifier_count", 0),
+            "added_count": result.get("added_count", 0),
+            "retained_count": result.get("retained_count", 0),
+            "removed_count": result.get("removed_count", 0),
+            "warning_count": len(warnings),
+            "removal_impact_count": len(removal_impacts),
+        },
+        warnings=tuple(warnings),
+    )
+    jobs.succeed(job_id, result=result)
+
+
+def _fail_entity_import_job(
+    imports: EntityImportService,
+    job_id: UUID,
+    error: Exception,
+) -> None:
+    """Mark a job failed with the failure code for `error`, and delete its staging."""
+    if isinstance(error, (EntitySourceError, GpiParseError)):
+        try:
+            failure_code = EntityImportFailureCode(error.code)
+        except ValueError:
+            failure_code = (
+                EntityImportFailureCode.SOURCE_ERROR
+                if isinstance(error, EntitySourceError)
+                else EntityImportFailureCode.ROW_VALIDATION
+            )
+    elif isinstance(error, UnknownEntitySourceError):
+        failure_code = EntityImportFailureCode.UNKNOWN_SOURCE
+    elif isinstance(error, EntityCatalogCollisionError):
+        failure_code = EntityImportFailureCode.CATALOG_COLLISION
+    elif isinstance(error, EntityCandidateConflictError):
+        failure_code = EntityImportFailureCode.CANDIDATE_CONFLICT
+    else:
+        failure_code = EntityImportFailureCode.INVALID_PARAMETERS
+    failure_details = error.details if isinstance(error, GpiParseError) else None
+    logger.error(
+        "Entity import job failed: job_id=%s failure_type=%s failure_code=%s%s",
+        job_id,
+        type(error).__name__,
+        failure_code.value,
+        _failure_log_summary(error),
+    )
+    imports.fail(
+        job_id,
+        error=_ENTITY_IMPORT_FAILURE,
+        failure_code=failure_code.value,
+        failure_details=failure_details,
+    )
+
+
+def _failure_log_summary(error: Exception) -> str:
+    """Describe a GPI parsing failure for the worker log, without field values.
+
+    Header failures add their message. Row failures add the number of invalid
+    rows and the line and category of the first 5. A `validation` row names its
+    invalid fields only, because validation messages can repeat the rejected
+    value; other categories add their reason. The job record keeps the full
+    details.
+    """
+    if not isinstance(error, GpiParseError):
+        return ""
+    if error.code == "header":
+        return f" message={error.message}"
+    summaries = []
+    for issue in error.issues[:_LOGGED_ROW_ISSUES]:
+        reason = (
+            "fields " + ", ".join(field.field for field in issue.fields)
+            if issue.fields
+            else issue.message or ""
+        )
+        summaries.append(f"line {issue.line_number} {issue.category}: {reason}")
+    return f" issue_count={len(error.issues)} issues=[{' | '.join(summaries)}]"
+
+
+@celery_app.task(bind=True, max_retries=None, name="sab.entity_import.run")
+def run_entity_import(task: Task, job_id: str) -> None:
+    """Run one entity import job for a configured source.
+
+    The source is fetched and parsed with the parser for its configured format.
+    Everything after parsing uses the format-independent entity catalog.
+
+    Celery can deliver the same task more than once, for example after a worker
+    stops. Each run therefore checks the database before doing new work, in
+    this order:
+
+    1. If the job has already finished, do nothing.
+    2. If this job already published its catalog, copy the stored result into
+       the job without fetching the source.
+    3. If this job has committed staging, check it and publish it without
+       fetching the source.
+
+    Only then is the source fetched. If the URL and checksum match the active
+    catalog, the job succeeds without publishing. Source, parsing, and catalog
+    failures mark the job failed with a `failure_code`. Other errors, such as a
+    lost database connection, make Celery retry the task, keeping the job and
+    any staging for the next attempt.
+    """
+    failure_type: str | None = None
+    try:
+        durable_job_id = UUID(job_id)
+        with (
+            worker_runtime() as runtime,
+            job_execution_lock(runtime.engine, durable_job_id) as acquired,
+        ):
+            if not acquired:
+                return
+            job = runtime.jobs.start(durable_job_id)
+            if job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}:
+                return
+            try:
+                if job.job_type is not JobType.ENTITY_IMPORT:
+                    raise ValueError("unexpected job type")
+                source_key = _entity_job_source_key(job.parameters)
+            except (KeyError, TypeError, ValueError) as error:
+                _fail_entity_import_job(runtime.entity_imports, durable_job_id, error)
+                return
+            try:
+                completed = runtime.entity_imports.completed(durable_job_id)
+                if completed is not None:
+                    _finalize_entity_import_job(runtime.jobs, durable_job_id, completed)
+                    return
+                resumed = runtime.entity_imports.resume(
+                    job_id=durable_job_id, actor_id=job.requested_by
+                )
+                if resumed is not None:
+                    _finalize_entity_import_job(
+                        runtime.jobs, durable_job_id, resumed.to_job_result()
+                    )
+                    return
+                source = runtime.entity_sources.source(source_key)
+                runtime.jobs.update_progress(
+                    durable_job_id, progress={"phase": "fetching"}
+                )
+                document = runtime.entity_source_client.fetch(source)
+                unchanged = runtime.entity_imports.unchanged(
+                    source_key=source_key,
+                    source_url=document.source_url,
+                    source_checksum=document.source_checksum,
+                )
+                if unchanged is not None:
+                    _finalize_entity_import_job(
+                        runtime.jobs, durable_job_id, unchanged.to_job_result()
+                    )
+                    return
+                runtime.jobs.update_progress(
+                    durable_job_id, progress={"phase": "parsing"}
+                )
+                catalog = _parse_entity_source(source.format, document)
+                runtime.jobs.update_progress(
+                    durable_job_id,
+                    progress=_entity_import_progress("staging", catalog),
+                    warnings=catalog.warnings,
+                )
+                runtime.entity_imports.stage(
+                    job_id=durable_job_id, source_key=source_key, catalog=catalog
+                )
+                runtime.jobs.update_progress(
+                    durable_job_id,
+                    progress=_entity_import_progress("publishing", catalog),
+                    warnings=catalog.warnings,
+                )
+                result = runtime.entity_imports.publish(
+                    job_id=durable_job_id, actor_id=job.requested_by
+                )
+            except (
+                EntityCandidateConflictError,
+                EntityCatalogCollisionError,
+                EntitySourceError,
+                GpiParseError,
+                UnknownEntitySourceError,
+            ) as error:
+                _fail_entity_import_job(runtime.entity_imports, durable_job_id, error)
+                return
+            _finalize_entity_import_job(
+                runtime.jobs, durable_job_id, result.to_job_result()
+            )
+    except Exception as error:
+        failure_type = type(error).__name__
+    if failure_type is not None:
+        _retry_safely(task, job_id, failure_type)
+
+
+@celery_app.task(bind=True, max_retries=None, name="sab.entity_catalog_retirement.run")
+def run_entity_catalog_retirement(task: Task, job_id: str) -> None:
+    """Retire the active catalog of a source that is no longer configured.
+
+    The retirement is committed with its audit event. If the worker stops before
+    marking the job succeeded, the next run of the task returns the stored
+    result.
+    """
+    failure_type: str | None = None
+    try:
+        durable_job_id = UUID(job_id)
+        with (
+            worker_runtime() as runtime,
+            job_execution_lock(runtime.engine, durable_job_id) as acquired,
+        ):
+            if not acquired:
+                return
+            job = runtime.jobs.start(durable_job_id)
+            if job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}:
+                return
+            try:
+                if job.job_type is not JobType.ENTITY_CATALOG_RETIREMENT:
+                    raise ValueError("unexpected job type")
+                source_key = _entity_job_source_key(job.parameters)
+            except (KeyError, TypeError, ValueError) as error:
+                _fail_entity_import_job(runtime.entity_imports, durable_job_id, error)
+                return
+            result = runtime.entity_imports.retire(
+                job_id=durable_job_id,
+                source_key=source_key,
+                configured=source_key in runtime.entity_sources.keys,
+                actor_id=job.requested_by,
+            )
+            runtime.jobs.update_progress(
+                durable_job_id,
+                progress={
+                    "phase": "completed",
+                    "retired": result.retired,
+                    "removed_count": len(result.removal_impacts),
+                },
+            )
+            runtime.jobs.succeed(durable_job_id, result=result.to_job_result())
+    except Exception as error:
+        failure_type = type(error).__name__
+    if failure_type is not None:
+        _retry_safely(task, job_id, failure_type)
 
 
 @celery_app.task(bind=True, max_retries=None, name="sab.ontology_load.prune")
@@ -363,6 +679,38 @@ def schedule_ontology_load(task: Task) -> None:
                     type(error).__name__,
                 )
                 runtime.jobs.fail(job.job_id, error=_ONTOLOGY_DISPATCH_FAILURE)
+    except Exception as error:
+        failure_type = type(error).__name__
+    if failure_type is not None:
+        _retry_safely(task, "scheduler", failure_type)
+
+
+def dispatch_entity_job(job: Job) -> None:
+    """Send one entity job to the Celery task that runs its job type."""
+    task = (
+        run_entity_catalog_retirement
+        if job.job_type is JobType.ENTITY_CATALOG_RETIREMENT
+        else run_entity_import
+    )
+    task.delay(str(job.job_id))
+
+
+@celery_app.task(bind=True, max_retries=None, name="sab.entity_import.schedule")
+def schedule_entity_imports(task: Task) -> None:
+    """Start the scheduled import of every configured entity source.
+
+    Celery Beat runs this task on `SAB_ENTITY_IMPORT_CRON`. If it is retried after
+    its jobs were committed, those jobs are reused and sent again instead of new
+    ones being created.
+    """
+    failure_type: str | None = None
+    try:
+        with worker_runtime() as runtime:
+            EntityImportRunService(
+                runtime.unit_of_work_factory,
+                runtime.entity_sources,
+                dispatch_entity_job,
+            ).start(requested_by="scheduler", source_key=None)
     except Exception as error:
         failure_type = type(error).__name__
     if failure_type is not None:

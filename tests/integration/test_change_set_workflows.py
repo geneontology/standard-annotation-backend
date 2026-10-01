@@ -43,6 +43,8 @@ PROPOSER = RequestContext(
     scope=AuthorizationScope.GLOBAL,
     group_id=None,
 )
+
+pytestmark = pytest.mark.usefixtures("active_annotation_subjects")
 REVIEWER = RequestContext(
     actor_id="reviewer",
     token_id=uuid4(),
