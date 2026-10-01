@@ -551,7 +551,8 @@ A scheduled job, or a global admin request to `POST /entity-imports`, creates on
 for any active catalog whose source is no longer configured. An admin can also
 import a single source. An import skips publication when the file is unchanged;
 otherwise it validates the complete file and replaces that source's catalog in one
-transaction. An invalid file fails the job and leaves the previous catalog active.
+transaction. An invalid file fails the job and leaves the previous catalog active;
+the job records each invalid row's line number and reason.
 An identifier can be active in only one source at a time.
 
 Direct annotation creates and updates, and accepted create or update change sets,

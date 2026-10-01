@@ -17,6 +17,8 @@ from standard_annotation_backend.persistence.unit_of_work import (
 )
 from standard_annotation_backend.services.audit_service import AuditService
 
+MAX_AUDITED_FAILURE_ISSUES = 10
+
 
 class EntityImportService:
     """Stage, publish, and retire catalogs, committing each with its audit events."""
@@ -162,21 +164,27 @@ class EntityImportService:
         *,
         error: str,
         failure_code: str = EntityImportFailureCode.INVALID_PARAMETERS,
+        failure_details: dict[str, object] | None = None,
     ) -> None:
-        """Mark a job failed, record its failure code, and delete its staging.
+        """Mark a job failed, record why, and delete its staging.
 
-        The failed status, the `failure_code` in the job's progress and failure
-        audit event, and the deletion of the job's staging rows are committed in
-        one transaction, so none is recorded without the others. An unknown code
-        is recorded as `invalid_parameters`. The public error message stays
-        generic; the code tells operators whether retrieval, decoding, the header,
-        a row, or a catalog conflict caused the failure, without exposing source
-        content.
+        The failed status, the `failure_code` and optional `failure_details` in
+        the job's progress and failure audit event, and the deletion of the job's
+        staging rows are committed in one transaction, so none is recorded without
+        the others. An unknown code is recorded as `invalid_parameters`.
+
+        The public error message stays generic. The code tells operators whether
+        retrieval, decoding, the header, a row, or a catalog conflict caused the
+        failure, and the details describe the problem, such as each invalid row.
+        The audit event keeps at most the first 10 entries of an `issues` list,
+        while the job keeps all reported entries.
 
         Args:
             job_id: Job to mark failed.
             error: Nonblank public error message.
             failure_code: One of the `EntityImportFailureCode` values.
+            failure_details: JSON-compatible description of the failure, such as
+                `GpiParseError.details`.
 
         Raises:
             ValueError: `error` is blank.
@@ -188,18 +196,34 @@ class EntityImportService:
             safe_code = EntityImportFailureCode(failure_code)
         except ValueError:
             safe_code = EntityImportFailureCode.INVALID_PARAMETERS
+        progress: dict[str, object] = {
+            "phase": "failed",
+            "failure_code": safe_code.value,
+        }
+        audit_details: dict[str, object] = {"failure_code": safe_code.value}
+        if failure_details is not None:
+            progress["failure_details"] = failure_details
+            audit_details["failure_details"] = _audit_failure_details(failure_details)
         with self._unit_of_work_factory() as uow:
             mutation = uow.jobs.fail(
                 job_id,
                 error=safe_error,
                 now=datetime.now(UTC),
-                progress={"phase": "failed", "failure_code": safe_code.value},
+                progress=progress,
             )
             if mutation.changed:
                 AuditService(uow.audit).record_job_lifecycle(
                     action=AuditAction.JOB_FAILED,
                     record=mutation.record,
-                    details={"failure_code": safe_code.value},
+                    details=audit_details,
                 )
             uow.entities.cleanup_terminal_staging(job_id)
             uow.commit()
+
+
+def _audit_failure_details(details: dict[str, object]) -> dict[str, object]:
+    """Keep the first 10 entries of an `issues` list for the audit event."""
+    issues = details.get("issues")
+    if not isinstance(issues, list):
+        return details
+    return {**details, "issues": issues[:MAX_AUDITED_FAILURE_ISSUES]}

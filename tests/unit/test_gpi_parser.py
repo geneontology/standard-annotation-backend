@@ -1,6 +1,5 @@
 """Verify strict parsing of GPI 2.0 source documents."""
 
-import traceback
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -110,54 +109,109 @@ def test_parse_gpi_translates_invalid_headers_to_a_safe_error(
 ) -> None:
     """Invalid or incomplete headers raise `GpiParseError` with the code `header`.
 
-    The error message does not include the document text.
+    The error details describe the problem, and the error message does not include
+    the document text.
     """
     with pytest.raises(GpiParseError) as raised:
         parse_gpi(_document("invalid-header.gpi", text=text))
 
     assert raised.value.code == "header", name
     assert text not in str(raised.value)
+    assert raised.value.message, name
+    assert raised.value.details == {"message": raised.value.message}
 
 
-@pytest.mark.parametrize(
-    ("name", "text", "rejected_row"),
-    [
-        (
-            "wrong column count",
-            "!gpi-version: 2.0\n!generated-by: TestDB\n!date-generated: 2026-09-29\n"
-            "UniProtKB:BAD\ttoo\tfew\tcolumns\n",
-            "UniProtKB:BAD\ttoo\tfew\tcolumns",
-        ),
-        (
-            "schema-invalid symbol",
-            (FIXTURES / "invalid-row.gpi").read_text(),
-            "UniProtKB:BAD\tA raw rejected symbol",
-        ),
-    ],
-)
-def test_parse_gpi_rejects_invalid_rows_without_disclosing_the_row(
-    name: str, text: str, rejected_row: str
-) -> None:
-    """Invalid rows raise `GpiParseError` with the code `row_validation`.
+HEADER = "!gpi-version: 2.0\n!generated-by: TestDB\n!date-generated: 2026-09-29\n"
 
-    Neither the error message, its chained exceptions, nor its formatted traceback
-    includes the rejected row.
+
+def _row(identifier: str, symbol: str = "SYM") -> str:
+    """Return one GPI data row with the given identifier and symbol."""
+    return (
+        f"{identifier}\t{symbol}\tProtein\t\tSO:0001217\tNCBITaxon:9606\t\t"
+        f"{identifier}\t\t\t\n"
+    )
+
+
+def test_parse_gpi_reports_every_invalid_row() -> None:
+    """Every invalid row is reported with its line number, field, and reason.
+
+    Valid rows around them do not stop the report, and the document still fails
+    as a whole.
     """
+    text = (
+        HEADER
+        + _row("UniProtKB:P1")
+        + _row("UniProtKB:BAD", symbol="A raw rejected symbol")
+        + "UniProtKB:SHORT\ttoo\tfew\tcolumns\n"
+        + _row("UniProtKB:P2")
+    )
+
     with pytest.raises(GpiParseError) as raised:
-        parse_gpi(_document("invalid-row.gpi", text=text))
+        parse_gpi(_document("invalid-rows.gpi", text=text))
 
     error = raised.value
-    rendered_traceback = "".join(traceback.format_exception(error))
-    assert error.code == "row_validation", name
-    assert error.__cause__ is None
-    assert error.__context__ is None
-    assert rejected_row not in str(error)
-    assert rejected_row not in rendered_traceback
+    assert error.code == "row_validation"
+    validation, field_count = error.issues
+    [field] = validation.fields
+    assert error.details == {
+        "issue_count": 2,
+        "issues": [
+            {
+                "line_number": 5,
+                "category": "validation",
+                "message": None,
+                "fields": [
+                    {
+                        "field": "db_object_symbol",
+                        "message": field.message,
+                        "value": "A raw rejected symbol",
+                    }
+                ],
+            },
+            {
+                "line_number": 6,
+                "category": "field-count",
+                "message": "expected 11 fields, found 4",
+                "fields": [],
+            },
+        ],
+    }
+    assert "Invalid db_object_symbol format" in field.message
+    assert field_count.line_number == 6
+
+
+def test_parse_gpi_truncates_long_values_and_messages() -> None:
+    """Reported values and messages are cut to 200 characters."""
+    symbol = "x " * 300
+
+    with pytest.raises(GpiParseError) as raised:
+        parse_gpi(_document("long.gpi", text=HEADER + _row("UniProtKB:X", symbol)))
+
+    [field] = raised.value.issues[0].fields
+    assert field.value == symbol[:200]
+    assert len(field.message) <= 200
+
+
+def test_parse_gpi_reports_at_most_100_rows_with_the_total() -> None:
+    """A document with many invalid rows reports the first 100 and the full count."""
+    text = HEADER + "".join(f"UniProtKB:{index}\tshort\n" for index in range(150))
+
+    with pytest.raises(GpiParseError) as raised:
+        parse_gpi(_document("many.gpi", text=text))
+
+    details = raised.value.details
+    assert details["issue_count"] == 150
+    assert details["issues"] == [
+        issue.to_details() for issue in raised.value.issues[:100]
+    ]
+    assert [issue.line_number for issue in raised.value.issues[:100]] == list(
+        range(4, 104)
+    )
 
 
 @pytest.mark.parametrize("column", range(11))
 def test_parse_gpi_rejects_nul_in_every_entity_field(column: int) -> None:
-    """A NUL character in any entity column raises a `row_validation` error.
+    """A NUL character in any entity column is reported as an invalid row.
 
     PostgreSQL text columns cannot store NUL characters.
     """
@@ -170,7 +224,14 @@ def test_parse_gpi_rejects_nul_in_every_entity_field(column: int) -> None:
         parse_gpi(_document("nul.gpi", text=text))
 
     assert caught.value.code == "row_validation"
-    assert caught.value.__context__ is None
+    assert caught.value.details["issues"] == [
+        {
+            "line_number": len(lines),
+            "category": "syntax",
+            "message": "contains a NUL character",
+            "fields": [],
+        }
+    ]
     assert "\x00" not in str(caught.value)
 
 
@@ -188,4 +249,6 @@ def test_parse_gpi_rejects_nul_in_source_metadata(header: str) -> None:
     with pytest.raises(GpiParseError) as caught:
         parse_gpi(_document("nul.gpi", text=text))
     assert caught.value.code == "header"
-    assert caught.value.__context__ is None
+    assert caught.value.message is not None
+    assert "NUL" in caught.value.message
+    assert caught.value.details == {"message": caught.value.message}

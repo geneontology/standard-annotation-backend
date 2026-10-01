@@ -68,6 +68,7 @@ _TASK_UNAVAILABLE = "Worker task could not persist state"
 _ONTOLOGY_FAILURE = "Ontology load failed"
 _ONTOLOGY_DISPATCH_FAILURE = "Ontology load could not be dispatched"
 _ENTITY_IMPORT_FAILURE = "Entity import failed"
+_LOGGED_ROW_ISSUES = 5
 
 SOURCE_KEY = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
@@ -179,13 +180,44 @@ def _fail_entity_import_job(
         failure_code = EntityImportFailureCode.CANDIDATE_CONFLICT
     else:
         failure_code = EntityImportFailureCode.INVALID_PARAMETERS
+    failure_details = error.details if isinstance(error, GpiParseError) else None
     logger.error(
-        "Entity import job failed: job_id=%s failure_type=%s failure_code=%s",
+        "Entity import job failed: job_id=%s failure_type=%s failure_code=%s%s",
         job_id,
         type(error).__name__,
         failure_code.value,
+        _failure_log_summary(error),
     )
-    imports.fail(job_id, error=_ENTITY_IMPORT_FAILURE, failure_code=failure_code.value)
+    imports.fail(
+        job_id,
+        error=_ENTITY_IMPORT_FAILURE,
+        failure_code=failure_code.value,
+        failure_details=failure_details,
+    )
+
+
+def _failure_log_summary(error: Exception) -> str:
+    """Describe a GPI parsing failure for the worker log, without field values.
+
+    Header failures add their message. Row failures add the number of invalid
+    rows and the line and category of the first 5. A `validation` row names its
+    invalid fields only, because validation messages can repeat the rejected
+    value; other categories add their reason. The job record keeps the full
+    details.
+    """
+    if not isinstance(error, GpiParseError):
+        return ""
+    if error.code == "header":
+        return f" message={error.message}"
+    summaries = []
+    for issue in error.issues[:_LOGGED_ROW_ISSUES]:
+        reason = (
+            "fields " + ", ".join(field.field for field in issue.fields)
+            if issue.fields
+            else issue.message or ""
+        )
+        summaries.append(f"line {issue.line_number} {issue.category}: {reason}")
+    return f" issue_count={len(error.issues)} issues=[{' | '.join(summaries)}]"
 
 
 @celery_app.task(bind=True, max_retries=None, name="sab.entity_import.run")

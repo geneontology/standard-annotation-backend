@@ -201,10 +201,38 @@ class JobResource(BaseModel):
     requested_by: str
     progress: dict[str, object] = Field(
         description=(
-            "Type-specific progress. Failed entity jobs include phase='failed' "
-            "and an allowlisted failure_code."
+            "Type-specific progress. Failed entity jobs include phase='failed', "
+            "a failure_code, and, when available, failure_details describing the "
+            "problem: a message for an invalid header, or issue_count and up to "
+            "100 issues (line number, category, and invalid fields) for invalid "
+            "rows."
         ),
-        examples=[{"phase": "failed", "failure_code": "invalid_utf8"}],
+        examples=[
+            {
+                "phase": "failed",
+                "failure_code": "row_validation",
+                "failure_details": {
+                    "issue_count": 1,
+                    "issues": [
+                        {
+                            "line_number": 412,
+                            "category": "validation",
+                            "message": None,
+                            "fields": [
+                                {
+                                    "field": "db_object_symbol",
+                                    "message": (
+                                        "Value error, Invalid db_object_symbol "
+                                        "format: A raw rejected symbol"
+                                    ),
+                                    "value": "A raw rejected symbol",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
     )
     warnings: tuple[str, ...]
     result: dict[str, object] | None = Field(

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from types import SimpleNamespace
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -335,6 +336,78 @@ def test_entity_import_domain_failure_is_terminal_and_cleans_staging(
     assert "MGI:1" not in logs
     assert "Gene1" not in logs
     assert sha256(source.text.encode()).hexdigest() not in logs
+
+
+def test_invalid_rows_are_reported_on_the_failed_job(
+    monkeypatch: pytest.MonkeyPatch,
+    database_engine: Engine,
+    session_factory: sessionmaker[Session],
+    entity_import_services: tuple[JobService, EntityImportService],
+    integration_api_client: TestClient,
+) -> None:
+    """A file with invalid rows fails, and the job shows which rows and why.
+
+    The job's progress lists every invalid row with its line number and reason,
+    the failure audit event lists the first 10, the log names the first 5 rows
+    without their rejected values, and the previous catalog stays active.
+    """
+    log_records: list[str] = []
+
+    def record_log(message: str, *args: object) -> None:
+        log_records.append(message % args)
+
+    monkeypatch.setattr(tasks.logger, "error", record_log)
+    jobs, imports = entity_import_services
+    _install_runtime(monkeypatch, database_engine, jobs, imports, RecordingSource())
+    tasks.run_entity_import.run(str(_create_job(jobs)))
+    memberships_before = _memberships(session_factory)
+    bad_rows = (
+        "MGI:99\tA raw rejected symbol\tProtein\t\tSO:0001217\tNCBITaxon:9606\t\t"
+        "MGI:99\t\t\t\n"
+    ) + "".join(f"MGI:{index}\tshort\n" for index in range(100, 111))
+    _install_runtime(
+        monkeypatch,
+        database_engine,
+        jobs,
+        imports,
+        RecordingSource(text=SOURCE_TEXT + bad_rows),
+    )
+    job_id = _create_job(jobs)
+
+    tasks.run_entity_import.run(str(job_id))
+
+    response = integration_api_client.get(f"/jobs/{job_id}")
+    assert response.status_code == status.HTTP_200_OK
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error"] == "Entity import failed"
+    assert body["progress"]["failure_code"] == "row_validation"
+    details = body["progress"]["failure_details"]
+    assert details["issue_count"] == 12
+    assert [issue["line_number"] for issue in details["issues"]] == list(range(5, 17))
+    [field] = details["issues"][0]["fields"]
+    assert (field["field"], field["value"]) == (
+        "db_object_symbol",
+        "A raw rejected symbol",
+    )
+    assert details["issues"][1] == {
+        "line_number": 6,
+        "category": "field-count",
+        "message": "expected 11 fields, found 2",
+        "fields": [],
+    }
+    [audit] = _audit_events(session_factory, AuditAction.JOB_FAILED, job_id)
+    assert audit.details["failure_code"] == "row_validation"
+    audited = cast(dict[str, Any], audit.details["failure_details"])
+    assert audited["issue_count"] == 12
+    assert audited["issues"] == details["issues"][:10]
+    assert _memberships(session_factory) == memberships_before
+    logs = "\n".join(log_records)
+    assert "issue_count=12" in logs
+    assert "line 5 validation: fields db_object_symbol" in logs
+    assert "line 6 field-count: expected 11 fields, found 2" in logs
+    assert "line 10 " not in logs
+    assert "A raw rejected symbol" not in logs
 
 
 def test_entity_import_cleanup_failure_rolls_back_terminal_state_until_redelivery(

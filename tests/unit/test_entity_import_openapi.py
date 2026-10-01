@@ -91,14 +91,16 @@ def test_entity_import_openapi_documents_job_and_stable_responses(
 def test_entity_import_job_openapi_explains_terminal_diagnostics_and_warning_counts(
     client: TestClient,
 ) -> None:
-    """The job schema documents the failure code and the result warning count."""
+    """The job schema documents failure codes, failure details, and warning counts."""
     properties = client.get("/openapi.json").json()["components"]["schemas"][
         "JobResource"
     ]["properties"]
-    assert properties["progress"]["examples"] == [
-        {"phase": "failed", "failure_code": "invalid_utf8"}
-    ]
-    assert "allowlisted failure_code" in properties["progress"]["description"]
+    [example] = properties["progress"]["examples"]
+    assert example["failure_code"] == "row_validation"
+    assert example["failure_details"]["issues"][0]["line_number"] == 412
+    description = properties["progress"]["description"]
+    assert "failure_code" in description
+    assert "failure_details" in description
     assert properties["result"]["examples"] == [{"warning_count": 0, "warnings": []}]
     assert "warning_count" in properties["result"]["description"]
     assert "unchanged: true" in properties["result"]["description"]
