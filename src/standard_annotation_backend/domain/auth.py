@@ -32,9 +32,8 @@ class PermissionAction(StrEnum):
     CHANGE_SET_READ = "change_set.read"
     CHANGE_SET_PROPOSE = "change_set.propose"
     CHANGE_SET_REVIEW = "change_set.review"
-    ENTITY_IMPORT_CREATE = "entity_import.create"
     JOB_READ = "job.read"
-    ONTOLOGY_LOAD_CREATE = "ontology_load.create"
+    REFRESH_CREATE = "refresh.create"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,9 +107,7 @@ _EDIT_ACTIONS = frozenset(
         PermissionAction.CHANGE_SET_PROPOSE,
     }
 )
-_GLOBAL_ONLY_ACTIONS = frozenset(
-    {PermissionAction.ENTITY_IMPORT_CREATE, PermissionAction.ONTOLOGY_LOAD_CREATE}
-)
+_GLOBAL_ONLY_ACTIONS = frozenset({PermissionAction.REFRESH_CREATE})
 
 
 def authorize(

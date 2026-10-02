@@ -1,4 +1,4 @@
-"""Define the values used to import, publish, and validate entity catalogs.
+"""Define the values used to refresh, publish, and validate entity catalogs.
 
 An entity is the subject an annotation describes, identified by `db_object_id`.
 Each configured entity source supplies a complete catalog of the entities it
@@ -8,47 +8,12 @@ provides. These values do not depend on the file format the catalog came from.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from enum import StrEnum
 from typing import cast
 from uuid import UUID
 
 from go_standard_annotation_schema.datamodel import Entity
 
-
-class EntityImportFailureCode(StrEnum):
-    """List the codes recorded when an entity job fails.
-
-    The codes are fixed strings, so failure records and logs never contain URLs or
-    source content.
-    """
-
-    INVALID_PARAMETERS = "invalid_parameters"
-    UNKNOWN_SOURCE = "unknown_source"
-    SOURCE_ERROR = "source_error"
-    HTTP_STATUS = "http_status"
-    TIMEOUT = "timeout"
-    INVALID_GZIP = "invalid_gzip"
-    INVALID_UTF8 = "invalid_utf8"
-    HEADER = "header"
-    ROW_VALIDATION = "row_validation"
-    CANDIDATE_CONFLICT = "candidate_conflict"
-    CATALOG_COLLISION = "catalog_collision"
-
-
-@dataclass(frozen=True, slots=True)
-class EntitySource:
-    """Describe the retrieved source that supplied an entity catalog.
-
-    Attributes:
-        source_url: The URL requested for the import, before any redirects.
-        source_checksum: Lowercase SHA-256 digest of the exact downloaded bytes.
-        fetched_at: When retrieval completed.
-    """
-
-    source_url: str
-    source_checksum: str
-    fetched_at: datetime
+from standard_annotation_backend.domain.refresh import SourceProvenance
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +46,7 @@ class EntityCatalog:
         warnings: Messages about problems that did not stop parsing.
     """
 
-    source: EntitySource
+    source: SourceProvenance
     source_format: str
     source_metadata: dict[str, object]
     records: tuple[EntityRecord, ...]
@@ -94,14 +59,6 @@ class UnknownDbObjectIdError(ValueError):
     def __init__(self, db_object_id: str) -> None:
         self.db_object_id = db_object_id
         super().__init__("db_object_id is not present in the active entity catalog")
-
-
-class UnknownEntitySourceError(LookupError):
-    """Report a source key that is not in the configured entity source registry."""
-
-    def __init__(self, source_key: str) -> None:
-        self.source_key = source_key
-        super().__init__("entity source is not configured")
 
 
 class EntityCandidateConflictError(RuntimeError):
@@ -139,12 +96,14 @@ class EntityRemovalImpact:
 
 
 @dataclass(frozen=True, slots=True)
-class EntityImportResult:
+class EntityRefreshResult:
     """Describe one committed catalog replacement and its removal impacts."""
 
     snapshot_id: UUID
     source_key: str
-    source_url: str
+    source_type: str
+    source_locator: str
+    source_revision: str | None
     source_checksum: str
     source_record_count: int
     active_identifier_count: int
@@ -159,7 +118,9 @@ class EntityImportResult:
         return {
             "snapshot_id": str(self.snapshot_id),
             "source_key": self.source_key,
-            "source_url": self.source_url,
+            "source_type": self.source_type,
+            "source_locator": self.source_locator,
+            "source_revision": self.source_revision,
             "source_checksum": self.source_checksum,
             "source_record_count": self.source_record_count,
             "active_identifier_count": self.active_identifier_count,
@@ -178,12 +139,14 @@ class EntityImportResult:
         }
 
     @classmethod
-    def from_job_result(cls, value: dict[str, object]) -> EntityImportResult:
+    def from_job_result(cls, value: dict[str, object]) -> EntityRefreshResult:
         """Rebuild a result from the dict produced by `to_job_result`."""
         return cls(
             snapshot_id=UUID(cast(str, value["snapshot_id"])),
             source_key=cast(str, value["source_key"]),
-            source_url=cast(str, value["source_url"]),
+            source_type=cast(str, value["source_type"]),
+            source_locator=cast(str, value["source_locator"]),
+            source_revision=cast(str | None, value.get("source_revision")),
             source_checksum=cast(str, value["source_checksum"]),
             source_record_count=cast(int, value["source_record_count"]),
             active_identifier_count=cast(int, value["active_identifier_count"]),
@@ -204,8 +167,8 @@ class EntityImportResult:
 
 
 @dataclass(frozen=True, slots=True)
-class EntityImportUnchangedResult:
-    """Describe an import whose retrieved file matches the active catalog."""
+class EntityRefreshUnchangedResult:
+    """Describe a refresh whose retrieved file matches the active catalog."""
 
     source_key: str
     snapshot_id: UUID

@@ -1,28 +1,28 @@
 """Verify strict parsing of GPI 2.0 source documents."""
 
 from datetime import UTC, datetime
-from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
-from standard_annotation_backend.domain.entities import EntitySource
-from standard_annotation_backend.entity_sources.http import EntitySourceDocument
+from standard_annotation_backend.domain.refresh import SourceProvenance
 from standard_annotation_backend.gpi.parser import GpiParseError, parse_gpi
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "gpi"
 
 
-def _document(name: str, *, text: str | None = None) -> EntitySourceDocument:
-    """Build an `EntitySourceDocument` from a fixture file, or from `text` if given."""
-    source_text = (FIXTURES / name).read_text() if text is None else text
-    return EntitySourceDocument(
-        source_key="fixture",
-        source_url=f"fixture:{name}",
-        source_checksum=sha256(source_text.encode()).hexdigest(),
-        fetched_at=datetime(2026, 9, 29, tzinfo=UTC),
-        text=source_text,
-    )
+PROVENANCE = SourceProvenance(
+    source_type="github",
+    source_locator="github:example/entities:data/fixture.gpi",
+    source_revision="a" * 40,
+    source_checksum="b" * 64,
+    fetched_at=datetime(2026, 9, 29, tzinfo=UTC),
+)
+
+
+def _text(name: str, *, text: str | None = None) -> str:
+    """Return a fixture file's text, or `text` if given."""
+    return (FIXTURES / name).read_text() if text is None else text
 
 
 def test_parse_gpi_retains_metadata_and_validated_schema_entity() -> None:
@@ -30,14 +30,9 @@ def test_parse_gpi_retains_metadata_and_validated_schema_entity() -> None:
 
     The first record holds the validated schema entity and its line number.
     """
-    document = _document("minimal.gpi")
-    catalog = parse_gpi(document)
+    catalog = parse_gpi(_text("minimal.gpi"), PROVENANCE)
 
-    assert catalog.source == EntitySource(
-        source_url=document.source_url,
-        source_checksum=document.source_checksum,
-        fetched_at=document.fetched_at,
-    )
+    assert catalog.source == PROVENANCE
     assert catalog.source_format == "gpi-2.0"
     assert catalog.source_metadata == {
         "version": "2.0",
@@ -69,7 +64,7 @@ def test_parse_gpi_retains_metadata_and_validated_schema_entity() -> None:
 
 def test_parse_gpi_accepts_a_header_only_document() -> None:
     """A complete GPI header can represent an empty catalog."""
-    catalog = parse_gpi(_document("empty.gpi"))
+    catalog = parse_gpi(_text("empty.gpi"), PROVENANCE)
 
     assert catalog.records == ()
     assert catalog.source_metadata["generated_by"] == "TestDB"
@@ -78,7 +73,7 @@ def test_parse_gpi_accepts_a_header_only_document() -> None:
 
 def test_parse_gpi_records_physical_line_numbers_for_repeated_ids() -> None:
     """Repeated IDs remain distinct records identified by their source lines."""
-    catalog = parse_gpi(_document("repeated-id.gpi"))
+    catalog = parse_gpi(_text("repeated-id.gpi"), PROVENANCE)
 
     assert [record.line_number for record in catalog.records] == [5, 8]
     assert [record.entity.db_object_id for record in catalog.records] == [
@@ -113,7 +108,7 @@ def test_parse_gpi_translates_invalid_headers_to_a_safe_error(
     the document text.
     """
     with pytest.raises(GpiParseError) as raised:
-        parse_gpi(_document("invalid-header.gpi", text=text))
+        parse_gpi(_text("invalid-header.gpi", text=text), PROVENANCE)
 
     assert raised.value.code == "header", name
     assert text not in str(raised.value)
@@ -147,7 +142,7 @@ def test_parse_gpi_reports_every_invalid_row() -> None:
     )
 
     with pytest.raises(GpiParseError) as raised:
-        parse_gpi(_document("invalid-rows.gpi", text=text))
+        parse_gpi(_text("invalid-rows.gpi", text=text), PROVENANCE)
 
     error = raised.value
     assert error.code == "row_validation"
@@ -185,7 +180,9 @@ def test_parse_gpi_truncates_long_values_and_messages() -> None:
     symbol = "x " * 300
 
     with pytest.raises(GpiParseError) as raised:
-        parse_gpi(_document("long.gpi", text=HEADER + _row("UniProtKB:X", symbol)))
+        parse_gpi(
+            _text("long.gpi", text=HEADER + _row("UniProtKB:X", symbol)), PROVENANCE
+        )
 
     [field] = raised.value.issues[0].fields
     assert field.value == symbol[:200]
@@ -197,7 +194,7 @@ def test_parse_gpi_reports_at_most_100_rows_with_the_total() -> None:
     text = HEADER + "".join(f"UniProtKB:{index}\tshort\n" for index in range(150))
 
     with pytest.raises(GpiParseError) as raised:
-        parse_gpi(_document("many.gpi", text=text))
+        parse_gpi(_text("many.gpi", text=text), PROVENANCE)
 
     details = raised.value.details
     assert details["issue_count"] == 150
@@ -221,7 +218,7 @@ def test_parse_gpi_rejects_nul_in_every_entity_field(column: int) -> None:
     text = "\n".join([*lines[:-1], "\t".join(fields)]) + "\n"
 
     with pytest.raises(GpiParseError) as caught:
-        parse_gpi(_document("nul.gpi", text=text))
+        parse_gpi(_text("nul.gpi", text=text), PROVENANCE)
 
     assert caught.value.code == "row_validation"
     assert caught.value.details["issues"] == [
@@ -247,7 +244,7 @@ def test_parse_gpi_rejects_nul_in_source_metadata(header: str) -> None:
     else:
         text += header + "\n"
     with pytest.raises(GpiParseError) as caught:
-        parse_gpi(_document("nul.gpi", text=text))
+        parse_gpi(_text("nul.gpi", text=text), PROVENANCE)
     assert caught.value.code == "header"
     assert caught.value.message is not None
     assert "NUL" in caught.value.message

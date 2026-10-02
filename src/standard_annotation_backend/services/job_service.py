@@ -1,5 +1,6 @@
 """Manage stored job states and their audit events."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -13,15 +14,21 @@ from standard_annotation_backend.domain.auth import (
     authorize_role,
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.repositories import (
     InvalidJobTransitionError,
     JobNotFoundError,
 )
-from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.persistence.unit_of_work import (
+    SqlAlchemyUnitOfWork,
+    UnitOfWorkFactory,
+)
 from standard_annotation_backend.services.audit_service import AuditService
 
 __all__ = ["InvalidJobTransitionError", "Job", "JobNotFoundError", "JobService"]
+
+MAX_AUDITED_FAILURE_ISSUES = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +112,20 @@ class JobService:
                 raise JobNotFoundError(job_id)
             return job_from_record(record)
 
+    def find(self, job_id: UUID) -> Job:
+        """Return a job for trusted internal callers such as workers and the CLI.
+
+        Unlike `get`, this does not check a request's authorization.
+
+        Raises:
+            JobNotFoundError: If the job does not exist.
+        """
+        with self._unit_of_work_factory() as unit_of_work:
+            record = unit_of_work.jobs.get(job_id)
+            if record is None:
+                raise JobNotFoundError(job_id)
+            return job_from_record(record)
+
     def start(self, job_id: UUID) -> Job:
         """Start a queued job or return its unchanged later state."""
         with self._unit_of_work_factory() as unit_of_work:
@@ -130,23 +151,6 @@ class JobService:
                 job_id,
                 progress=progress,
                 warnings=warnings,
-                now=datetime.now(UTC),
-            )
-            result = job_from_record(mutation.record)
-            unit_of_work.commit()
-        return result
-
-    def update_parameters(
-        self,
-        job_id: UUID,
-        *,
-        parameters: dict[str, object],
-    ) -> Job:
-        """Replace parameters needed to resume a running job and commit them."""
-        with self._unit_of_work_factory() as unit_of_work:
-            mutation = unit_of_work.jobs.update_parameters(
-                job_id,
-                parameters=parameters,
                 now=datetime.now(UTC),
             )
             result = job_from_record(mutation.record)
@@ -194,3 +198,68 @@ class JobService:
             failed = job_from_record(mutation.record)
             unit_of_work.commit()
         return failed
+
+    def fail_refresh(
+        self,
+        job_id: UUID,
+        *,
+        error: str,
+        failure_code: RefreshFailureCode,
+        failure_details: dict[str, object] | None = None,
+        cleanup: Callable[[SqlAlchemyUnitOfWork], None] | None = None,
+    ) -> Job:
+        """Mark a refresh job failed and record why, in one transaction.
+
+        The failed status, `{"phase": "failed", "failure_code": ...}` progress
+        (plus `failure_details` when given), the failure audit event, and any
+        `cleanup` commit together, so none is recorded without the others. The
+        audit event keeps at most the first 10 entries of an `issues` list; the
+        job keeps all of them.
+
+        Args:
+            job_id: Job to mark failed.
+            error: Nonblank public error message.
+            failure_code: Why the job failed.
+            failure_details: JSON-compatible description of the failure.
+            cleanup: Kind-specific work, such as deleting staging rows, done in
+                the same transaction.
+
+        Raises:
+            ValueError: If `error` is blank.
+        """
+        safe_error = error.strip()
+        if not safe_error:
+            raise ValueError("job error must be nonblank")
+        progress: dict[str, object] = {
+            "phase": "failed",
+            "failure_code": failure_code.value,
+        }
+        audit_details: dict[str, object] = {"failure_code": failure_code.value}
+        if failure_details is not None:
+            progress["failure_details"] = failure_details
+            audit_details["failure_details"] = _audit_failure_details(failure_details)
+        with self._unit_of_work_factory() as unit_of_work:
+            mutation = unit_of_work.jobs.fail(
+                job_id, error=safe_error, now=datetime.now(UTC), progress=progress
+            )
+            if mutation.changed:
+                AuditService(unit_of_work.audit).record_job_lifecycle(
+                    action=AuditAction.JOB_FAILED,
+                    record=mutation.record,
+                    details=audit_details,
+                )
+            # Cleanup shares this transaction: if it raises, the failed status
+            # and audit event roll back too, and a retry records all of them.
+            if cleanup is not None:
+                cleanup(unit_of_work)
+            failed = job_from_record(mutation.record)
+            unit_of_work.commit()
+        return failed
+
+
+def _audit_failure_details(details: dict[str, object]) -> dict[str, object]:
+    """Keep the first 10 entries of an `issues` list for the audit event."""
+    issues = details.get("issues")
+    if not isinstance(issues, list):
+        return details
+    return {**details, "issues": issues[:MAX_AUDITED_FAILURE_ISSUES]}

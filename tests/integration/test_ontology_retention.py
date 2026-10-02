@@ -18,7 +18,7 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
     OntologyTerm,
 )
-from standard_annotation_backend.ontology.registry import GO_DEFINITION
+from standard_annotation_backend.ontology.definitions import GO_DEFINITION
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     JobRecord,
@@ -31,8 +31,8 @@ from standard_annotation_backend.persistence.repositories import (
     OntologySnapshotPrunedError,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.ontology_load_service import (
-    OntologyLoadService,
+from standard_annotation_backend.services.ontology_refresh_service import (
+    OntologyRefreshService,
 )
 
 JOB_ID = UUID("00000000-0000-0000-0000-000000000701")
@@ -48,13 +48,13 @@ def _stage_snapshot(
         session.add(
             JobRecord(
                 job_id=JOB_ID,
-                job_type="ontology_load",
+                job_type="ontology_refresh",
                 status="failed",
                 requested_by="test",
-                parameters={"ontology": "go"},
+                parameters={"source_key": "go"},
                 progress={},
                 warnings=[],
-                error="Ontology load failed",
+                error="Ontology refresh failed",
                 created_at=NOW,
                 updated_at=NOW,
                 completed_at=NOW,
@@ -68,7 +68,7 @@ def _stage_snapshot(
         source_locator="fixture/go.obo",
         source_revision="revision",
         source_checksum="a" * 64,
-        retrieved_at=NOW,
+        fetched_at=NOW,
     )
     snapshot = OntologySnapshot(
         document=document,
@@ -125,7 +125,7 @@ def test_pruned_snapshot_cannot_be_resumed_as_complete(
     """Restaging the same job rejects its metadata-only snapshot."""
     _, document, snapshot = _stage_snapshot(unit_of_work_factory, session_factory)
 
-    service = OntologyLoadService(unit_of_work_factory, GO_DEFINITION)
+    service = OntologyRefreshService(unit_of_work_factory, GO_DEFINITION)
 
     with pytest.raises(OntologySnapshotPrunedError):
         service.stage(job_id=JOB_ID, document=document, snapshot=snapshot)
@@ -138,13 +138,13 @@ def _job_for_status(job_id: UUID, status: str) -> JobRecord:
     elif status == "succeeded":
         values.update(started_at=NOW, completed_at=NOW, result={})
     elif status == "failed":
-        values.update(completed_at=NOW, error="Ontology load failed")
+        values.update(completed_at=NOW, error="Ontology refresh failed")
     return JobRecord(
         job_id=job_id,
-        job_type="ontology_load",
+        job_type="ontology_refresh",
         status=status,
         requested_by="test",
-        parameters={"ontology": "go"},
+        parameters={"source_key": "go"},
         progress={},
         warnings=[],
         created_at=NOW,
@@ -187,7 +187,7 @@ def _stage_history(
                 source_locator="fixture/go.obo",
                 source_revision=name,
                 source_checksum=f"{index:x}" * 64,
-                retrieved_at=NOW + timedelta(minutes=index),
+                fetched_at=NOW + timedelta(minutes=index),
             )
             snapshot = OntologySnapshot(
                 document=document,
@@ -215,10 +215,10 @@ def _stage_history(
             version_ids[name] = record.version_id
             if status == "succeeded":
                 unit_of_work.ontologies.activate(record.version_id)
-                load_result: dict[str, object] = {"source_revision": name}
-                record.load_result = load_result
+                refresh_result: dict[str, object] = {"source_revision": name}
+                record.refresh_result = refresh_result
         unit_of_work.audit.record(
-            action=AuditAction.ONTOLOGY_LOADED,
+            action=AuditAction.ONTOLOGY_REFRESHED,
             actor_id="test",
             result=AuditResult.SUCCESS,
             job_id=job_ids["old_success"],
@@ -239,7 +239,7 @@ def test_pruning_keeps_required_snapshots_and_preserves_provenance(
 ) -> None:
     """Pruning deletes eligible term and closure rows but retains provenance."""
     version_ids = _stage_history(unit_of_work_factory, session_factory)
-    service = OntologyLoadService(unit_of_work_factory, GO_DEFINITION)
+    service = OntologyRefreshService(unit_of_work_factory, GO_DEFINITION)
 
     pruned = service.prune(pruned_at=PRUNED_AT)
 
@@ -269,7 +269,7 @@ def test_pruning_keeps_required_snapshots_and_preserves_provenance(
             for record in session.scalars(select(OntologyMetadataRecord))
         }
         assert len(metadata) == 6
-        assert metadata[version_ids["old_success"]].load_result == {
+        assert metadata[version_ids["old_success"]].refresh_result == {
             "source_revision": "old_success"
         }
         assert {
@@ -312,7 +312,7 @@ def test_repeated_pruning_is_harmless_and_preserves_original_timestamp(
 ) -> None:
     """Pruning records absent rows once, and a retry preserves the original time."""
     version_ids = _stage_history(unit_of_work_factory, session_factory)
-    service = OntologyLoadService(unit_of_work_factory, GO_DEFINITION)
+    service = OntologyRefreshService(unit_of_work_factory, GO_DEFINITION)
     with session_factory() as session:
         session.execute(
             delete(OntologyClosureRecord).where(
@@ -352,7 +352,7 @@ def test_bulk_read_refreshes_cached_metadata_after_concurrent_pruning(
         assert cached is not None
         assert cached.bulk_data_pruned_at is None
 
-        OntologyLoadService(unit_of_work_factory, GO_DEFINITION).prune(
+        OntologyRefreshService(unit_of_work_factory, GO_DEFINITION).prune(
             pruned_at=PRUNED_AT
         )
 
@@ -370,7 +370,7 @@ def test_bulk_read_lock_prevents_concurrent_pruning(
 
     def prune() -> tuple[UUID, ...]:
         pruning_started.set()
-        return OntologyLoadService(unit_of_work_factory, GO_DEFINITION).prune(
+        return OntologyRefreshService(unit_of_work_factory, GO_DEFINITION).prune(
             pruned_at=PRUNED_AT
         )
 

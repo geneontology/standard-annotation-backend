@@ -11,6 +11,7 @@ import httpx2
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from source_provenance import github_provenance
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -31,8 +32,8 @@ from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFacto
 from standard_annotation_backend.services.authentication_service import (
     AuthenticationService,
 )
-from standard_annotation_backend.services.authorization_sync_service import (
-    AuthorizationSyncService,
+from standard_annotation_backend.services.authorization_refresh_service import (
+    AuthorizationRefreshService,
 )
 from standard_annotation_backend.services.token_service import (
     InvalidTokenError,
@@ -60,8 +61,7 @@ def user_assignments(unit_of_work_factory: UnitOfWorkFactory) -> dict[str, UUID]
                     (SyncAuthorization("admin", "global", None),),
                 ),
             ),
-            source_repository="test/repo",
-            source_commit_sha="a" * 40,
+            provenance=github_provenance("a" * 40, "test/repo"),
             summary={},
         )
         curator = uow.auth.get_user_by_github_login("curator")
@@ -494,8 +494,8 @@ def test_users_yaml_login_can_start_management_without_a_numeric_id(
 - accounts: {github: curator}
   authorizations: {sab: [{role: edit, scope: self, group: MGI}]}
 """
-    AuthorizationSyncService(unit_of_work_factory).synchronize(
-        source, "test/repo", "a" * 40
+    AuthorizationRefreshService(unit_of_work_factory).refresh(
+        source, github_provenance("a" * 40, "test/repo")
     )
     _login(integration_api_client)
     assert len(integration_api_client.get("/tokens/contexts").json()["items"]) == 1
@@ -519,12 +519,12 @@ def test_changed_login_gets_new_identity_and_cannot_inherit_old_tokens(
     session_factory: sessionmaker[Session],
 ) -> None:
     """A renamed login requires a new grant and cannot inherit the old identity."""
-    service = AuthorizationSyncService(unit_of_work_factory)
+    service = AuthorizationRefreshService(unit_of_work_factory)
     source = """
 - accounts: {github: curator}
   authorizations: {sab: [{role: edit, scope: self, group: MGI}]}
 """
-    service.synchronize(source, "test/repo", "a" * 40)
+    service.refresh(source, github_provenance("a" * 40, "test/repo"))
     responses = list(github_http_responses)
     _login(integration_api_client)
     context = integration_api_client.get("/tokens/contexts").json()["items"][0]
@@ -534,10 +534,9 @@ def test_changed_login_gets_new_identity_and_cannot_inherit_old_tokens(
         assert original is not None
         original_id = original.user_id
 
-    service.synchronize(
+    service.refresh(
         source.replace("github: curator", "github: renamed-curator"),
-        "test/repo",
-        "b" * 40,
+        github_provenance("b" * 40, "test/repo"),
     )
     integration_api_client.cookies.clear()
     github_http_responses[:] = responses
@@ -756,8 +755,7 @@ def test_removed_assignment_disappears_from_choices_and_cannot_issue_new_token(
     with unit_of_work_factory() as uow:
         uow.auth.replace_authorizations(
             users=(SyncUser("curator", "Curator"),),
-            source_repository="test/repo",
-            source_commit_sha="b" * 40,
+            provenance=github_provenance("b" * 40, "test/repo"),
             summary={},
         )
         uow.commit()

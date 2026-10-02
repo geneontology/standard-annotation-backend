@@ -45,7 +45,7 @@ def _snapshot(terms: dict[str, OntologyTerm]) -> OntologySnapshot:
         source_locator="fixture",
         source_revision="revision",
         source_checksum="a" * 64,
-        retrieved_at=datetime(2026, 9, 28, tzinfo=UTC),
+        fetched_at=datetime(2026, 9, 28, tzinfo=UTC),
     )
     return OntologySnapshot(document, "2026-09-28", ("is_a",), terms, ())
 

@@ -12,9 +12,8 @@ from pydantic import ValidationError
 from standard_annotation_backend.domain.entities import (
     EntityCatalog,
     EntityRecord,
-    EntitySource,
 )
-from standard_annotation_backend.entity_sources.http import EntitySourceDocument
+from standard_annotation_backend.domain.refresh import SourceProvenance
 
 GPI_SOURCE_FORMAT = "gpi-2.0"
 MAX_REPORTED_ROW_ISSUES = 100
@@ -119,7 +118,7 @@ class GpiParseError(ValueError):
 
     @property
     def details(self) -> dict[str, object]:
-        """Return the failure description recorded on a failed import job.
+        """Return the failure description recorded on a failed refresh job.
 
         A header failure returns `{"message": ...}`. A row failure returns the
         total number of invalid rows and the first 100 of them.
@@ -134,7 +133,7 @@ class GpiParseError(ValueError):
         }
 
 
-def parse_gpi(document: EntitySourceDocument) -> EntityCatalog:
+def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
     """Parse a complete GPI 2.0 document into an entity catalog.
 
     The schema package's reader validates the header, including its 2.0 version,
@@ -147,10 +146,12 @@ def parse_gpi(document: EntitySourceDocument) -> EntityCatalog:
     document.
 
     Args:
-        document: Retrieved source text and the details that identify it.
+        text: Decoded GPI text.
+        source: Provenance of the fetched document, stored with the catalog.
 
     Returns:
-        The validated entity records, the GPI header, and the source details.
+        An `EntityCatalog` holding the validated records, the GPI header as
+        source metadata, and `source`.
 
     Raises:
         GpiParseError: If the header or any data row is invalid. Lines containing
@@ -158,7 +159,7 @@ def parse_gpi(document: EntitySourceDocument) -> EntityCatalog:
             describes each problem, including the rejected field values.
     """
     nul_lines: set[int] = set()
-    for line_number, line in enumerate(StringIO(document.text), start=1):
+    for line_number, line in enumerate(StringIO(text), start=1):
         if "\x00" not in line:
             continue
         if line.startswith("!"):
@@ -169,7 +170,7 @@ def parse_gpi(document: EntitySourceDocument) -> EntityCatalog:
     reader_issues: list[RowIssue] = []
     try:
         with GpiReader(
-            StringIO(document.text), errors="skip", on_error=reader_issues.append
+            StringIO(text), errors="skip", on_error=reader_issues.append
         ) as reader:
             reader_metadata = reader.metadata
             metadata = GpiMetadata(
@@ -202,11 +203,7 @@ def parse_gpi(document: EntitySourceDocument) -> EntityCatalog:
         )
 
     return EntityCatalog(
-        source=EntitySource(
-            source_url=document.source_url,
-            source_checksum=document.source_checksum,
-            fetched_at=document.fetched_at,
-        ),
+        source=source,
         source_format=GPI_SOURCE_FORMAT,
         source_metadata=metadata.to_source_metadata(),
         records=records,

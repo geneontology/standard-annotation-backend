@@ -2,14 +2,16 @@
 
 import traceback
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from celery import Task
 from celery.exceptions import Retry
 
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.workers import tasks
 
 CANARY = "raw-database-credential-diagnostic"
@@ -47,16 +49,14 @@ def _assert_safe_retry(caught: pytest.ExceptionInfo[Retry], logs: str) -> None:
 @pytest.mark.parametrize(
     ("task", "arguments"),
     [
-        (tasks.run_authorization_sync, (str(uuid4()),)),
-        (tasks.run_entity_import, (str(uuid4()),)),
-        (tasks.run_entity_catalog_retirement, (str(uuid4()),)),
-        (tasks.schedule_entity_imports, ()),
+        (tasks.run_refresh, (str(uuid4()),)),
+        (tasks.run_entity_retirement, (str(uuid4()),)),
+        (tasks.schedule_refresh, ("entity",)),
     ],
     ids=[
-        "authorization_sync",
-        "entity_import",
-        "entity_catalog_retirement",
-        "entity_import_schedule",
+        "refresh",
+        "entity_retirement",
+        "refresh_schedule",
     ],
 )
 def test_runtime_startup_failure_retries_without_diagnostic_chain(
@@ -68,7 +68,7 @@ def test_runtime_startup_failure_retries_without_diagnostic_chain(
     """Database setup failure requests a retry without its error details."""
 
     @contextmanager
-    def unavailable_runtime():
+    def unavailable_runtime(**_kwargs: object):
         raise RuntimeError(CANARY)
         yield
 
@@ -82,49 +82,88 @@ def test_runtime_startup_failure_retries_without_diagnostic_chain(
     _assert_safe_retry(caught, caplog.text)
 
 
-def test_failed_failure_persistence_retries_without_diagnostic_chain(
+@pytest.mark.parametrize(
+    ("task", "method"),
+    [(tasks.run_refresh, "run"), (tasks.run_entity_retirement, "run_retirement")],
+    ids=["refresh", "entity_retirement"],
+)
+def test_runner_failure_retries_without_diagnostic_chain(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    task: Task,
+    method: str,
 ) -> None:
-    """A retry exposes neither the job error nor the database error details."""
-    job_id = uuid4()
+    """An unexpected runner error requests a retry without its error details."""
 
-    class Jobs:
-        def start(self, _job_id: object) -> object:
-            return SimpleNamespace(
-                job_id=job_id,
-                job_type=JobType.AUTHORIZATION_SYNC,
-                status=JobStatus.RUNNING,
-                requested_by="scheduler",
-                parameters={
-                    "source_repository": "geneontology/go-site",
-                    "source_ref": "master",
-                    "source_path": "metadata/users.yaml",
-                },
-            )
-
-        def fail(self, _job_id: object, *, error: str) -> None:
-            raise RuntimeError(CANARY)
+    def fail(_job_id: UUID) -> None:
+        raise RuntimeError(CANARY)
 
     @contextmanager
-    def runtime():
-        yield SimpleNamespace(engine=object(), jobs=Jobs())
-
-    @contextmanager
-    def lock(_engine: object, _job_id: object):
-        yield True
-
-    def source_failure(_self: object) -> object:
-        raise RuntimeError("untrusted-upstream-response")
+    def runtime(**_kwargs: object):
+        yield SimpleNamespace(runner=SimpleNamespace(**{method: fail}))
 
     monkeypatch.setattr(tasks, "worker_runtime", runtime)
-    monkeypatch.setattr(tasks, "job_execution_lock", lock)
-    monkeypatch.setattr(tasks.AuthorizationSourceClient, "fetch", source_failure)
-    _safe_retry(monkeypatch, tasks.run_authorization_sync)
+    _safe_retry(monkeypatch, task)
     _enable_task_logs(monkeypatch)
 
     with pytest.raises(Retry) as caught:
-        tasks.run_authorization_sync.run(str(job_id))
+        task.run(str(uuid4()))
 
     _assert_safe_retry(caught, caplog.text)
-    assert "untrusted-upstream-response" not in caplog.text
+
+
+def _job(job_id: UUID, job_type: JobType) -> Job:
+    now = datetime(2026, 10, 1, tzinfo=UTC)
+    return Job(
+        job_id=job_id,
+        job_type=job_type,
+        status=JobStatus.QUEUED,
+        requested_by="scheduler",
+        parameters={"source_key": "go"},
+        progress={},
+        warnings=(),
+        result=None,
+        artifact_uri=None,
+        error=None,
+        created_at=now,
+        updated_at=now,
+        started_at=None,
+        completed_at=None,
+    )
+
+
+def test_dispatcher_routes_retirement_and_refresh_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retirement jobs go to the retirement task; every other job to `sab.refresh.run`."""
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        tasks.run_refresh, "delay", lambda job_id: sent.append(("refresh", job_id))
+    )
+    monkeypatch.setattr(
+        tasks.run_entity_retirement,
+        "delay",
+        lambda job_id: sent.append(("retirement", job_id)),
+    )
+
+    tasks.dispatch_refresh_job(_job(UUID(int=1), JobType.ONTOLOGY_REFRESH))
+    tasks.dispatch_refresh_job(_job(UUID(int=2), JobType.ENTITY_RETIREMENT))
+
+    assert sent == [("refresh", str(UUID(int=1))), ("retirement", str(UUID(int=2)))]
+
+
+def test_schedule_ignores_unknown_kind_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unknown kind in a Beat entry is logged once and not retried forever."""
+
+    def retry(**_kwargs: object) -> None:
+        pytest.fail("an unknown kind must not be retried")
+
+    monkeypatch.setattr(tasks.schedule_refresh, "retry", retry)
+    _enable_task_logs(monkeypatch)
+
+    tasks.schedule_refresh.run("bogus")
+
+    assert "unknown kind" in caplog.text

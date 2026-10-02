@@ -15,6 +15,7 @@ from standard_annotation_backend.domain.auth import (
     PermissionDeniedError,
     ResourceOwnership,
     authorize,
+    authorize_role,
     derive_creation_group,
 )
 
@@ -82,6 +83,21 @@ def test_role_and_scope_matrix_has_literal_permission_outcomes(
     else:
         with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
             authorize(context, PermissionAction(action), MATCHING_RESOURCE)
+
+
+@pytest.mark.parametrize("role", list(AuthorizationRole))
+@pytest.mark.parametrize("scope", list(AuthorizationScope))
+def test_only_global_admins_may_start_refreshes(
+    role: AuthorizationRole, scope: AuthorizationScope
+) -> None:
+    """Only the admin role with global scope may create refresh jobs."""
+    context = _context(role, scope)
+
+    if role is AuthorizationRole.ADMIN and scope is AuthorizationScope.GLOBAL:
+        authorize_role(context, PermissionAction.REFRESH_CREATE)
+    else:
+        with pytest.raises(PermissionDeniedError):
+            authorize_role(context, PermissionAction.REFRESH_CREATE)
 
 
 @pytest.mark.parametrize(

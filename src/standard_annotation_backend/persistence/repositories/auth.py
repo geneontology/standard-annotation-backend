@@ -14,14 +14,15 @@ from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
 )
+from standard_annotation_backend.domain.refresh import SourceProvenance
 from standard_annotation_backend.domain.tokens import TokenMetadata
 from standard_annotation_backend.persistence.locks import (
-    acquire_authorization_sync_lock,
+    acquire_authorization_refresh_lock,
 )
 from standard_annotation_backend.persistence.models import (
     ApiTokenRecord,
     AuthorizationAssignmentRecord,
-    AuthorizationSyncRecord,
+    AuthorizationRefreshRecord,
     SabGroupRecord,
     SabUserRecord,
     TokenManagementSessionRecord,
@@ -89,10 +90,27 @@ class SyncUser:
 
 @dataclass(frozen=True, slots=True)
 class AuthorizationReplacement:
-    """Pair a sync record with whether the current call created it."""
+    """Pair a refresh record with whether the current call created it."""
 
-    record: AuthorizationSyncRecord
+    record: AuthorizationRefreshRecord
     applied: bool
+
+
+def same_refresh_source(
+    record: AuthorizationRefreshRecord, provenance: SourceProvenance
+) -> bool:
+    """Return whether a stored refresh came from the same source document."""
+    return (
+        record.source_type,
+        record.source_locator,
+        record.source_revision,
+        record.source_checksum,
+    ) == (
+        provenance.source_type,
+        provenance.source_locator,
+        provenance.source_revision,
+        provenance.source_checksum,
+    )
 
 
 class AuthRepository:
@@ -109,42 +127,38 @@ class AuthRepository:
         self,
         *,
         users: Sequence[SyncUser],
-        source_repository: str,
-        source_commit_sha: str,
+        provenance: SourceProvenance,
         summary: dict[str, object],
     ) -> AuthorizationReplacement:
         """Replace active grants atomically and retain removed grants as history.
 
-        A transaction-scoped advisory lock ensures that only one synchronization
-        can occur at a time. If a second is started, it waits for the first to commit or
-        roll back before proceeding.
+        A transaction-scoped advisory lock lets only one refresh run at a time; a
+        second one waits for the first to commit or roll back. Under that lock, if
+        the most recent refresh came from the same source document (same type,
+        locator, revision, and checksum), nothing changes and that record is
+        returned with `applied=False`. Concurrent or redelivered refreshes of one
+        document therefore apply it once.
 
         Unchanged active assignments retain their IDs. Previously deactivated
         assignments are never reactivated, so regranting cannot revive old tokens.
         The caller validates source data before entering the transaction and owns
-        the commit, including any audit event for this synchronization.
+        the commit, including any audit event for this refresh.
 
         GitHub logins are the identity keys supplied by the source document.
         Changing a login creates a new local user and deactivates the old one.
 
         Args:
             users: Complete set of validated GitHub users and active grants.
-            source_repository: Repository from which the source document was read.
-            source_commit_sha: Immutable commit containing the source document.
-            summary: Credential-free counts to retain with the synchronization.
+            provenance: Identifies the exact source document that was fetched.
+            summary: Credential-free counts to retain with the refresh.
 
         Returns:
-            Stored synchronization record and whether this call applied it.
+            Stored refresh record and whether this call applied it.
         """
-        acquire_authorization_sync_lock(self.session)
-        existing = self.session.scalar(
-            select(AuthorizationSyncRecord).where(
-                AuthorizationSyncRecord.source_repository == source_repository,
-                AuthorizationSyncRecord.source_commit_sha == source_commit_sha,
-            )
-        )
-        if existing is not None:
-            return AuthorizationReplacement(existing, False)
+        acquire_authorization_refresh_lock(self.session)
+        latest = self.latest_refresh()
+        if latest is not None and same_refresh_source(latest, provenance):
+            return AuthorizationReplacement(latest, False)
 
         current_users = {
             user.github_login.lower(): user
@@ -204,14 +218,33 @@ class AuthRepository:
         for key, assignment in active.items():
             if key not in retained:
                 assignment.is_active = False
-        sync = AuthorizationSyncRecord(
-            source_repository=source_repository,
-            source_commit_sha=source_commit_sha,
+        record = AuthorizationRefreshRecord(
+            source_type=provenance.source_type,
+            source_locator=provenance.source_locator,
+            source_revision=provenance.source_revision,
+            source_checksum=provenance.source_checksum,
+            fetched_at=provenance.fetched_at,
+            # `now()` is the transaction's start time, which can precede another
+            # refresh that took the lock first. The clock at insert time follows
+            # the order in which refreshes were applied, because the lock is held
+            # from here until commit.
+            refreshed_at=func.clock_timestamp(),
             summary=summary,
         )
-        self.session.add(sync)
+        self.session.add(record)
         self.session.flush()
-        return AuthorizationReplacement(sync, True)
+        return AuthorizationReplacement(record, True)
+
+    def latest_refresh(self) -> AuthorizationRefreshRecord | None:
+        """Return the most recent applied refresh, which describes current state."""
+        return self.session.scalar(
+            select(AuthorizationRefreshRecord)
+            .order_by(
+                AuthorizationRefreshRecord.refreshed_at.desc(),
+                AuthorizationRefreshRecord.refresh_id.desc(),
+            )
+            .limit(1)
+        )
 
     def get_user_by_github_login(self, github_login: str) -> SabUserRecord | None:
         """Find an active user using GitHub's case-insensitive login.

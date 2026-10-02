@@ -1,6 +1,7 @@
 """Verify validation and defaults for process configuration."""
 
 import os
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -8,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from standard_annotation_backend.config import Settings
-from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.domain.refresh import RefreshKindName
 
 
 def _settings(**overrides: object) -> Settings:
@@ -24,116 +25,63 @@ def _settings(**overrides: object) -> Settings:
         return Settings(_env_file=None, **values)
 
 
-def test_authorization_source_defaults_are_safe_go_site_locations() -> None:
-    """A default deployment resolves the established go-site users document."""
+def test_refresh_schedules_default_to_the_documented_times() -> None:
+    """Authorization refreshes daily at 00:00, ontologies Mon/Wed/Fri 02:00, entities 03:00."""
     settings = _settings()
 
-    assert settings.authorization_source_repository == "geneontology/go-site"
-    assert settings.authorization_source_ref == "master"
-    assert settings.authorization_source_path == "metadata/users.yaml"
-    assert settings.authorization_sync_cron == "0 0 * * *"
-
-
-def test_ontology_source_defaults_allowlist_go_and_a_three_day_schedule() -> None:
-    """Default ontology loading targets the approved GO source on separate days."""
-    settings = _settings()
-
-    assert set(settings.ontology_sources) == {OntologyKey.GO}
-    source = settings.ontology_sources[OntologyKey.GO]
-    assert source.source_type == "github"
-    assert source.repository == "geneontology/go-ontology"
-    assert source.ref == "master"
-    assert source.path == "src/ontology/go-edit.obo"
-    assert settings.ontology_load_cron == "0 2 * * 1,3,5"
-
-
-def test_nested_environment_configures_the_go_ontology_source(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Operators can configure one ontology without encoding the registry as JSON."""
-    monkeypatch.setenv("SAB_DATABASE_URL", "postgresql://database/sab")
-    monkeypatch.setenv("SAB_REDIS_URL", "redis://redis/0")
-    monkeypatch.setenv("SAB_APPLICATION_SECRET", "test-secret")
-    monkeypatch.setenv("SAB_ENVIRONMENT", "testing")
-    monkeypatch.setenv("SAB_LOG_FORMAT", "console")
-    monkeypatch.setenv("SAB_ONTOLOGY_SOURCES__GO__SOURCE_TYPE", "github")
-    monkeypatch.setenv("SAB_ONTOLOGY_SOURCES__GO__REPOSITORY", "example/ontology")
-    monkeypatch.setenv("SAB_ONTOLOGY_SOURCES__GO__REF", "release")
-    monkeypatch.setenv("SAB_ONTOLOGY_SOURCES__GO__PATH", "ontology/go.obo")
-
-    settings = Settings(_env_file=None)
-
-    source = settings.ontology_sources[OntologyKey.GO]
-    assert source.source_type == "github"
-    assert source.repository == "example/ontology"
-    assert source.ref == "release"
-    assert source.path == "ontology/go.obo"
-
-
-@pytest.mark.parametrize("value", ["", "* * *", "60 * * * *"])
-def test_authorization_sync_cron_must_be_valid(value: str) -> None:
-    """Celery Beat cannot start with a malformed synchronization schedule."""
-    with pytest.raises(ValidationError):
-        _settings(authorization_sync_cron=value)
-
-
-@pytest.mark.parametrize("value", ["", "* * *", "60 * * * *"])
-def test_ontology_load_cron_must_be_valid(value: str) -> None:
-    """Celery Beat cannot start with a malformed ontology schedule."""
-    with pytest.raises(ValidationError):
-        _settings(ontology_load_cron=value)
-
-
-def test_ontology_sources_require_go_configuration() -> None:
-    """Startup rejects a registry that cannot serve the public GO key."""
-    with pytest.raises(ValidationError, match="must configure the go ontology"):
-        _settings(ontology_sources={})
+    assert settings.authorization_refresh_cron == "0 0 * * *"
+    assert settings.ontology_refresh_cron == "0 2 * * 1,3,5"
+    assert settings.entity_refresh_cron == "0 3 * * *"
 
 
 @pytest.mark.parametrize(
-    "source",
-    [
-        {"source_type": "url", "url": "https://example.org/go.obo"},
-        {
-            "source_type": "github",
-            "repository": "geneontology/go-ontology",
-            "ref": "master",
-            "path": "../go-edit.obo",
-        },
-        {
-            "source_type": "github",
-            "repository": "geneontology/go-ontology",
-            "ref": "master",
-            "path": "src/ontology/go-edit.obo",
-            "unexpected": True,
-        },
-    ],
+    "setting",
+    ["authorization_refresh_cron", "ontology_refresh_cron", "entity_refresh_cron"],
 )
-def test_ontology_sources_reject_unimplemented_or_unsafe_configuration(
-    source: dict[str, object],
-) -> None:
-    """SAB rejects incomplete or unsupported GitHub source configuration."""
+@pytest.mark.parametrize("value", ["", "* * *", "60 * * * *"])
+def test_refresh_schedules_must_be_valid_cron(setting: str, value: str) -> None:
+    """Celery Beat cannot start with a malformed refresh schedule."""
     with pytest.raises(ValidationError):
-        _settings(ontology_sources={"go": source})
+        _settings(**{setting: value})
+
+
+def test_settings_expose_the_shipped_sources_file() -> None:
+    """The default sources file is loaded and exposed through `sources`."""
+    settings = _settings()
+
+    assert settings.sources_file == Path("config/sources.yaml")
+    assert settings.sources.keys(RefreshKindName.ONTOLOGY) == ("go",)
+    assert settings.source_connect_timeout_seconds == 10
+    assert settings.source_read_timeout_seconds == 60
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    "text",
     [
-        ("authorization_source_repository", "go-site"),
-        ("authorization_source_repository", "owner/repo/extra"),
-        ("authorization_source_repository", "owner /repo"),
-        ("authorization_source_path", "/metadata/users.yaml"),
-        ("authorization_source_path", "../users.yaml"),
-        ("authorization_source_path", "metadata/../users.yaml"),
-        ("authorization_source_path", "metadata//users.yaml"),
-        ("authorization_source_path", "metadata/users.yaml?raw=true"),
+        "authorization: {type: ftp, url: 'ftp://example.org/u.yaml'}\n",
+        "authorization: {type: https, url: 'https://e.org/u'}\nontologies: {}\n",
+        "",
     ],
 )
-def test_authorization_source_rejects_invalid_repository_and_path_shapes(
-    field: str,
-    value: str,
+def test_invalid_sources_file_stops_settings_construction(
+    tmp_path: Path, text: str
 ) -> None:
-    """Source locations cannot escape or alter the intended GitHub API path."""
+    """An invalid sources file stops every process at startup."""
+    path = tmp_path / "sources.yaml"
+    path.write_text(text, encoding="utf-8")
+
     with pytest.raises(ValidationError):
-        _settings(**{field: value})
+        _settings(sources_file=path)
+
+
+def test_missing_sources_file_stops_settings_construction(tmp_path: Path) -> None:
+    """A missing sources file stops startup."""
+    with pytest.raises(ValidationError):
+        _settings(sources_file=tmp_path / "missing.yaml")
+
+
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+def test_source_timeouts_must_be_positive_and_finite(value: float) -> None:
+    """Timeouts must be usable by the HTTP client."""
+    with pytest.raises(ValidationError):
+        _settings(source_read_timeout_seconds=value)

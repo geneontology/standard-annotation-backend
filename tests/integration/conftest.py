@@ -51,7 +51,7 @@ def seed_active_subjects(
 ) -> Callable[..., None]:
     """Return a helper that makes the given identifiers active in the entity catalog.
 
-    The helper writes catalog rows directly, so it records no import audit events.
+    The helper writes catalog rows directly, so it records no refresh audit events.
     """
 
     def seed(*identifiers: str) -> None:
@@ -62,7 +62,7 @@ def seed_active_subjects(
             session.add(
                 JobRecord(
                     job_id=job_id,
-                    job_type="entity_import",
+                    job_type="entity_refresh",
                     status="succeeded",
                     requested_by="test-supplier",
                     parameters={"source_key": source_key},
@@ -81,7 +81,8 @@ def seed_active_subjects(
                     snapshot_id=snapshot_id,
                     job_id=job_id,
                     source_key=source_key,
-                    source_url="https://example.org/test.gpi",
+                    source_type="https",
+                    source_locator="https://example.org/test.gpi",
                     source_checksum="a" * 64,
                     source_format="gpi-2.0",
                     source_metadata={},
@@ -126,7 +127,7 @@ APPLICATION_TABLES = (
     "api_token",
     "token_management_session",
     "authorization_assignment",
-    "authorization_sync",
+    "authorization_refresh",
     "sab_user",
     "sab_group",
     "change_set",
@@ -192,7 +193,18 @@ def _create_test_database_if_missing(database_url: URL) -> None:
 
 
 @pytest.fixture(scope="session")
-def database_engine() -> Iterator[Engine]:
+def alembic_config() -> Config:
+    """Return an Alembic configuration that targets the disposable test database."""
+    database_url = _test_database_url()
+    project_root = Path(__file__).resolve().parents[2]
+    config = Config(str(project_root / "alembic.ini"))
+    rendered_url = database_url.render_as_string(False)
+    config.set_main_option("sqlalchemy.url", rendered_url.replace("%", "%%"))
+    return config
+
+
+@pytest.fixture(scope="session")
+def database_engine(alembic_config: Config) -> Iterator[Engine]:
     """Provide an engine connected to a freshly migrated test database.
 
     Yields:
@@ -200,15 +212,10 @@ def database_engine() -> Iterator[Engine]:
     """
     database_url = _test_database_url()
     _create_test_database_if_missing(database_url)
-
-    project_root = Path(__file__).resolve().parents[2]
-    alembic_config = Config(str(project_root / "alembic.ini"))
-    rendered_url = database_url.render_as_string(False)
-    alembic_config.set_main_option("sqlalchemy.url", rendered_url.replace("%", "%%"))
     command.downgrade(alembic_config, "base")
     command.upgrade(alembic_config, "head")
 
-    engine = create_database_engine(rendered_url)
+    engine = create_database_engine(database_url.render_as_string(False))
     try:
         yield engine
     finally:

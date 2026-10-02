@@ -12,8 +12,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER, REVIEWER
-from test_entity_import_concurrency import TIMEOUT, wait_for_lock
-from test_entity_import_service import active_ids, stage
+from test_entity_refresh_concurrency import TIMEOUT, wait_for_lock
+from test_entity_refresh_service import active_ids, stage
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
@@ -29,8 +29,8 @@ from standard_annotation_backend.persistence.repositories.entities import (
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_service import AnnotationService
 from standard_annotation_backend.services.change_set_service import ChangeSetService
-from standard_annotation_backend.services.entity_import_service import (
-    EntityImportService,
+from standard_annotation_backend.services.entity_refresh_service import (
+    EntityRefreshService,
 )
 
 UNKNOWN_ID = "UniProtKB:P99999"
@@ -85,7 +85,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
     accepted.
     """
     client = integration_api_client
-    imports = EntityImportService(unit_of_work_factory)
+    imports = EntityRefreshService(unit_of_work_factory)
     original = stage(imports, session_factory, validated_annotation.db_object_id)
     imports.publish(job_id=original, actor_id="supplier")
     payload = validated_annotation.model_dump(mode="json")
@@ -172,7 +172,7 @@ def test_deletion_succeeds_after_subject_removal(
 
     The deleted annotation keeps its stored data and gains a new version.
     """
-    imports = EntityImportService(unit_of_work_factory)
+    imports = EntityRefreshService(unit_of_work_factory)
     original = stage(imports, session_factory, validated_annotation.db_object_id)
     imports.publish(job_id=original, actor_id="supplier")
     annotations = AnnotationService(unit_of_work_factory)
@@ -214,7 +214,7 @@ def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
     A staged but unpublished identifier and a differently cased identifier are
     rejected, and rejected attempts write nothing.
     """
-    imports = EntityImportService(unit_of_work_factory)
+    imports = EntityRefreshService(unit_of_work_factory)
     job_id = stage(imports, session_factory, validated_annotation.db_object_id)
     annotations = AnnotationService(unit_of_work_factory)
     payload = validated_annotation.model_dump(mode="json")
@@ -254,7 +254,7 @@ def test_annotation_write_and_catalog_removal_are_serialized(
     The replacement removes the subject only after the create commits, and later
     updates to that annotation are rejected.
     """
-    imports = EntityImportService(unit_of_work_factory)
+    imports = EntityRefreshService(unit_of_work_factory)
     original = stage(
         imports, session_factory, validated_annotation.db_object_id, "MGI:old"
     )

@@ -1,0 +1,33 @@
+# Reference data sources that SAB refreshes.
+#
+# Every entry is a source with a `type`:
+#
+#   github: `repository` (owner/name), `ref` (branch, tag, or commit), and a
+#           relative `path`. Each refresh resolves `ref` to a commit and records it.
+#   https:  `url`, which must use https.
+#
+# `authorization` is the single go-site users.yaml source (source key `go-site`).
+# `ontologies` is keyed by ontology; `go` is required.
+# `entities` is keyed by a stable source key: lowercase letters, digits, `_`, or
+# `-`, starting with a letter or digit. Keys are stored with published catalogs, so
+# renaming a key retires the old catalog and publishes a new one. Removing an
+# entity source retires its catalog on the next refresh of all entity sources.
+# Entity entries may set `format: gpi`; GPI 2.0 is currently the only format.
+authorization:
+  type: github
+  repository: geneontology/go-site
+  ref: master
+  path: metadata/users.yaml
+ontologies:
+  go:
+    type: github
+    repository: geneontology/go-ontology
+    ref: master
+    path: src/ontology/go-edit.obo
+entities:
+  caeel:
+    type: https
+    url: https://current.geneontology.org/annotations/gpi/CAEEL-mod.gpi.gz
+  mouse:
+    type: https
+    url: https://current.geneontology.org/annotations/gpi/MOUSE-mod.gpi.gz

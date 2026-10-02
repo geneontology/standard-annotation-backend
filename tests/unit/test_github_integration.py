@@ -53,26 +53,6 @@ def test_resolve_commit_applies_api_policy_and_normalizes_sha() -> None:
     }
 
 
-def test_fetch_repository_content_uses_exact_commit_and_raw_media_type() -> None:
-    """Contents API retrieval is pinned to a normalized immutable revision."""
-    github, requests = _client([httpx2.Response(200, content=b"document")])
-
-    content = github.fetch_repository_content(
-        "geneontology/go-site",
-        "metadata/users.yaml",
-        SHA.upper(),
-    )
-
-    assert content == b"document"
-    assert len(requests) == 1
-    assert str(requests[0].url).split("?")[0] == (
-        "https://api.github.com/repos/geneontology/go-site/contents/metadata/users.yaml"
-    )
-    assert requests[0].url.params["ref"] == SHA
-    assert requests[0].headers["Accept"] == "application/vnd.github.raw+json"
-    assert requests[0].headers["X-GitHub-Api-Version"] == "2022-11-28"
-
-
 def test_fetch_raw_content_uses_exact_commit() -> None:
     """Raw retrieval never addresses content through a mutable ref."""
     github, requests = _client([httpx2.Response(200, content=b"ontology")])

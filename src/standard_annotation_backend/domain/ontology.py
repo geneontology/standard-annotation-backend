@@ -36,9 +36,9 @@ class OntologyDocument:
     content: bytes
     source_type: str
     source_locator: str
-    source_revision: str
+    source_revision: str | None
     source_checksum: str
-    retrieved_at: datetime
+    fetched_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +86,7 @@ class OntologyParseError(ValueError):
 
 
 @dataclass(frozen=True, slots=True, order=True)
-class OntologyLoadWarning:
+class OntologyRefreshWarning:
     """Describe a nonfatal condition found in loaded ontology data."""
 
     code: str
@@ -94,12 +94,12 @@ class OntologyLoadWarning:
     referenced_term_id: str
 
 
-def ontology_load_warnings(
+def ontology_refresh_warnings(
     terms: Mapping[str, OntologyTerm],
-) -> tuple[OntologyLoadWarning, ...]:
+) -> tuple[OntologyRefreshWarning, ...]:
     """Return warnings for advisory references to terms outside the snapshot."""
     return tuple(
-        OntologyLoadWarning(
+        OntologyRefreshWarning(
             code="undefined_consider_target",
             term_id=term.term_id,
             referenced_term_id=target,
@@ -150,18 +150,18 @@ class OntologyVersion:
     ontology_key: OntologyKey
     source_type: str
     source_locator: str
-    source_revision: str
+    source_revision: str | None
     source_checksum: str
     document_version: str | None
     loaded_predicates: tuple[str, ...]
-    loaded_at: datetime
+    fetched_at: datetime
     term_count: int
     closure_count: int
     active: bool
 
 
 @dataclass(frozen=True, slots=True)
-class OntologyLoadResult:
+class OntologyRefreshResult:
     """Summarize ontology activation, warnings, and annotation updates."""
 
     applied: bool
@@ -171,38 +171,12 @@ class OntologyLoadResult:
     annotation_skip_count: int
     findings: tuple[OntologyFinding, ...]
     document: OntologyDocument | None = None
-    ontology_warnings: tuple[OntologyLoadWarning, ...] = ()
+    ontology_warnings: tuple[OntologyRefreshWarning, ...] = ()
 
     @classmethod
-    def unchanged(cls, document: OntologyDocument) -> OntologyLoadResult:
-        """Return a load result for a document matching the active snapshot."""
+    def unchanged(cls, document: OntologyDocument) -> OntologyRefreshResult:
+        """Return a refresh result for a document matching the active snapshot."""
         return cls(False, None, 0, 0, 0, (), document)
-
-    @property
-    def progress(self) -> dict[str, object]:
-        """Return the completed job counts stored for recovery and inspection."""
-        return {
-            "phase": "completed",
-            "annotation_scan_count": self.annotation_scan_count,
-            "annotation_update_count": self.annotation_update_count,
-            "annotation_skip_count": self.annotation_skip_count,
-            "finding_count": len(self.findings),
-            "ontology_warning_count": len(self.ontology_warnings),
-        }
-
-    @property
-    def warnings(self) -> tuple[str, ...]:
-        """Return concise summaries of ontology warnings and annotation findings."""
-        warnings: list[str] = []
-        if self.ontology_warnings:
-            count = len(self.ontology_warnings)
-            noun = "warning" if count == 1 else "warnings"
-            warnings.append(f"Ontology load completed with {count} ontology {noun}")
-        if self.findings:
-            warnings.append(
-                f"Ontology load completed with {len(self.findings)} findings"
-            )
-        return tuple(warnings)
 
     def to_job_result(self) -> dict[str, object]:
         """Return the complete successful outcome in job-storage format."""
@@ -266,7 +240,7 @@ class OntologyLoadResult:
         }
 
 
-def _ontology_warning_result(warning: OntologyLoadWarning) -> dict[str, object]:
+def _ontology_warning_result(warning: OntologyRefreshWarning) -> dict[str, object]:
     """Convert one ontology warning to data stored in a job result."""
     return {
         "code": warning.code,

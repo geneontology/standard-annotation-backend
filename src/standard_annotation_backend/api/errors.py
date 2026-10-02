@@ -25,10 +25,8 @@ from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
     PermissionDeniedError,
 )
-from standard_annotation_backend.domain.entities import (
-    UnknownDbObjectIdError,
-    UnknownEntitySourceError,
-)
+from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
+from standard_annotation_backend.domain.refresh import UnknownSourceError
 from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.repositories import (
     AnnotationDeletedError,
@@ -341,20 +339,20 @@ def install_exception_handlers(app: FastAPI) -> None:
             ],
         )
 
-    @app.exception_handler(UnknownEntitySourceError)
-    def handle_unknown_entity_source(
-        _request: Request, _error: UnknownEntitySourceError
+    @app.exception_handler(UnknownSourceError)
+    def handle_unknown_source(
+        _request: Request, _error: UnknownSourceError
     ) -> JSONResponse:
-        message = "Entity source is not configured"
+        message = "Source is not configured"
         return _error_response(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code="unknown_entity_source",
+            code="unknown_source",
             message=message,
             details=[
                 ApiValidationIssue(
                     location=("source_key",),
                     message=message,
-                    type="unknown_entity_source",
+                    type="unknown_source",
                 )
             ],
         )

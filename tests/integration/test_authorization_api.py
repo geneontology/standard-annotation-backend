@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from source_provenance import github_provenance
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -100,8 +101,7 @@ def _seed(
                     (SyncAuthorization("admin", "global", None),),
                 ),
             ),
-            source_repository="test/repo",
-            source_commit_sha="a" * 40,
+            provenance=github_provenance("a" * 40, "test/repo"),
             summary={},
         )
         user = uow.auth.get_user_by_github_login("curator")

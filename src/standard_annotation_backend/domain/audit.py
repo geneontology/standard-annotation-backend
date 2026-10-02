@@ -14,7 +14,7 @@ class AuditAction(StrEnum):
     ANNOTATION_COMMENT_DELETED = "annotation_comment.deleted"
     TOKEN_CREATED = "token.created"
     TOKEN_REVOKED = "token.revoked"
-    AUTHORIZATION_SYNCHRONIZED = "authorization.synchronized"
+    AUTHORIZATION_REFRESHED = "authorization.refreshed"
     JOB_QUEUED = "job.queued"
     JOB_STARTED = "job.started"
     JOB_SUCCEEDED = "job.succeeded"
@@ -25,9 +25,9 @@ class AuditAction(StrEnum):
     CHANGE_SET_MARKED_STALE = "change_set.marked_stale"
     IMPORT_COMPLETED = "import.completed"
     EXPORT_COMPLETED = "export.completed"
-    ONTOLOGY_LOADED = "ontology.loaded"
-    ENTITY_CATALOG_PUBLISHED = "entity.catalog_published"
-    ENTITY_CATALOG_RETIRED = "entity.catalog_retired"
+    ONTOLOGY_REFRESHED = "ontology.refreshed"
+    ENTITY_REFRESHED = "entity.refreshed"
+    ENTITY_RETIRED = "entity.retired"
     ADMINISTRATIVE_CHANGE = "administrative.change"
 
 
