@@ -58,7 +58,12 @@ class TerminalRefreshError(Exception):
 
 
 class ProgressReporter(Protocol):
-    """Replace a running job's progress, as a kind's `apply` advances."""
+    """Replace a running job's progress, as a kind's `apply` advances.
+
+    A kind may report its own phases, such as `staging` and `publishing`, while
+    `apply` runs. The runner always sets `fetching` and `applying` before `apply`
+    and `completed` or `failed` after it.
+    """
 
     def __call__(
         self, progress: dict[str, object], warnings: tuple[str, ...] = ()
