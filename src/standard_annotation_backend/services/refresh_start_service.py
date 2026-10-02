@@ -13,6 +13,7 @@ from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import (
     REFRESH_JOB_TYPES,
+    RefreshFailureCode,
     RefreshKindName,
     refresh_dispatch_failure_message,
 )
@@ -75,7 +76,8 @@ class RefreshStartService:
 
         If a queued or running job of the same type already exists for a source,
         that job is returned and dispatched again instead of creating another.
-        If dispatching fails, only a job created by this call is marked failed.
+        If dispatching fails, only a job created by this call is marked failed,
+        with failure code `dispatch_failed`.
 
         Returns:
             Retirement jobs first, then refresh jobs, each in source-key order.
@@ -162,9 +164,14 @@ class RefreshStartService:
                 type(error).__name__,
             )
             # A reused job may already be in the broker from an earlier
-            # dispatch, so only a job created by this call is marked failed.
+            # dispatch, so only a job created by this call is marked failed. It
+            # is recorded like any other failed refresh, with a failure code.
+            # The next start for this source creates a new job, so nothing is
+            # lost; failing now tells the caller the job will not run.
             if item.created:
-                return JobService(self._unit_of_work_factory).fail(
-                    item.job.job_id, error=refresh_dispatch_failure_message(kind)
+                return JobService(self._unit_of_work_factory).fail_refresh(
+                    item.job.job_id,
+                    error=refresh_dispatch_failure_message(kind),
+                    failure_code=RefreshFailureCode.DISPATCH_FAILED,
                 )
         return item.job

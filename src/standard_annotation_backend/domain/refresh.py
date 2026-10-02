@@ -40,6 +40,7 @@ class RefreshFailureCode(StrEnum):
     """
 
     INVALID_PARAMETERS = "invalid_parameters"
+    DISPATCH_FAILED = "dispatch_failed"
     UNKNOWN_SOURCE = "unknown_source"
     SOURCE_ERROR = "source_error"
     HTTP_STATUS = "http_status"

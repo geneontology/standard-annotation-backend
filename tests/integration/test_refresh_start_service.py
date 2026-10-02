@@ -155,6 +155,10 @@ def test_dispatch_failure_fails_only_new_jobs_with_kind_message(
     by_key = {str(job.parameters["source_key"]): job for job in jobs}
     assert by_key["mgi"].status is JobStatus.FAILED
     assert by_key["mgi"].error == "Entity refresh could not be dispatched"
+    assert by_key["mgi"].progress == {
+        "phase": "failed",
+        "failure_code": "dispatch_failed",
+    }
     assert by_key["rgd"].status is JobStatus.QUEUED
 
 

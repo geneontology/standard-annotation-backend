@@ -223,6 +223,7 @@ def test_dispatch_failure_returns_failed_job_without_broker_details(
     job = response.json()["jobs"][0]
     assert job["status"] == "failed"
     assert job["error"].endswith("refresh could not be dispatched")
+    assert job["progress"] == {"phase": "failed", "failure_code": "dispatch_failed"}
     assert "secret" not in response.text
 
 
