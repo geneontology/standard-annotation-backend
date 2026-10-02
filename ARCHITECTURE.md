@@ -549,7 +549,8 @@ active. Invalid documents and unreachable sources fail the job with a stable
 failure code and leave the previous data in place; the next scheduled refresh
 tries again. Jobs start from a schedule, a global-admin API request, or the
 `just refresh` CLI. All three reuse an unfinished job for the same source instead
-of creating another.
+of creating another. The [refresh infrastructure guide](docs/refresh-infrastructure.md)
+shows how these pieces fit together in the code.
 
 **Authorization.** The go-site `users.yaml` replaces SAB's users and grants as
 described under Authorization Model.
