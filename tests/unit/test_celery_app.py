@@ -1,8 +1,12 @@
 """Verify that Celery stores job state in PostgreSQL."""
 
+import os
+from unittest.mock import patch
+
 from celery.schedules import crontab
 
-from standard_annotation_backend.workers.celery_app import celery_app
+from standard_annotation_backend.config import Settings
+from standard_annotation_backend.workers.celery_app import beat_schedule, celery_app
 
 
 def test_celery_uses_json_late_acknowledgement_and_no_result_backend() -> None:
@@ -37,29 +41,32 @@ def test_celery_registers_exactly_the_refresh_tasks() -> None:
         assert celery_app.tasks[name].max_retries is None
 
 
-def test_beat_schedules_one_refresh_per_kind() -> None:
-    """Beat starts each kind through `sab.refresh.schedule` on its own cron."""
-    assert celery_app.conf.beat_schedule == {
-        "authorization-refresh": {
+def test_beat_schedules_each_kind_on_its_own_cron_setting() -> None:
+    """Beat starts each kind through `sab.refresh.schedule` on that kind's cron."""
+    with patch.dict(os.environ, {}, clear=True):
+        settings = Settings(
+            _env_file=None,
+            database_url="postgresql+psycopg://sab:sab@db:5432/sab",
+            redis_url="redis://redis:6379/0",
+            application_secret="test-secret",
+            environment="testing",
+            log_format="console",
+            authorization_refresh_cron="1 0 * * *",
+            ontology_refresh_cron="2 0 * * *",
+            entity_refresh_cron="3 0 * * *",
+            annotation_refresh_cron="4 0 * * *",
+        )
+
+    assert beat_schedule(settings) == {
+        f"{kind}-refresh": {
             "task": "sab.refresh.schedule",
-            "schedule": crontab(minute="0", hour="0"),
-            "args": ("authorization",),
-        },
-        "ontology-refresh": {
-            "task": "sab.refresh.schedule",
-            "schedule": crontab(minute="0", hour="2", day_of_week="1,3,5"),
-            "args": ("ontology",),
-        },
-        "entity-refresh": {
-            "task": "sab.refresh.schedule",
-            "schedule": crontab(minute="0", hour="3"),
-            "args": ("entity",),
-        },
-        "annotation-refresh": {
-            "task": "sab.refresh.schedule",
-            "schedule": crontab(
-                minute="0", hour="0", day_of_month="31", month_of_year="12"
-            ),
-            "args": ("annotation",),
-        },
+            "schedule": crontab(minute=minute, hour="0"),
+            "args": (kind,),
+        }
+        for kind, minute in (
+            ("authorization", "1"),
+            ("ontology", "2"),
+            ("entity", "3"),
+            ("annotation", "4"),
+        )
     }
