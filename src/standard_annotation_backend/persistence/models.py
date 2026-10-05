@@ -279,7 +279,9 @@ class JobRecord(Base):
     __tablename__ = "job"
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('authorization_refresh', 'entity_refresh', 'entity_retirement', 'ontology_refresh')",
+            "job_type IN ('annotation_cutover', 'annotation_refresh', "
+            "'authorization_refresh', 'entity_refresh', 'entity_retirement', "
+            "'ontology_refresh')",
             name="type_allowed",
         ),
         CheckConstraint(
@@ -839,6 +841,7 @@ class ChangeSetRecord(Base):
             name="preview_metadata_consistent",
         ),
         Index("ix_change_set_annotation_id", "annotation_id"),
+        Index("ix_change_set_owning_group_id", "owning_group_id"),
         Index("ix_change_set_state", "state"),
         Index(
             "ix_change_set_proposed_at_change_set_id", "proposed_at", "change_set_id"
@@ -875,6 +878,194 @@ class ChangeSetRecord(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     review_reason: Mapped[str | None] = mapped_column(Text)
     result_annotation_version: Mapped[int | None] = mapped_column(Integer)
+
+
+class AnnotationImportRecord(Base):
+    """Store one GPAD import's source, counts, rejections, and publication state.
+
+    A row is written when a job finishes staging and is deleted if the job fails
+    before publishing. Published rows are kept after later imports replace the
+    group's annotations, as the lasting record of what each job imported.
+    """
+
+    __tablename__ = "annotation_import"
+    __table_args__ = (
+        CheckConstraint(
+            "source_checksum ~ '^[0-9a-f]{64}$'", name="source_checksum_format"
+        ),
+        CheckConstraint(
+            "source_key ~ '^[a-z0-9][a-z0-9_-]*$'", name="source_key_format"
+        ),
+        CheckConstraint("group_key ~ '[^[:space:]]'", name="group_key_nonblank"),
+        CheckConstraint(
+            "jsonb_typeof(source_metadata) = 'object'", name="source_metadata_object"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(rejection_report) = 'object'", name="rejection_report_object"
+        ),
+        CheckConstraint(
+            "data_rows >= 0 AND annotations_staged >= 0 AND records_rejected >= 0",
+            name="counts_nonnegative",
+        ),
+        CheckConstraint(
+            "(published_at IS NULL) = (annotations_deleted IS NULL)",
+            name="publication_complete",
+        ),
+        Index("ix_annotation_import_group_key", "group_key"),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    source_key: Mapped[str] = mapped_column(Text)
+    group_key: Mapped[str] = mapped_column(Text)
+    is_cutover: Mapped[bool] = mapped_column(Boolean)
+    source_type: Mapped[str] = mapped_column(String(20))
+    source_locator: Mapped[str] = mapped_column(Text)
+    source_revision: Mapped[str | None] = mapped_column(Text)
+    source_checksum: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source_metadata: Mapped[dict[str, object]] = mapped_column(JSONB)
+    data_rows: Mapped[int] = mapped_column(BigInteger)
+    annotations_staged: Mapped[int] = mapped_column(BigInteger)
+    records_rejected: Mapped[int] = mapped_column(BigInteger)
+    rejection_report: Mapped[dict[str, object]] = mapped_column(JSONB)
+    staged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    annotations_deleted: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class GroupAnnotationManagementRecord(Base):
+    """Store whether GPAD or SAB is the source of truth for one group.
+
+    A group without a row is `gpad_imported`. `group_key` matches
+    `annotation.owning_group_id`, which is plain text: groups that own annotations
+    need not appear in `sab_group`.
+    """
+
+    __tablename__ = "group_annotation_management"
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('gpad_imported', 'sab_managed')", name="mode_allowed"
+        ),
+        CheckConstraint(
+            "(mode = 'sab_managed') = (transitioned_at IS NOT NULL) "
+            "AND (transitioned_at IS NULL) = (transition_job_id IS NULL)",
+            name="transition_complete",
+        ),
+        CheckConstraint(
+            "transition_job_id IS NULL OR transition_job_id = last_import_job_id",
+            name="transition_is_last_import",
+        ),
+    )
+
+    group_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    mode: Mapped[str] = mapped_column(
+        String(32), server_default=text("'gpad_imported'")
+    )
+    last_import_job_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("annotation_import.job_id", ondelete="RESTRICT"),
+    )
+    transitioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    transition_job_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("annotation_import.job_id", ondelete="RESTRICT"),
+    )
+
+
+class AnnotationStagingRecord(Base):
+    """Store one validated GPAD annotation until its job publishes or fails.
+
+    Columns match those of `annotation`, so publication copies all of a job's
+    rows with one `INSERT ... SELECT` statement.
+    """
+
+    __tablename__ = "annotation_staging"
+    __table_args__ = (
+        CheckConstraint("line_number > 0", name="line_number_positive"),
+        CheckConstraint(
+            "jsonb_typeof(annotation_data) = 'object'", name="annotation_data_object"
+        ),
+        CheckConstraint(
+            "duplicate_base_signature ~ '^[0-9A-Fa-f]{64}$'",
+            name="duplicate_base_signature_format",
+        ),
+        Index("ix_annotation_staging_job_id_db_object_id", "job_id", "db_object_id"),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    annotation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    line_number: Mapped[int] = mapped_column(BigInteger)
+    annotation_data: Mapped[dict[str, object]] = mapped_column(JSONB)
+    duplicate_base_signature: Mapped[str] = mapped_column(String(64))
+    db_object_id: Mapped[str] = mapped_column(Text)
+    negation: Mapped[bool] = mapped_column(Boolean)
+    relation: Mapped[str] = mapped_column(Text)
+    ontology_class_id: Mapped[str] = mapped_column(Text)
+    evidence_type: Mapped[str] = mapped_column(Text)
+    annotation_date: Mapped[date] = mapped_column(Date)
+    assigned_by: Mapped[str] = mapped_column(Text)
+
+
+class AnnotationStagingMultivaluedValueRecord(Base):
+    """Store one staged multivalued field value.
+
+    Publication copies these rows into `annotation_multivalued_field_value`.
+    """
+
+    __tablename__ = "annotation_staging_multivalued_value"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["job_id", "annotation_id"],
+            ["annotation_staging.job_id", "annotation_staging.annotation_id"],
+            name="fk_annotation_staging_multivalued_value_staging",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "field_name IN ('references', 'with_or_from', 'interacting_taxon_id')",
+            name="field_name_allowed",
+        ),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    annotation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    field_name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    field_value: Mapped[str] = mapped_column(Text, primary_key=True)
+
+
+class AnnotationStagingDuplicateReferenceRecord(Base):
+    """Store one staged reference used to find duplicate annotations.
+
+    Publication copies these rows into `annotation_duplicate_reference`.
+    """
+
+    __tablename__ = "annotation_staging_duplicate_reference"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["job_id", "annotation_id"],
+            ["annotation_staging.job_id", "annotation_staging.annotation_id"],
+            name="fk_annotation_staging_duplicate_reference_staging",
+            ondelete="CASCADE",
+        ),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), primary_key=True)
+    annotation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    canonical_reference: Mapped[str] = mapped_column(Text, primary_key=True)
+    duplicate_base_signature: Mapped[str] = mapped_column(String(64))
 
 
 class AuditEventRecord(Base):

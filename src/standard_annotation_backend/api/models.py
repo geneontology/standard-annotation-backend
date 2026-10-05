@@ -282,9 +282,25 @@ class RefreshRequest(BaseModel):
                 "Key of a source configured in config/sources.yaml. Omit it to "
                 "refresh every configured source of this kind."
             ),
-            examples=["go"],
         ),
     ] = None
+
+
+class AnnotationCutoverRequest(BaseModel):
+    """Request the final GPAD import that moves one group to SAB management."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_key: Annotated[
+        SourceKey,
+        Field(
+            description=(
+                "Key of an annotation source configured in config/sources.yaml. Its "
+                "group moves to SAB management permanently if the import succeeds."
+            ),
+            examples=["mgi"],
+        ),
+    ]
 
 
 class RefreshJobsResource(BaseModel):

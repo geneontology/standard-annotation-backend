@@ -6,24 +6,39 @@
 #           relative `path`. Each refresh resolves `ref` to a commit and records it.
 #   https:  `url`, which must use https.
 #
-# `authorization` is the single go-site users.yaml source (source key `go-site`).
-# `ontologies` is keyed by ontology; `go` is required.
-# `entities` is keyed by a stable source key: lowercase letters, digits, `_`, or
-# `-`, starting with a letter or digit. Keys are stored with published catalogs, so
-# renaming a key retires the old catalog and publishes a new one. Removing an
-# entity source retires its catalog on the next refresh of all entity sources.
-# Entity entries may set `format: gpi`; GPI 2.0 is currently the only format.
+# authorization
+#     the single go-site users.yaml source (source key `go-site`)
+#
+# ontologies
+#     keyed by ontology; `go` is required.
+#
+# entities
+#    keyed by a stable source key: lowercase letters, digits, `_`, or `-`, starting
+#    with a letter or digit. Keys are stored with published catalogs, so
+#    renaming a key retires the old catalog and publishes a new one. Removing an
+#    entity source retires its catalog on the next refresh of all entity sources.
+#    Entity entries may set `format: gpi`; GPI 2.0 is currently the only format.
+#
+# annotations
+#    keyed by a stable source key. Each entry names the `group` that
+#    owns its annotations; every successful refresh deletes all of that group's
+#    annotations (including edits made in SAB) and imports the file. A group may have
+#    only one source. Entries may set `format: gpad`; GPAD 2.0 is the only format.
+#    Removing an entry stops its refreshes and leaves the group's annotations alone.
+
 authorization:
   type: github
   repository: geneontology/go-site
   ref: master
   path: metadata/users.yaml
+
 ontologies:
   go:
     type: github
     repository: geneontology/go-ontology
     ref: master
     path: src/ontology/go-edit.obo
+
 entities:
   caeel:
     type: https
@@ -31,3 +46,23 @@ entities:
   mouse:
     type: https
     url: https://current.geneontology.org/annotations/gpi/MOUSE-mod.gpi.gz
+
+# WARNING: The current.geneontology.org sources are NOT good long-term sources. They are
+#          species-oriented and do not map 1:1 with owning groups. A better source would
+#          be the noctua_* files listed in
+#          https://release.geneontology.org/2026-05-19/products/upstream_and_raw_data/index.html
+#          Those files do cleanly map to groups, but they are not GPAD 2.0 conformant
+#          (despite what their headers say). For example, they use `contributor` as an
+#          annotation property key, but the GPAD 2.0 spec requires `contributor-id`.
+#          We also would need a process to keep those files updated more regularly.
+#          For now, these current.geneontology.org are used as a stopgap to allow SAB
+#          to be used for testing and development.
+annotations:
+  mgi:
+    type: https
+    group: http://informatics.jax.org
+    url: https://current.geneontology.org/annotations/gpad/MOUSE-mod.gpad.gz
+  wormbase:
+    type: https
+    group: http://www.wormbase.org
+    url: https://current.geneontology.org/annotations/gpad/CAEEL-mod.gpad.gz

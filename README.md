@@ -61,8 +61,9 @@ just down
 
 ## Refresh reference data
 
-SAB keeps three kinds of reference data current: authorization (go-site
-`users.yaml`), ontologies (GO), and entity catalogs (GPI files). Their sources are
+SAB keeps four kinds of reference data current: authorization (go-site
+`users.yaml`), ontologies (GO), entity catalogs (GPI files), and group annotations
+(GPAD files). Their sources are
 configured in `config/sources.yaml`. `SAB_SOURCES_FILE` can be used to point to a
 different file. Each entry is a `github` source (`repository`, `ref`, `path`) or an
 `https` source (`url`).
@@ -74,14 +75,14 @@ tokens:
 just refresh authorization
 ```
 
-`just refresh KIND [SOURCE]` refreshes `authorization`, `ontology`, or `entity`
-sources in a one-off container and prints one line per job. Omit `SOURCE` to refresh
+`just refresh KIND [SOURCE]` refreshes `authorization`, `ontology`, `entity`, or
+`annotation` sources in a one-off container and prints one line per job. Omit `SOURCE` to refresh
 every configured source of that kind. Authorization has a single source, so it takes
 no `SOURCE`.
 
 When `just up` is running, the scheduler refreshes each kind on a UTC cron schedule:
-`SAB_AUTHORIZATION_REFRESH_CRON`, `SAB_ONTOLOGY_REFRESH_CRON`, and
-`SAB_ENTITY_REFRESH_CRON`. With an `admin/global` bearer token, you can also start a
+`SAB_AUTHORIZATION_REFRESH_CRON`, `SAB_ONTOLOGY_REFRESH_CRON`,
+`SAB_ENTITY_REFRESH_CRON`, and `SAB_ANNOTATION_REFRESH_CRON`. With an `admin/global` bearer token, you can also start a
 refresh and follow its job through the API:
 
 ```bash
@@ -95,9 +96,15 @@ curl -H "Authorization: Bearer ${SAB_API_TOKEN}" \
   http://localhost:8000/admin/jobs/<job_id>
 ```
 
-The routes are `/admin/authorization-refreshes`, `/admin/ontology-refreshes`, and
-`/admin/entity-refreshes`. The authorization route takes no body. For the other two,
-send `{}` to refresh every configured source or `{"source_key": "<key>"}` for one.
+The routes are `/admin/authorization-refreshes`, `/admin/ontology-refreshes`,
+`/admin/entity-refreshes`, and `/admin/annotation-refreshes`. The authorization route
+takes no body. For the others, send `{}` to refresh every configured source or
+`{"source_key": "<key>"}` for one.
+
+GPAD annotation sources are configured in the `annotations` section of
+`config/sources.yaml`. Each refresh replaces all annotations of the source's group. To
+move a group to SAB management permanently, a global admin sends
+`POST /admin/annotation-cutovers` with the source key.
 
 ## Create and manage bearer tokens
 

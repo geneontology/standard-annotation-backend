@@ -32,17 +32,33 @@ def test_refresh_schedules_default_to_the_documented_times() -> None:
     assert settings.authorization_refresh_cron == "0 0 * * *"
     assert settings.ontology_refresh_cron == "0 2 * * 1,3,5"
     assert settings.entity_refresh_cron == "0 3 * * *"
+    assert settings.annotation_refresh_cron == "0 4 * * *"
 
 
 @pytest.mark.parametrize(
     "setting",
-    ["authorization_refresh_cron", "ontology_refresh_cron", "entity_refresh_cron"],
+    [
+        "authorization_refresh_cron",
+        "ontology_refresh_cron",
+        "entity_refresh_cron",
+        "annotation_refresh_cron",
+    ],
 )
-@pytest.mark.parametrize("value", ["", "* * *", "60 * * * *"])
+@pytest.mark.parametrize("value", ["", "* * *", "60 * * * *", "0 0 30 2 *"])
 def test_refresh_schedules_must_be_valid_cron(setting: str, value: str) -> None:
-    """Celery Beat cannot start with a malformed refresh schedule."""
+    """A malformed refresh schedule, or one that never occurs, is rejected.
+
+    Celery Beat cannot run a schedule with no next run time, such as February 30.
+    """
     with pytest.raises(ValidationError):
         _settings(**{setting: value})
+
+
+def test_rare_but_real_refresh_schedule_is_accepted() -> None:
+    """A schedule that runs only on February 29 is valid."""
+    settings = _settings(annotation_refresh_cron="0 0 29 2 *")
+
+    assert settings.annotation_refresh_cron == "0 0 29 2 *"
 
 
 def test_settings_expose_the_shipped_sources_file() -> None:

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from annotation_refresh_helpers import gpad_bytes, gpad_row, seed_group_import
 from refresh_helpers import (
     TEST_SOURCES,
     FakeFetchers,
@@ -17,6 +18,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from test_entity_refresh_service import stage
 
 from standard_annotation_backend.cli import refresh as cli
+from standard_annotation_backend.domain.annotation_management import (
+    AnnotationManagementMode,
+)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
@@ -216,3 +220,68 @@ def test_authorization_rejects_a_source_key(
     assert "omit source_key" in capsys.readouterr().err
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(JobRecord)) == 0
+
+
+def test_cli_runs_an_annotation_refresh_in_process(
+    use_runtime: InstallRuntime,
+    seed_active_subjects: Callable[..., None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`refresh annotation SOURCE` runs the GPAD refresh and reports success."""
+    seed_active_subjects("UniProtKB:P12345")
+    use_runtime({"mgi-gpad": gpad_bytes(gpad_row("UniProtKB:P12345"))})
+
+    assert cli.main(["annotation", "mgi-gpad"]) == 0
+    assert capsys.readouterr().out.startswith("annotation_refresh mgi-gpad succeeded")
+
+
+def test_cli_rejects_a_sab_managed_source_without_a_job(
+    use_runtime: InstallRuntime,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CLI exits with an error for a SAB-managed group and creates no job."""
+    seed_group_import(
+        session_factory,
+        group_key="MGI",
+        source_key="mgi-gpad",
+        mode=AnnotationManagementMode.SAB_MANAGED,
+    )
+    use_runtime({})
+    with session_factory() as session:
+        jobs_before = session.scalar(select(func.count()).select_from(JobRecord))
+
+    assert cli.main(["annotation", "mgi-gpad"]) == 1
+    assert "SAB-managed" in capsys.readouterr().err
+    with session_factory() as session:
+        assert (
+            session.scalar(select(func.count()).select_from(JobRecord)) == jobs_before
+        )
+
+
+def test_cli_refresh_all_says_when_every_annotation_group_is_sab_managed(
+    use_runtime: InstallRuntime,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With every group SAB-managed, nothing starts and the message says why."""
+    for group, source in (("MGI", "mgi-gpad"), ("RGD", "rgd-gpad")):
+        seed_group_import(
+            session_factory,
+            group_key=group,
+            source_key=source,
+            mode=AnnotationManagementMode.SAB_MANAGED,
+        )
+    use_runtime({})
+    with session_factory() as session:
+        jobs_before = session.scalar(select(func.count()).select_from(JobRecord))
+
+    assert cli.main(["annotation"]) == 0
+
+    output = capsys.readouterr().out
+    assert "SAB-managed" in output
+    assert "not configured" not in output
+    with session_factory() as session:
+        assert (
+            session.scalar(select(func.count()).select_from(JobRecord)) == jobs_before
+        )

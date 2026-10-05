@@ -5,6 +5,7 @@
 are recorded the same way. Instead of sending each job to a Celery worker, it
 runs the job in this process and waits for it. This is the supported way to load
 authorization into a new database, before anyone holds a token for the admin API.
+Annotation cutovers are available only through the admin API.
 """
 
 import argparse
@@ -16,6 +17,9 @@ from pydantic import ValidationError
 from pydantic_settings import SettingsError
 from sqlalchemy.exc import SQLAlchemyError
 
+from standard_annotation_backend.domain.annotation_management import (
+    GroupSabManagedError,
+)
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
@@ -77,8 +81,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments, run the refreshes, and print one line per job.
 
     Returns:
-        Zero when every job succeeded, otherwise one. Argument errors exit with
-        status two.
+        Zero when every job succeeded or there was nothing to refresh, otherwise
+        one. Argument errors exit with status two.
     """
     parser = argparse.ArgumentParser(
         prog="refresh",
@@ -89,8 +93,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "source_key",
         nargs="?",
         help=(
-            "Refresh one ontology or entity source. Omit it to refresh every "
-            "configured source. Authorization has a single source and takes none."
+            "Refresh one ontology, entity, or annotation source. Omit it to refresh "
+            "every configured source. Authorization has a single source and takes "
+            "none."
         ),
     )
     arguments = parser.parse_args(argv)
@@ -101,8 +106,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Without `enqueue_prune`, ontology pruning also runs in this process.
         with worker_runtime() as runtime:
             jobs = run_refreshes(runtime, kind, arguments.source_key)
+            sources_configured = bool(runtime.settings.sources.keys(kind))
     except UnknownSourceError:
         print(f"No {kind.value} source is configured with that key", file=sys.stderr)
+        return 1
+    except GroupSabManagedError:
+        print(
+            "That annotation source's group is SAB-managed; GPAD can no longer "
+            "replace its annotations",
+            file=sys.stderr,
+        )
         return 1
     except (ValidationError, SettingsError):
         print("SAB configuration is invalid", file=sys.stderr)
@@ -111,9 +124,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("Refresh could not record its jobs in PostgreSQL", file=sys.stderr)
         return 1
     if not jobs:
-        # Nothing is configured for this kind (and, for entities, nothing needs
-        # retiring). That is not a failure, but say so instead of printing nothing.
-        print(f"No {kind.value} sources are configured")
+        # That is not a failure, but say why instead of printing nothing.
+        if sources_configured:
+            # Only annotation refreshes can start nothing while sources exist:
+            # every source's group is SAB-managed.
+            print(
+                f"No {kind.value} sources need refreshing; their groups are SAB-managed"
+            )
+        else:
+            # Nothing is configured for this kind (and, for entities, nothing needs
+            # retiring).
+            print(f"No {kind.value} sources are configured")
         return 0
     for job in jobs:
         print(_describe(job))

@@ -208,3 +208,24 @@ class AuditService:
                 "status": record.status,
             },
         )
+
+    def record_annotation_import_published(
+        self,
+        *,
+        is_cutover: bool,
+        actor_id: str,
+        job_id: UUID,
+        details: dict[str, object],
+    ) -> AuditEventRecord:
+        """Record a summary of a GPAD publication in the publishing transaction."""
+        return self._repository.record(
+            action=(
+                AuditAction.ANNOTATION_CUTOVER_PUBLISHED
+                if is_cutover
+                else AuditAction.ANNOTATION_REFRESH_PUBLISHED
+            ),
+            actor_id=actor_id,
+            result=AuditResult.SUCCESS,
+            job_id=job_id,
+            details=details,
+        )

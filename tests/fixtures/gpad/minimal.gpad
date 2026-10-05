@@ -1,0 +1,8 @@
+!gpad-version: 2.0
+!generated-by: TestDB
+!date-generated: 2026-09-29
+!project-name: Standard Annotation Backend
+
+! This comment is not an annotation.
+UniProtKB:P12345		RO:0002331	GO:0008150	PMID:1	ECO:0000314			2026-09-29	MGI		
+UniProtKB:P12345	NOT	RO:0002331	GO:0008150	PMID:2	ECO:0000353	UniProtKB:Q99999|UniProtKB:Q88888		2026-09-29	MGI		

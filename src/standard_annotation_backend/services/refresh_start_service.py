@@ -9,6 +9,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from standard_annotation_backend.domain.annotation_management import (
+    GroupSabManagedError,
+)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import (
@@ -72,7 +75,9 @@ class RefreshStartService:
         With `source_key`, one refresh job is started for that source. Without
         it, every configured source of the kind gets a refresh job. For entity
         refreshes, every source that still has an active catalog but is no
-        longer configured also gets a retirement job.
+        longer configured also gets a retirement job. For annotation refreshes,
+        groups whose annotations are SAB-managed are skipped when `source_key`
+        is omitted.
 
         If a queued or running job of the same type already exists for a source,
         that job is returned and dispatched again instead of creating another.
@@ -84,7 +89,42 @@ class RefreshStartService:
 
         Raises:
             UnknownSourceError: If `source_key` is not configured for `kind`.
+            GroupSabManagedError: If `source_key` names an annotation source
+                whose group is SAB-managed. No job is created.
         """
+        return self._start(
+            kind, requested_by=requested_by, source_key=source_key, cutover=False
+        )
+
+    def start_cutover(self, *, requested_by: str, source_key: str) -> Job:
+        """Create or reuse the cutover job for one annotation source and dispatch it.
+
+        A cutover moves the source's group to SAB management permanently, so it
+        is started only on request, never by the schedule or for every source.
+        An unfinished cutover job for the source is reused; an ordinary refresh
+        job is not.
+
+        Raises:
+            UnknownSourceError: If `source_key` is not an annotation source.
+            GroupSabManagedError: If the group is already SAB-managed.
+        """
+        (job,) = self._start(
+            RefreshKindName.ANNOTATION,
+            requested_by=requested_by,
+            source_key=source_key,
+            cutover=True,
+        )
+        return job
+
+    def _start(
+        self,
+        kind: RefreshKindName,
+        *,
+        requested_by: str,
+        source_key: str | None,
+        cutover: bool,
+    ) -> tuple[Job, ...]:
+        """Create or reuse the jobs for `start` or `start_cutover`, then dispatch."""
         # Reject an unconfigured key before touching the database, so a typo
         # creates no job and no audit event.
         if source_key is not None:
@@ -97,7 +137,7 @@ class RefreshStartService:
             # until this transaction commits, so the "find, else create" below
             # cannot interleave with another start.
             uow.jobs.lock_refresh_starts()
-            for job_type, key in self._targets(uow, kind, source_key):
+            for job_type, key in self._targets(uow, kind, source_key, cutover=cutover):
                 # Reuse a queued or running job for the same source instead of
                 # creating a duplicate. A running job may have lost its worker,
                 # so it is dispatched again below and resumes.
@@ -124,9 +164,16 @@ class RefreshStartService:
         return tuple(self._dispatch_started(kind, item) for item in started)
 
     def _targets(
-        self, uow: SqlAlchemyUnitOfWork, kind: RefreshKindName, source_key: str | None
+        self,
+        uow: SqlAlchemyUnitOfWork,
+        kind: RefreshKindName,
+        source_key: str | None,
+        *,
+        cutover: bool,
     ) -> list[tuple[JobType, str]]:
         """List the job type and source key of every job to start."""
+        if kind is RefreshKindName.ANNOTATION:
+            return self._annotation_targets(uow, source_key, cutover=cutover)
         refresh_type = REFRESH_JOB_TYPES[kind]
         if source_key is not None:
             return [(refresh_type, source_key)]
@@ -143,6 +190,33 @@ class RefreshStartService:
                 if key not in configured
             ]
         return retirements + [(refresh_type, key) for key in configured]
+
+    def _annotation_targets(
+        self, uow: SqlAlchemyUnitOfWork, source_key: str | None, *, cutover: bool
+    ) -> list[tuple[JobType, str]]:
+        """List annotation jobs to start, leaving out SAB-managed groups.
+
+        Modes are read while the start lock is held, so they match the jobs
+        created in the same transaction. Publication checks the group's mode
+        again, so a group that is cut over after this check still cannot be
+        overwritten.
+
+        Raises:
+            GroupSabManagedError: If `source_key` names a source whose group is
+                SAB-managed.
+        """
+        job_type = JobType.ANNOTATION_CUTOVER if cutover else JobType.ANNOTATION_REFRESH
+        managed = uow.annotation_imports.sab_managed_groups()
+        if source_key is not None:
+            group = self._sources.annotation_group(source_key)
+            if group in managed:
+                raise GroupSabManagedError(group)
+            return [(job_type, source_key)]
+        return [
+            (job_type, key)
+            for key in self._sources.keys(RefreshKindName.ANNOTATION)
+            if self._sources.annotation_group(key) not in managed
+        ]
 
     def _dispatch_started(self, kind: RefreshKindName, item: _StartedJob) -> Job:
         """Dispatch an unfinished job; fail it only if this call created it."""

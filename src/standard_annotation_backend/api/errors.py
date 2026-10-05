@@ -21,6 +21,9 @@ from standard_annotation_backend.auth.github_oauth import (
     OAuthConfigurationError,
     OAuthUpstreamError,
 )
+from standard_annotation_backend.domain.annotation_management import (
+    GroupSabManagedError,
+)
 from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
     PermissionDeniedError,
@@ -180,6 +183,12 @@ def install_exception_handlers(app: FastAPI) -> None:
             "authentication_required",
             "Authentication required",
             (("WWW-Authenticate", "Bearer"),),
+        ),
+        GroupSabManagedError: _FixedErrorResponse(
+            status.HTTP_409_CONFLICT,
+            "group_sab_managed",
+            "The source's group is managed in SAB, so GPAD can no longer "
+            "replace its annotations",
         ),
         PermissionDeniedError: _FixedErrorResponse(
             status.HTTP_403_FORBIDDEN,

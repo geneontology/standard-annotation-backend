@@ -1,14 +1,12 @@
 """Refresh entity catalogs from configured GPI sources.
 
-Fetched files may be gzip-compressed. They are decoded as strict UTF-8, parsed
-with the parser for the source's format, staged as an inactive snapshot, and
-published atomically. Sources removed from `config/sources.yaml` have their
-catalogs retired by a separate job.
+Fetched files are decoded by `decode_source_text`, parsed with the parser for
+the source's format, staged as an inactive snapshot, and published atomically.
+Sources removed from `config/sources.yaml` have their catalogs retired by a
+separate job.
 """
 
-import gzip
 import logging
-import zlib
 from collections.abc import Callable, Mapping
 from uuid import UUID
 
@@ -26,7 +24,8 @@ from standard_annotation_backend.domain.refresh import (
     refresh_failure_message,
 )
 from standard_annotation_backend.gpi.parser import GpiParseError, parse_gpi
-from standard_annotation_backend.refresh.fetchers import SourceDocument, SourceError
+from standard_annotation_backend.refresh.decoding import decode_source_text
+from standard_annotation_backend.refresh.fetchers import SourceDocument
 from standard_annotation_backend.refresh.kinds import (
     ProgressReporter,
     RefreshResult,
@@ -46,32 +45,10 @@ from standard_annotation_backend.services.job_service import Job, JobService
 
 logger = logging.getLogger(__name__)
 
-_GZIP_SIGNATURE = b"\x1f\x8b"
 _LOGGED_ROW_ISSUES = 5
 _PARSERS: Mapping[str, Callable[[str, SourceProvenance], EntityCatalog]] = {
     "gpi": parse_gpi
 }
-
-
-def decode_entity_content(content: bytes) -> str:
-    """Expand gzip when present and decode strict UTF-8.
-
-    Gzip is recognized by its two-byte signature rather than by the URL or a
-    response header, so a source can switch between compressed and plain files
-    without a configuration change.
-
-    Raises:
-        SourceError: With `invalid_gzip` or `invalid_utf8`.
-    """
-    if content.startswith(_GZIP_SIGNATURE):
-        try:
-            content = gzip.decompress(content)
-        except (OSError, EOFError, zlib.error):
-            raise SourceError(RefreshFailureCode.INVALID_GZIP) from None
-    try:
-        return content.decode("utf-8")
-    except UnicodeDecodeError:
-        raise SourceError(RefreshFailureCode.INVALID_UTF8) from None
 
 
 class EntityRefreshKind:
@@ -173,7 +150,7 @@ class EntityRefreshKind:
             if isinstance(source, (GitHubEntitySource, HttpsEntitySource))
             else "gpi"
         )
-        text = decode_entity_content(document.content)
+        text = decode_source_text(document.content)
         try:
             catalog = _PARSERS[source_format](text, document.provenance)
         except GpiParseError as error:

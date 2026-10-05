@@ -55,4 +55,11 @@ def test_beat_schedules_one_refresh_per_kind() -> None:
             "schedule": crontab(minute="0", hour="3"),
             "args": ("entity",),
         },
+        "annotation-refresh": {
+            "task": "sab.refresh.schedule",
+            "schedule": crontab(
+                minute="0", hour="0", day_of_month="31", month_of_year="12"
+            ),
+            "args": ("annotation",),
+        },
     }

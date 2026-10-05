@@ -6,13 +6,19 @@ each piece. This guide connects the two. It follows a refresh from the moment
 something starts it, through the job that runs it, to the rows it writes in
 PostgreSQL.
 
-SAB refreshes three kinds of reference data:
+SAB refreshes four kinds of reference data:
 
 | Kind | Source format | Configured in `config/sources.yaml` | Source keys |
 |---|---|---|---|
 | `authorization` | go-site `users.yaml` | `authorization` (one entry) | always `go-site` |
 | `ontology` | OBO | `ontologies` | ontology keys, such as `go` |
 | `entity` | GPI 2.0 | `entities` | any key matching `^[a-z0-9][a-z0-9_-]*$` |
+| `annotation` | GPAD 2.0 | `annotations` (each entry names the `group` it replaces) | any key matching `^[a-z0-9][a-z0-9_-]*$` |
+
+The annotation kind has two job types, `annotation_refresh` and
+`annotation_cutover`, both served by `AnnotationRefreshKind`. A cutover is a
+final replacement that moves the group to SAB management. It starts only from
+the admin API, through `RefreshStartService.start_cutover`.
 
 ## The whole picture
 
@@ -45,7 +51,7 @@ flowchart LR
     inproc --> runner
     settings --> runner
     runner --> fetch["SourceFetchers<br/>(GitHub or HTTPS)"]
-    runner --> kinds["AuthorizationRefreshKind<br/>OntologyRefreshKind<br/>EntityRefreshKind"]
+    runner --> kinds["AuthorizationRefreshKind<br/>OntologyRefreshKind<br/>EntityRefreshKind<br/>AnnotationRefreshKind"]
     kinds --> services["Refresh services<br/>and repositories"]
     services --> tables[("kind-specific tables")]
     runner -->|"progress, result, status"| jobs
@@ -89,14 +95,19 @@ document is already active.
 
 | Trigger | Entry point | `requested_by` | How jobs are dispatched |
 |---|---|---|---|
-| Schedule | Beat entries `authorization-refresh`, `ontology-refresh`, `entity-refresh` call `sab.refresh.schedule(kind)` in `workers/tasks.py` | `scheduler` | Celery (`tasks.dispatch_refresh_job`) |
+| Schedule | Beat entries `authorization-refresh`, `ontology-refresh`, `entity-refresh`, `annotation-refresh` call `sab.refresh.schedule(kind)` in `workers/tasks.py` | `scheduler` | Celery (`tasks.dispatch_refresh_job`) |
 | API | `api/routes/admin.py` | the caller's actor ID | Celery (`tasks.dispatch_refresh_job`) |
 | CLI | `cli/refresh.py` (`just refresh`) | `cli` | in the CLI process, one job at a time |
 
-All three call `RefreshStartService.start(kind, requested_by=..., source_key=...)`.
+All three triggers call `RefreshStartService.start(kind, requested_by=..., source_key=...)`.
 A `source_key` refreshes one source; `None` refreshes every configured source of
 the kind. The authorization route and CLI never pass a key, because there is
-only one authorization source.
+only one authorization source. For annotations, "refresh all" leaves out groups
+that are SAB-managed, and naming a SAB-managed group's source raises
+`GroupSabManagedError` (`group_sab_managed`, HTTP 409) before any job is created.
+Cutovers use a separate entry point, `RefreshStartService.start_cutover`, which
+the `POST /admin/annotation-cutovers` route calls. The schedule and CLI never
+start cutovers.
 
 ```mermaid
 sequenceDiagram
@@ -207,16 +218,16 @@ was already active, completed progress includes `"unchanged": true`.
 Each kind implements the `RefreshKind` protocol in `refresh/kinds.py`. Read the
 rows below side by side: the steps are the same, and only their contents differ.
 
-| Step | Authorization (`refresh/authorization.py`) | Ontology (`refresh/ontology.py`) | Entity (`refresh/entity.py`) |
-|---|---|---|---|
-| `recover` | nothing to recover; the replacement is one transaction | stored `refresh_result` on this job's `ontology_metadata` row | stored publication result, or committed staging, which it publishes without fetching |
-| `unchanged` | most recent `authorization_refresh` row has the same type, locator, revision, and checksum | active `ontology_metadata` row has the same type, locator, revision, and checksum | active `entity_catalog_snapshot` has the same locator and checksum |
-| `apply` | decode UTF-8, validate `users.yaml`, replace users and grants | take the ontology lock, check unchanged again, parse OBO, stage, activate | decode gzip and UTF-8, parse GPI, stage, publish |
-| Tables written | `sab_user`, `sab_group`, `authorization_assignment`, `authorization_refresh` | `ontology_metadata`, `ontology_term`, `ontology_closure`; `annotation` and its versions when terms are replaced | `entity_catalog_snapshot`, `entity_staging_record`, `entity_membership`, `entity_source_record` |
-| Audit action | `authorization.refreshed` | `ontology.refreshed`, plus `annotation.updated` per replaced term | `entity.refreshed` (`entity.retired` for retirement) |
-| Kind-specific failure codes | `invalid_document` | `invalid_document`, `candidate_conflict` | `header`, `row_validation`, `catalog_collision`, `candidate_conflict` |
-| `fail` cleanup | none | none | deletes the job's staging rows |
-| `after_terminal` | nothing | prune old snapshot data | nothing |
+| Step | Authorization (`refresh/authorization.py`) | Ontology (`refresh/ontology.py`) | Entity (`refresh/entity.py`) | Annotation (`refresh/annotation.py`) |
+|---|---|---|---|---|
+| `recover` | nothing to recover; the replacement is one transaction | stored `refresh_result` on this job's `ontology_metadata` row | stored publication result, or committed staging, which it publishes without fetching | stored publication result from this job's `annotation_import` row; unpublished staging is discarded and redone, not resumed |
+| `unchanged` | most recent `authorization_refresh` row has the same type, locator, revision, and checksum | active `ontology_metadata` row has the same type, locator, revision, and checksum | active `entity_catalog_snapshot` has the same locator and checksum | ordinary refreshes only (a cutover never skips): the group is `gpad_imported`, its last published import has the same checksum and no `unknown_db_object_id` rejections, and the group has no local changes |
+| `apply` | decode UTF-8, validate `users.yaml`, replace users and grants | take the ontology lock, check unchanged again, parse OBO, stage, activate | decode gzip and UTF-8, parse GPI, stage, publish | try the group lock, refuse a SAB-managed group, decode gzip and UTF-8, parse GPAD, stage, publish (replacing the group's annotations) |
+| Tables written | `sab_user`, `sab_group`, `authorization_assignment`, `authorization_refresh` | `ontology_metadata`, `ontology_term`, `ontology_closure`; `annotation` and its versions when terms are replaced | `entity_catalog_snapshot`, `entity_staging_record`, `entity_membership`, `entity_source_record` | `annotation_staging` (and its multivalued and duplicate-reference child tables), `annotation_import`, `group_annotation_management`; on publication, the group's `annotation` rows and dependents are deleted and replaced |
+| Audit action | `authorization.refreshed` | `ontology.refreshed`, plus `annotation.updated` per replaced term | `entity.refreshed` (`entity.retired` for retirement) | `annotation_refresh.published` or `annotation_cutover.published` |
+| Kind-specific failure codes | `invalid_document` | `invalid_document`, `candidate_conflict` | `header`, `row_validation`, `catalog_collision`, `candidate_conflict` | `header`, `no_valid_annotations`, `cutover_rejected`, `group_sab_managed` |
+| `fail` cleanup | none | none | deletes the job's staging rows | deletes the job's staging rows and unpublished `annotation_import` row |
+| `after_terminal` | nothing | prune old snapshot data | nothing | nothing |
 
 Some details that matter when debugging:
 
@@ -240,6 +251,13 @@ Some details that matter when debugging:
   key is no longer configured. `RefreshRunner.run_retirement` runs it, and it does
   nothing if the key has been added back.
 
+- **Annotation.** Publication replaces the target group's annotations, change
+  sets, comments, and related audit events, and cannot be undone. Staging and
+  publication are separate transactions. Publication takes the exclusive global
+  annotation-write lock, so annotation writes wait until it commits. Rows whose
+  `db_object_id` is not an active entity are rejected and reported; an ordinary
+  refresh publishes the rest, and a cutover fails on any rejection.
+
 ## Locks
 
 | Lock | Kind of lock | Held by | Prevents |
@@ -249,10 +267,12 @@ Some details that matter when debugging:
 | Authorization refresh lock | transaction advisory lock | `replace_authorizations` | concurrent authorization replacements |
 | Ontology refresh lock | session try-lock, one per ontology | ontology `apply` and `prune` | out-of-order activation, and pruning a snapshot that is being activated |
 | Entity catalog lock | transaction advisory lock, one per source | entity publish and retire | concurrent changes to one source's active catalog |
-| Annotation system-update lock | exclusive global annotation-write lock | ontology activation | ordinary annotation writes during term replacement |
+| Annotation system-update lock | exclusive global annotation-write lock | ontology activation and annotation publication | ordinary annotation writes during term replacement or group replacement |
+| Annotation group lock (`annotation_group_lock`) | session try-lock, one per group | annotation `apply`, after the document is fetched and found changed | two GPAD jobs for one group staging or publishing at once |
 
 The try-locks never wait. A process that cannot take one either returns (job
-lock) or raises so the task is retried later (ontology lock).
+lock) or raises so the task is retried later (ontology lock and annotation group
+lock, which raises `AnnotationRefreshBusyError`).
 
 ## Where to start
 

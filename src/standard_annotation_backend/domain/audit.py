@@ -28,6 +28,8 @@ class AuditAction(StrEnum):
     ONTOLOGY_REFRESHED = "ontology.refreshed"
     ENTITY_REFRESHED = "entity.refreshed"
     ENTITY_RETIRED = "entity.retired"
+    ANNOTATION_REFRESH_PUBLISHED = "annotation_refresh.published"
+    ANNOTATION_CUTOVER_PUBLISHED = "annotation_cutover.published"
     ADMINISTRATIVE_CHANGE = "administrative.change"
 
 

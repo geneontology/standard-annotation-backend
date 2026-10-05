@@ -117,6 +117,11 @@ def active_annotation_subjects(seed_active_subjects: Callable[..., None]) -> Non
 
 
 APPLICATION_TABLES = (
+    "annotation_staging_duplicate_reference",
+    "annotation_staging_multivalued_value",
+    "annotation_staging",
+    "group_annotation_management",
+    "annotation_import",
     "entity_source_record",
     "entity_membership",
     "entity_staging_record",

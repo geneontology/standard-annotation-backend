@@ -7,11 +7,16 @@ from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
+from annotation_refresh_helpers import seed_group_import
 from refresh_helpers import TEST_SOURCES
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_entity_refresh_service import stage
 
+from standard_annotation_backend.domain.annotation_management import (
+    AnnotationManagementMode,
+    GroupSabManagedError,
+)
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
@@ -248,3 +253,107 @@ def test_scheduled_refresh_creates_scheduler_jobs_for_every_source(
     ]
     assert sorted(refreshed) == job_ids
     assert retired == []
+
+
+def test_refresh_all_annotations_skips_sab_managed_groups_and_never_cuts_over(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Refresh-all creates ordinary jobs only for groups GPAD still manages."""
+    seed_group_import(
+        session_factory,
+        group_key="RGD",
+        source_key="rgd-gpad",
+        mode=AnnotationManagementMode.SAB_MANAGED,
+    )
+    dispatched: list[Job] = []
+
+    jobs = _service(unit_of_work_factory, dispatched).start(
+        RefreshKindName.ANNOTATION, requested_by="scheduler", source_key=None
+    )
+
+    assert _targets(jobs) == [(JobType.ANNOTATION_REFRESH, "mgi-gpad")]
+
+
+@pytest.mark.parametrize("cutover", [False, True])
+def test_explicit_sab_managed_source_creates_no_job(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    cutover: bool,
+) -> None:
+    """Naming a SAB-managed group's source is rejected before any job exists."""
+    seed_group_import(
+        session_factory,
+        group_key="MGI",
+        source_key="mgi-gpad",
+        mode=AnnotationManagementMode.SAB_MANAGED,
+    )
+    service = _service(unit_of_work_factory, [])
+    with session_factory() as session:
+        jobs_before = session.scalar(select(func.count()).select_from(JobRecord))
+
+    with pytest.raises(GroupSabManagedError):
+        if cutover:
+            service.start_cutover(requested_by="admin", source_key="mgi-gpad")
+        else:
+            service.start(
+                RefreshKindName.ANNOTATION, requested_by="admin", source_key="mgi-gpad"
+            )
+
+    with session_factory() as session:
+        assert (
+            session.scalar(select(func.count()).select_from(JobRecord)) == jobs_before
+        )
+
+
+def test_cutover_reuses_only_an_unfinished_cutover(
+    unit_of_work_factory: UnitOfWorkFactory,
+) -> None:
+    """A cutover request reuses an unfinished cutover but never an ordinary refresh."""
+    service = _service(unit_of_work_factory, [])
+    (refresh,) = service.start(
+        RefreshKindName.ANNOTATION, requested_by="admin", source_key="mgi-gpad"
+    )
+
+    cutover = service.start_cutover(requested_by="admin", source_key="mgi-gpad")
+    again = service.start_cutover(requested_by="admin", source_key="mgi-gpad")
+
+    assert cutover.job_type is JobType.ANNOTATION_CUTOVER
+    assert cutover.job_id != refresh.job_id
+    assert again.job_id == cutover.job_id
+
+
+def test_scheduled_annotation_refresh_skips_sab_managed_groups(
+    monkeypatch: pytest.MonkeyPatch,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The schedule refreshes GPAD-managed groups and silently skips the rest."""
+    seed_group_import(
+        session_factory,
+        group_key="MGI",
+        source_key="mgi-gpad",
+        mode=AnnotationManagementMode.SAB_MANAGED,
+    )
+    refreshed: list[str] = []
+
+    @contextmanager
+    def runtime(**_kwargs: object) -> Iterator[object]:
+        yield SimpleNamespace(
+            unit_of_work_factory=unit_of_work_factory,
+            settings=SimpleNamespace(sources=TEST_SOURCES),
+        )
+
+    monkeypatch.setattr(tasks, "worker_runtime", runtime)
+    monkeypatch.setattr(tasks.run_refresh, "delay", refreshed.append)
+
+    tasks.schedule_refresh.run("annotation")
+
+    with session_factory() as session:
+        stored = session.scalars(select(JobRecord)).all()
+    assert [
+        (job.job_type, job.parameters, job.requested_by)
+        for job in stored
+        if job.job_type == "annotation_refresh"
+    ] == [("annotation_refresh", {"source_key": "rgd-gpad"}, "scheduler")]
+    assert len(refreshed) == 1

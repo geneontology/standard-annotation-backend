@@ -55,5 +55,10 @@ celery_app.conf.update(
             "schedule": crontab.from_string(settings.entity_refresh_cron),
             "args": ("entity",),
         },
+        "annotation-refresh": {
+            "task": "sab.refresh.schedule",
+            "schedule": crontab.from_string(settings.annotation_refresh_cron),
+            "args": ("annotation",),
+        },
     },
 )
