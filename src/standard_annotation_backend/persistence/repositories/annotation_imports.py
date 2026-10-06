@@ -395,6 +395,10 @@ class AnnotationImportRepository:
         every subject that is still present is locked, as in
         `EntityRepository.require_active`.
 
+        A staged subject is accepted only if its row is among those locked. A
+        subject that becomes active after the locks are taken is rejected, because
+        nothing stops its row from being removed again before commit.
+
         Raises:
             CutoverRejectedError: Listing staged annotations whose subject is no
                 longer active.
@@ -412,34 +416,30 @@ class AnnotationImportRepository:
             .scalar_subquery()
         )
         while True:
-            locked = len(
-                self.session.execute(
+            locked = set(
+                self.session.scalars(
                     select(membership.db_object_id)
                     .where(membership.db_object_id.in_(staged_ids))
                     .with_for_update(read=True, key_share=True)
-                ).all()
+                )
             )
-            if locked >= (self.session.scalar(select(present_count)) or 0):
+            if len(locked) >= (self.session.scalar(select(present_count)) or 0):
                 break
-        missing = self.session.execute(
+        builder = RejectionReportBuilder()
+        staged = self.session.execute(
             select(
                 AnnotationStagingRecord.line_number,
                 AnnotationStagingRecord.db_object_id,
             )
-            .where(
-                AnnotationStagingRecord.job_id == job_id,
-                ~select(literal(1))
-                .select_from(membership)
-                .where(membership.db_object_id == AnnotationStagingRecord.db_object_id)
-                .exists(),
-            )
+            .where(AnnotationStagingRecord.job_id == job_id)
             .order_by(AnnotationStagingRecord.line_number)
-        ).all()
-        if missing:
-            builder = RejectionReportBuilder()
-            for line_number, db_object_id in missing:
+        )
+        for line_number, db_object_id in staged:
+            if db_object_id not in locked:
                 builder.add(unknown_subject_rejection(line_number, db_object_id))
-            raise CutoverRejectedError(builder.build())
+        report = builder.build()
+        if report.issue_count:
+            raise CutoverRejectedError(report)
 
     def _delete_group_data(self, group_key: str) -> int:
         """Delete a group's annotations and dependents; return annotations deleted."""
