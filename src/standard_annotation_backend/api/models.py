@@ -204,8 +204,9 @@ class JobResource(BaseModel):
             "a failure_code, and, when available, failure_details describing the "
             "problem: a message for an invalid header, or issue_count and up to "
             "100 issues (line number, category, and invalid fields) for invalid "
-            "rows. Refresh jobs whose source document was already active, so "
-            "nothing was applied, include unchanged=true."
+            "rows. Completed refresh jobs, except entity retirement, include "
+            "unchanged, which is true when the source document was already "
+            "active so nothing was applied."
         ),
         examples=[
             {
@@ -237,11 +238,12 @@ class JobResource(BaseModel):
     warnings: tuple[str, ...]
     result: dict[str, object] | None = Field(
         description=(
-            "Type-specific durable result. Successful entity refreshes include "
-            "warning_count and warnings; refreshes whose source is unchanged "
-            "return unchanged: true instead."
+            "Type-specific durable result. Successful results of every refresh "
+            "job, except entity retirement, include unchanged, true when "
+            "nothing was applied. Entity refresh results also include "
+            "warning_count and warnings."
         ),
-        examples=[{"warning_count": 0, "warnings": []}],
+        examples=[{"unchanged": False, "warning_count": 0, "warnings": []}],
     )
     artifact_uri: str | None
     error: str | None

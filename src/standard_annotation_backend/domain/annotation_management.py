@@ -23,7 +23,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
-from standard_annotation_backend.domain.refresh import SourceProvenance
+from standard_annotation_backend.domain.refresh import (
+    RefreshFailureCode,
+    SourceProvenance,
+    TerminalRefreshError,
+)
 
 MAX_REPORTED_REJECTIONS = 100
 """Maximum number of rejected records listed in a report.
@@ -236,7 +240,7 @@ class AnnotationRefreshResult:
             "rejection_report": self.rejection_report.to_json(),
         }
 
-    def to_progress(self) -> dict[str, object]:
+    def to_progress(self) -> dict[str, int]:
         """Return the counts reported as job progress."""
         return {
             "data_rows": self.data_rows,
@@ -275,7 +279,7 @@ class AnnotationRefreshUnchanged:
         }
 
 
-class GroupSabManagedError(RuntimeError):
+class GroupSabManagedError(TerminalRefreshError):
     """Report that SAB, not GPAD, is the source of truth for a group.
 
     GPAD may never replace a `sab_managed` group's annotations. The message does
@@ -284,6 +288,8 @@ class GroupSabManagedError(RuntimeError):
     Attributes:
         group_key: The SAB-managed group.
     """
+
+    failure_code = RefreshFailureCode.GROUP_SAB_MANAGED
 
     def __init__(self, group_key: str) -> None:
         self.group_key = group_key
@@ -321,11 +327,13 @@ class CutoverRejectedError(ValueError):
         super().__init__("cutover requires zero rejected records")
 
 
-class AnnotationImportConflictError(RuntimeError):
+class AnnotationImportConflictError(TerminalRefreshError):
     """Report a job that cannot be staged or published.
 
     The job does not exist, is not a GPAD job, or has no staged import.
     """
+
+    failure_code = RefreshFailureCode.INVALID_PARAMETERS
 
     def __init__(self) -> None:
         super().__init__("job has no usable annotation import")

@@ -3,8 +3,9 @@
 import hashlib
 import string
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from enum import Enum
+from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy import Engine, text
@@ -218,3 +219,28 @@ def acquire_signature_locks(session: Session, signatures: Iterable[str]) -> None
     statement = text("SELECT pg_advisory_xact_lock(:lock_key)")
     for lock_key in ordered_signature_lock_keys(signatures):
         session.execute(statement, {"lock_key": lock_key})
+
+
+class AdvisoryTryLock(Protocol):
+    """Try to take a namespaced advisory lock for the duration of a context."""
+
+    def __call__(
+        self, namespace: LockNamespace, value: str | UUID | None = None
+    ) -> AbstractContextManager[bool]:
+        """Return a context manager that yields whether the lock was acquired."""
+        ...
+
+
+def bind_try_lock(engine: Engine) -> AdvisoryTryLock:
+    """Return a try-lock that opens its dedicated connections from `engine`.
+
+    The result behaves like `try_advisory_lock` with `engine` already supplied,
+    so callers can take locks without depending on a database engine.
+    """
+
+    def try_lock(
+        namespace: LockNamespace, value: str | UUID | None = None
+    ) -> AbstractContextManager[bool]:
+        return try_advisory_lock(engine, namespace, value)
+
+    return try_lock

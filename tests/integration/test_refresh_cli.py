@@ -15,7 +15,7 @@ from refresh_helpers import (
 )
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
-from test_entity_refresh_service import stage
+from test_entity_refresh_service import publish_catalog
 
 from standard_annotation_backend.cli import refresh as cli
 from standard_annotation_backend.domain.annotation_management import (
@@ -156,11 +156,11 @@ def test_cli_runs_retirement_for_catalog_without_configured_source(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`refresh entity` also retires an active catalog whose source was removed."""
-    imports = EntityRefreshService(unit_of_work_factory)
-    imports.publish(
-        job_id=stage(imports, session_factory, "legacy:1", source="legacy"),
-        actor_id="curator",
+    legacy = sources_with_entities(
+        {"legacy": {"type": "https", "url": "https://example.org/legacy.gpi"}}
     )
+    imports = EntityRefreshService(unit_of_work_factory, legacy)
+    publish_catalog(imports, unit_of_work_factory, "legacy:1", source="legacy")
     only_mgi = sources_with_entities(
         {"mgi": {"type": "https", "url": "https://example.org/mgi.gpi"}}
     )

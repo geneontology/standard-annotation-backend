@@ -4,10 +4,15 @@ from collections.abc import Callable
 from uuid import UUID
 
 import pytest
-from refresh_helpers import FakeFetchers, build_runner, sources_with_entities
+from refresh_helpers import (
+    TEST_SOURCES,
+    FakeFetchers,
+    build_runner,
+    sources_with_entities,
+)
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
-from test_entity_refresh_service import stage
+from test_entity_refresh_service import publish_catalog
 
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
@@ -36,7 +41,9 @@ from standard_annotation_backend.services.job_service import (
 def services(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> tuple[JobService, EntityRefreshService]:
-    return JobService(unit_of_work_factory), EntityRefreshService(unit_of_work_factory)
+    return JobService(unit_of_work_factory), EntityRefreshService(
+        unit_of_work_factory, TEST_SOURCES
+    )
 
 
 NO_ENTITIES = sources_with_entities({})
@@ -57,14 +64,11 @@ def _runner(
 
 def _publish(
     imports: EntityRefreshService,
-    session_factory: sessionmaker[Session],
+    unit_of_work_factory: UnitOfWorkFactory,
     source: str,
     *identifiers: str,
 ) -> None:
-    imports.publish(
-        job_id=stage(imports, session_factory, *identifiers, source=source),
-        actor_id="curator",
-    )
+    publish_catalog(imports, unit_of_work_factory, *identifiers, source=source)
 
 
 def _retirement_job(jobs: JobService, source: str) -> UUID:
@@ -118,8 +122,8 @@ def test_retirement_removes_membership_and_reports_impacts(
 ) -> None:
     """Retiring a source removes its entities and reports affected annotations."""
     jobs, imports = services
-    _publish(imports, session_factory, "mgi", "MGI:1", "MGI:2")
-    _publish(imports, session_factory, "rgd", "RGD:1")
+    _publish(imports, unit_of_work_factory, "mgi", "MGI:1", "MGI:2")
+    _publish(imports, unit_of_work_factory, "rgd", "RGD:1")
     annotation_id = seed_annotation("MGI:1")  # active annotation on a retired entity
     job_id = _retirement_job(jobs, "mgi")
 
@@ -156,11 +160,10 @@ def test_retirement_removes_membership_and_reports_impacts(
         record = uow.jobs.get(job_id)
         assert record is not None
         assert record.status == JobStatus.SUCCEEDED.value
-        assert record.progress == {
-            "phase": "completed",
-            "retired": True,
-            "removed_count": 2,
-        }
+        # Retirement has no source document, so it never reports `unchanged`.
+        assert record.progress == {"phase": "completed", "removed_count": 2}
+        assert "unchanged" not in record.progress
+        assert record.result is not None and "unchanged" not in record.result
         assert record.result == {
             "source_key": "mgi",
             "retired": True,
@@ -186,7 +189,7 @@ def test_redelivered_retirement_recovers_result_without_second_audit(
     retirement is audited only once.
     """
     jobs, imports = services
-    _publish(imports, session_factory, "mgi", "MGI:1")
+    _publish(imports, unit_of_work_factory, "mgi", "MGI:1")
     runner = _runner(database_engine, unit_of_work_factory, NO_ENTITIES)
     job_id = _retirement_job(jobs, "mgi")
     original_succeed = JobService.succeed
@@ -245,7 +248,7 @@ def test_retirement_without_active_catalog_or_of_configured_source_is_a_no_op(
     """
     jobs, imports = services
     if case == "configured":
-        _publish(imports, session_factory, "mgi", "MGI:1")
+        _publish(imports, unit_of_work_factory, "mgi", "MGI:1")
         sources = ONLY_MGI
     else:
         sources = NO_ENTITIES

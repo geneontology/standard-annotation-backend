@@ -10,6 +10,14 @@ from uuid import UUID
 
 import httpx2
 import pytest
+from refresh_helpers import (
+    REVISION,
+    OboTerm,
+    go_document,
+    ignore_progress,
+    obo,
+    start_job,
+)
 from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,7 +30,7 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
     OntologyTerm,
 )
-from standard_annotation_backend.ontology.definitions import GO_DEFINITION
+from standard_annotation_backend.domain.refresh import SourceDocument
 from standard_annotation_backend.persistence.annotation_data import (
     AnnotationPersistenceData,
 )
@@ -30,6 +38,7 @@ from standard_annotation_backend.persistence.locks import (
     GLOBAL_ANNOTATION_WRITE_LOCK_KEY,
     LockNamespace,
     acquire_global_annotation_write_lock,
+    bind_try_lock,
     try_advisory_lock,
 )
 from standard_annotation_backend.persistence.models import (
@@ -38,9 +47,12 @@ from standard_annotation_backend.persistence.models import (
     JobRecord,
     OntologyMetadataRecord,
 )
-from standard_annotation_backend.persistence.repositories import AnnotationRepository
+from standard_annotation_backend.persistence.repositories import (
+    AnnotationRepository,
+    OntologyRepository,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.job_service import JobService
+from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
 )
@@ -54,7 +66,9 @@ OBO = (
     Path(__file__).parents[1] / "fixtures" / "ontology" / "minimal-go.obo"
 ).read_bytes()
 OLD_JOB_ID = UUID("00000000-0000-0000-0000-000000000071")
-LOAD_JOB_ID = UUID("00000000-0000-0000-0000-000000000072")
+OLD_TERM = "GO:0000001"
+NEW_TERM = "GO:0000002"
+OTHER_TERM = "GO:0000003"
 REPLACED_ANNOTATION_ID = UUID("00000000-0000-0000-0000-000000000073")
 OTHER_ANNOTATION_ID = UUID("00000000-0000-0000-0000-000000000074")
 NOW = datetime(2026, 9, 28, 18, tzinfo=UTC)
@@ -98,25 +112,30 @@ def _annotation(term_id: str, *, object_id: str) -> Annotation:
 def _prepare_load(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-) -> OntologyRefreshService:
+) -> tuple[Job, SourceDocument]:
+    """Activate an old snapshot with two annotations and start a refresh job.
+
+    Returns:
+        The started job and the document that replaces the first annotation's
+        obsolete term.
+    """
     with session_factory() as session:
-        for job_id in (OLD_JOB_ID, LOAD_JOB_ID):
-            session.add(
-                JobRecord(
-                    job_id=job_id,
-                    job_type="ontology_refresh",
-                    status="queued",
-                    requested_by="test",
-                    parameters={"source_key": "go"},
-                    progress={},
-                    warnings=[],
-                    created_at=NOW,
-                    updated_at=NOW,
-                )
+        session.add(
+            JobRecord(
+                job_id=OLD_JOB_ID,
+                job_type="ontology_refresh",
+                status="queued",
+                requested_by="test",
+                parameters={"source_key": "go"},
+                progress={},
+                warnings=[],
+                created_at=NOW,
+                updated_at=NOW,
             )
+        )
         session.commit()
 
-    old = _snapshot("old", {"GO:OLD": OntologyTerm("GO:OLD", False, (), ())})
+    old = _snapshot("old", {OLD_TERM: OntologyTerm(OLD_TERM, False, (), ())})
     with unit_of_work_factory() as unit_of_work:
         old_record = unit_of_work.ontologies.stage(
             job_id=OLD_JOB_ID,
@@ -126,7 +145,7 @@ def _prepare_load(
         )
         unit_of_work.ontologies.activate(old_record.version_id)
         unit_of_work.annotations.create(
-            annotation=_annotation("GO:OLD", object_id="UniProtKB:P12345"),
+            annotation=_annotation(OLD_TERM, object_id="UniProtKB:P12345"),
             actor_id="creator",
             change_source="test",
             owning_group_id="group-1",
@@ -134,7 +153,7 @@ def _prepare_load(
             annotation_id=REPLACED_ANNOTATION_ID,
         )
         unit_of_work.annotations.create(
-            annotation=_annotation("GO:OTHER", object_id="UniProtKB:Q12345"),
+            annotation=_annotation(OTHER_TERM, object_id="UniProtKB:Q12345"),
             actor_id="creator",
             change_source="test",
             owning_group_id="group-1",
@@ -143,21 +162,15 @@ def _prepare_load(
         )
         unit_of_work.commit()
 
-    candidate = _snapshot(
-        "new",
-        {
-            "GO:OLD": OntologyTerm("GO:OLD", True, ("GO:NEW",), ()),
-            "GO:NEW": OntologyTerm("GO:NEW", False, (), ()),
-            "GO:OTHER": OntologyTerm("GO:OTHER", False, (), ()),
-        },
+    job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
+    document = go_document(
+        obo(
+            OboTerm(OLD_TERM, obsolete=True, replaced_by=(NEW_TERM,)),
+            OboTerm(NEW_TERM),
+            OboTerm(OTHER_TERM),
+        )
     )
-    service = OntologyRefreshService(unit_of_work_factory, GO_DEFINITION)
-    service.stage(
-        job_id=LOAD_JOB_ID,
-        document=candidate.document,
-        snapshot=candidate,
-    )
-    return service
+    return job, document
 
 
 def _active_state(
@@ -227,12 +240,12 @@ def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
     calls: list[datetime] = []
 
     def record_pruning(
-        _service: OntologyRefreshService, *, pruned_at: datetime
+        _repository: OntologyRepository, key: OntologyKey, pruned_at: datetime
     ) -> tuple[UUID, ...]:
         calls.append(pruned_at)
         return ()
 
-    monkeypatch.setattr(OntologyRefreshService, "prune", record_pruning)
+    monkeypatch.setattr(OntologyRepository, "prune_candidates", record_pruning)
 
     with try_advisory_lock(
         database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
@@ -318,10 +331,14 @@ def test_refresh_task_retries_while_the_ontology_lock_is_held_then_succeeds(
 def test_activation_is_atomically_visible_and_blocks_ordinary_writes(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
+    database_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Readers see complete states while an ordinary writer waits for activation."""
-    service = _prepare_load(unit_of_work_factory, session_factory)
+    job, document = _prepare_load(unit_of_work_factory, session_factory)
+    service = OntologyRefreshService(
+        unit_of_work_factory, bind_try_lock(database_engine), None
+    )
     update_flushed = Event()
     allow_activation_commit = Event()
     writer_started = Event()
@@ -379,11 +396,9 @@ def test_activation_is_atomically_visible_and_blocks_ordinary_writes(
         session_factory() as observer_session,
         ThreadPoolExecutor(max_workers=2) as executor,
     ):
-        activation = executor.submit(
-            service.activate, job_id=LOAD_JOB_ID, actor_id="ontology-worker"
-        )
+        activation = executor.submit(service.apply, job, document, ignore_progress)
         assert update_flushed.wait(FAILURE_GUARD_SECONDS)
-        assert _active_state(unit_of_work_factory) == ("old", "GO:OLD", 1)
+        assert _active_state(unit_of_work_factory) == ("old", OLD_TERM, 1)
 
         writer = executor.submit(ordinary_write, writer_session)
         assert writer_started.wait(FAILURE_GUARD_SECONDS)
@@ -394,21 +409,25 @@ def test_activation_is_atomically_visible_and_blocks_ordinary_writes(
         )
         assert not writer.done()
         allow_activation_commit.set()
-        result = activation.result(timeout=FAILURE_GUARD_SECONDS)
+        outcome = activation.result(timeout=FAILURE_GUARD_SECONDS)
         observed_by_writer = writer.result(timeout=FAILURE_GUARD_SECONDS)
 
-    assert result.annotation_update_count == 1
-    assert observed_by_writer == "GO:NEW"
-    assert _active_state(unit_of_work_factory) == ("new", "GO:NEW", 2)
+    assert outcome.result["annotation_update_count"] == 1
+    assert observed_by_writer == NEW_TERM
+    assert _active_state(unit_of_work_factory) == (REVISION, NEW_TERM, 2)
 
 
 def test_failed_activation_never_exposes_partial_state(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
+    database_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A reader during and after a failed activation sees the prior complete state."""
-    service = _prepare_load(unit_of_work_factory, session_factory)
+    job, document = _prepare_load(unit_of_work_factory, session_factory)
+    service = OntologyRefreshService(
+        unit_of_work_factory, bind_try_lock(database_engine), None
+    )
     update_flushed = Event()
     allow_failure = Event()
     original = AnnotationRepository.apply_system_update
@@ -435,20 +454,18 @@ def test_failed_activation_never_exposes_partial_state(
 
     monkeypatch.setattr(AnnotationRepository, "apply_system_update", fail_after_update)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        activation = executor.submit(
-            service.activate, job_id=LOAD_JOB_ID, actor_id="ontology-worker"
-        )
+        activation = executor.submit(service.apply, job, document, ignore_progress)
         assert update_flushed.wait(FAILURE_GUARD_SECONDS)
-        assert _active_state(unit_of_work_factory) == ("old", "GO:OLD", 1)
+        assert _active_state(unit_of_work_factory) == ("old", OLD_TERM, 1)
         allow_failure.set()
         with pytest.raises(RuntimeError, match="injected activation failure"):
             activation.result(timeout=FAILURE_GUARD_SECONDS)
 
-    assert _active_state(unit_of_work_factory) == ("old", "GO:OLD", 1)
+    assert _active_state(unit_of_work_factory) == ("old", OLD_TERM, 1)
     with session_factory() as session:
         candidate = session.scalar(
             select(OntologyMetadataRecord).where(
-                OntologyMetadataRecord.job_id == LOAD_JOB_ID
+                OntologyMetadataRecord.job_id == job.job_id
             )
         )
         assert candidate is not None

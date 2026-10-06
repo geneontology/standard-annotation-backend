@@ -18,7 +18,6 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
     OntologyTerm,
 )
-from standard_annotation_backend.ontology.definitions import GO_DEFINITION
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     JobRecord,
@@ -31,9 +30,6 @@ from standard_annotation_backend.persistence.repositories import (
     OntologySnapshotPrunedError,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.ontology_refresh_service import (
-    OntologyRefreshService,
-)
 
 JOB_ID = UUID("00000000-0000-0000-0000-000000000701")
 NOW = datetime(2026, 9, 29, 12, tzinfo=UTC)
@@ -90,6 +86,16 @@ def _stage_snapshot(
     return version_id, document, snapshot
 
 
+def _prune(
+    unit_of_work_factory: UnitOfWorkFactory, pruned_at: datetime
+) -> tuple[UUID, ...]:
+    """Prune GO snapshots in one committed transaction."""
+    with unit_of_work_factory() as unit_of_work:
+        pruned = unit_of_work.ontologies.prune_candidates(OntologyKey.GO, pruned_at)
+        unit_of_work.commit()
+    return pruned
+
+
 def test_pruned_snapshot_cannot_be_read_as_complete(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
@@ -125,10 +131,12 @@ def test_pruned_snapshot_cannot_be_resumed_as_complete(
     """Restaging the same job rejects its metadata-only snapshot."""
     _, document, snapshot = _stage_snapshot(unit_of_work_factory, session_factory)
 
-    service = OntologyRefreshService(unit_of_work_factory, GO_DEFINITION)
-
-    with pytest.raises(OntologySnapshotPrunedError):
-        service.stage(job_id=JOB_ID, document=document, snapshot=snapshot)
+    with unit_of_work_factory() as unit_of_work:
+        record = unit_of_work.ontologies.stage(
+            job_id=JOB_ID, document=document, snapshot=snapshot, closure_rows=()
+        )
+        with pytest.raises(OntologySnapshotPrunedError):
+            unit_of_work.ontologies.term_count(record.version_id)
 
 
 def _job_for_status(job_id: UUID, status: str) -> JobRecord:
@@ -239,9 +247,8 @@ def test_pruning_keeps_required_snapshots_and_preserves_provenance(
 ) -> None:
     """Pruning deletes eligible term and closure rows but retains provenance."""
     version_ids = _stage_history(unit_of_work_factory, session_factory)
-    service = OntologyRefreshService(unit_of_work_factory, GO_DEFINITION)
 
-    pruned = service.prune(pruned_at=PRUNED_AT)
+    pruned = _prune(unit_of_work_factory, PRUNED_AT)
 
     names_by_version = {version_id: name for name, version_id in version_ids.items()}
     assert tuple(names_by_version[version_id] for version_id in pruned) == (
@@ -312,7 +319,6 @@ def test_repeated_pruning_is_harmless_and_preserves_original_timestamp(
 ) -> None:
     """Pruning records absent rows once, and a retry preserves the original time."""
     version_ids = _stage_history(unit_of_work_factory, session_factory)
-    service = OntologyRefreshService(unit_of_work_factory, GO_DEFINITION)
     with session_factory() as session:
         session.execute(
             delete(OntologyClosureRecord).where(
@@ -325,9 +331,9 @@ def test_repeated_pruning_is_harmless_and_preserves_original_timestamp(
             )
         )
         session.commit()
-    first = service.prune(pruned_at=PRUNED_AT)
+    first = _prune(unit_of_work_factory, PRUNED_AT)
 
-    repeated = service.prune(pruned_at=PRUNED_AT + timedelta(hours=1))
+    repeated = _prune(unit_of_work_factory, PRUNED_AT + timedelta(hours=1))
 
     assert version_ids["failed_candidate"] in first
     assert repeated == ()
@@ -352,9 +358,7 @@ def test_bulk_read_refreshes_cached_metadata_after_concurrent_pruning(
         assert cached is not None
         assert cached.bulk_data_pruned_at is None
 
-        OntologyRefreshService(unit_of_work_factory, GO_DEFINITION).prune(
-            pruned_at=PRUNED_AT
-        )
+        _prune(unit_of_work_factory, PRUNED_AT)
 
         with pytest.raises(OntologySnapshotPrunedError):
             repository.list_terms(version_ids["old_success"])
@@ -370,9 +374,7 @@ def test_bulk_read_lock_prevents_concurrent_pruning(
 
     def prune() -> tuple[UUID, ...]:
         pruning_started.set()
-        return OntologyRefreshService(unit_of_work_factory, GO_DEFINITION).prune(
-            pruned_at=PRUNED_AT
-        )
+        return _prune(unit_of_work_factory, PRUNED_AT)
 
     with session_factory() as reader:
         repository = OntologyRepository(reader)

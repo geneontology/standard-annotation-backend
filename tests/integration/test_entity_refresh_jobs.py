@@ -8,7 +8,7 @@ delivered a second time. Lifecycle rules shared by every kind are covered in
 
 import gzip
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import Any, cast
 from uuid import UUID
@@ -20,7 +20,10 @@ from refresh_helpers import (
     TEST_SOURCES,
     FakeFetchers,
     build_runner,
+    ignore_progress,
     sources_with_entities,
+    stage_without_publishing,
+    start_job,
 )
 from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -31,7 +34,6 @@ from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     RefreshKindName,
 )
-from standard_annotation_backend.gpi.parser import parse_gpi
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     EntityCatalogSnapshotRecord,
@@ -43,10 +45,12 @@ from standard_annotation_backend.persistence.repositories.entities import (
     EntityRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.refresh import entity as entity_refresh
 from standard_annotation_backend.refresh import runner as refresh_runner
 from standard_annotation_backend.refresh.fetchers import SourceError
 from standard_annotation_backend.refresh.runner import RefreshRunner
+from standard_annotation_backend.services import (
+    entity_refresh_service as entity_refresh,
+)
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
@@ -171,7 +175,7 @@ def jobs(unit_of_work_factory: UnitOfWorkFactory) -> JobService:
 @pytest.fixture
 def entity_service(unit_of_work_factory: UnitOfWorkFactory) -> EntityRefreshService:
     """Provide the real entity refresh service."""
-    return EntityRefreshService(unit_of_work_factory)
+    return EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
 
 
 @pytest.fixture
@@ -212,9 +216,11 @@ def test_entity_refresh_job_records_progress_and_result(
         "removed_count": 0,
         "warning_count": 0,
         "removal_impact_count": 0,
+        "unchanged": False,
     }
     assert stored.warnings == []
     assert stored.result is not None
+    assert stored.result["unchanged"] is False
     assert stored.result["source_checksum"] == SOURCE_SHA
     assert stored.result["source_locator"] == SOURCE_URL
     assert stored.result["source_key"] == "mgi"
@@ -571,11 +577,15 @@ def test_entity_refresh_redelivery_rejects_incompatible_or_incomplete_staging_be
     previous = _create_job(jobs)
     runner_for(fetchers).run(previous)
     job_id = _create_job(jobs)
-    document = fetchers.fetch("mgi", TEST_SOURCES.source(RefreshKindName.ENTITY, "mgi"))
-    entity_service.stage(
-        job_id=job_id,
-        source_key="mgi",
-        catalog=parse_gpi(document.content.decode(), document.provenance),
+    # Different content, so the refresh is not recognized as unchanged.
+    document = _fetchers(SOURCE_TEXT.replace("Gene1", "Gene2").encode()).fetch(
+        "mgi", TEST_SOURCES.source(RefreshKindName.ENTITY, "mgi")
+    )
+    stage_without_publishing(
+        entity_service,
+        jobs.find(job_id),
+        document,
+        (EntityRepository, "publish"),
     )
     with session_factory() as session:
         job = session.get(JobRecord, job_id)
@@ -678,7 +688,7 @@ def test_changed_url_or_content_publishes_new_snapshot(
 
     stored = _read_job(jobs, job_id)
     assert stored.status == JobStatus.SUCCEEDED
-    assert stored.result is not None and "unchanged" not in stored.result
+    assert stored.result is not None and stored.result["unchanged"] is False
     assert stored.result["source_locator"] == expected_url
     assert stored.result["source_checksum"] == sha256(text.encode()).hexdigest()
     assert stored.result["retained_count"] == 1
@@ -696,6 +706,7 @@ def test_changed_url_or_content_publishes_new_snapshot(
 def test_matching_catalog_of_another_source_does_not_make_refresh_unchanged(
     jobs: JobService,
     entity_service: EntityRefreshService,
+    unit_of_work_factory: UnitOfWorkFactory,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -704,29 +715,27 @@ def test_matching_catalog_of_another_source_does_not_make_refresh_unchanged(
     Another source's active catalog with the same locator and checksum is
     ignored, and the refresh publishes this source's catalog.
     """
-    other_job = jobs.create(
-        job_type=JobType.ENTITY_REFRESH,
-        requested_by="curator",
-        parameters={"source_key": "rgd"},
-    ).job_id
-    jobs.start(other_job)
-    other_text = SOURCE_TEXT.replace("MGI:1", "RGD:1")
-    provenance = (
-        _fetchers()
-        .fetch("mgi", TEST_SOURCES.source(RefreshKindName.ENTITY, "mgi"))
-        .provenance
+    other_job = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "rgd")
+    mgi_document = _fetchers().fetch(
+        "mgi", TEST_SOURCES.source(RefreshKindName.ENTITY, "mgi")
     )
-    entity_service.stage(
-        job_id=other_job, source_key="rgd", catalog=parse_gpi(other_text, provenance)
+    # The `rgd` catalog claims the `mgi` locator and checksum.
+    entity_service.apply(
+        other_job,
+        replace(
+            mgi_document,
+            source_key="rgd",
+            content=SOURCE_TEXT.replace("MGI:1", "RGD:1").encode(),
+        ),
+        ignore_progress,
     )
-    entity_service.publish(job_id=other_job, actor_id="curator")
     job_id = _create_job(jobs)
 
     runner_for(_fetchers()).run(job_id)
 
     stored = _read_job(jobs, job_id)
     assert stored.status == JobStatus.SUCCEEDED
-    assert stored.result is not None and "unchanged" not in stored.result
+    assert stored.result is not None and stored.result["unchanged"] is False
     assert stored.result["source_key"] == "mgi"
     assert stored.result["added_count"] == 1
     assert _memberships(session_factory) == [("MGI:1", "mgi"), ("RGD:1", "rgd")]

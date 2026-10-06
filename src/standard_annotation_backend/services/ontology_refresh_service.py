@@ -1,16 +1,28 @@
-"""Stage ontology snapshots and update annotations during activation."""
+"""Refresh ontologies from configured OBO sources and prune old snapshots.
 
+A refresh parses the OBO file, stages a complete inactive snapshot, and activates
+it while applying safe term replacements to annotations. Only one process at a
+time may stage, activate, or prune snapshots of one ontology. Each ontology has
+a PostgreSQL advisory lock that a process takes only if it is free. A refresh
+that finds it held raises `OntologyRefreshBusyError`, and Celery retries the task
+later instead of waiting.
+"""
+
+import logging
+from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
     AnnotationReplacementProposal,
     OntologyDefinition,
     OntologyDocument,
     OntologyFinding,
     OntologyKey,
+    OntologyParseError,
     OntologyRefreshResult,
     OntologySnapshot,
     OntologyTerm,
@@ -19,40 +31,202 @@ from standard_annotation_backend.domain.ontology import (
     ontology_refresh_warnings,
     propose_term_replacements,
 )
+from standard_annotation_backend.domain.refresh import (
+    ProgressReporter,
+    RefreshFailureCode,
+    RefreshKindName,
+    RefreshOutcome,
+    RetryableRefreshError,
+    SourceDocument,
+    TerminalRefreshError,
+    job_source_key,
+)
+from standard_annotation_backend.ontology.definitions import ontology_definition
+from standard_annotation_backend.ontology.obo_parser import parse_obo
 from standard_annotation_backend.persistence.annotation_data import (
     AnnotationPersistenceData,
     prepare_annotation_for_persistence,
+)
+from standard_annotation_backend.persistence.locks import (
+    AdvisoryTryLock,
+    LockNamespace,
 )
 from standard_annotation_backend.persistence.models import (
     OntologyMetadataRecord,
     OntologyTermRecord,
 )
-from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.persistence.unit_of_work import (
+    SqlAlchemyUnitOfWork,
+    UnitOfWorkFactory,
+)
 from standard_annotation_backend.services.audit_service import AuditService
+from standard_annotation_backend.services.job_service import Job
+
+logger = logging.getLogger(__name__)
 
 
-class OntologyCandidateConflictError(RuntimeError):
-    """Report that a staged job conflicts with its source or activation order."""
+class OntologyRefreshBusyError(RetryableRefreshError):
+    """Report that another process holds the ontology's refresh lock."""
 
 
 class OntologyRefreshService:
-    """Coordinate staging, activation, and annotation updates for ontology refreshes."""
+    """Refresh and prune every supported ontology.
+
+    Implements `RefreshKind`. One service serves every ontology key; the job's
+    source key selects the ontology's identifier prefixes and closure
+    predicates.
+
+    Args:
+        unit_of_work_factory: Opens the transactions for staging, activation,
+            and pruning.
+        try_lock: Takes the per-ontology lock.
+        enqueue_prune: Schedules pruning after a job finishes. `None` prunes in
+            this process instead.
+    """
 
     def __init__(
         self,
         unit_of_work_factory: UnitOfWorkFactory,
-        definition: OntologyDefinition,
+        try_lock: AdvisoryTryLock,
+        enqueue_prune: Callable[[str], None] | None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
-        self._definition = definition
+        self._try_lock = try_lock
+        self._enqueue_prune = enqueue_prune
 
-    def matches_active(self, document: OntologyDocument) -> bool:
+    @property
+    def name(self) -> RefreshKindName:
+        """Return `ontology`."""
+        return RefreshKindName.ONTOLOGY
+
+    @property
+    def job_types(self) -> frozenset[JobType]:
+        """Return `ontology_refresh`."""
+        return frozenset({JobType.ONTOLOGY_REFRESH})
+
+    def recover(self, job: Job) -> RefreshOutcome | None:
+        """Return the stored result if this job already activated its snapshot.
+
+        A key that is not a supported ontology has nothing to recover; the runner
+        then reports it as an unknown source.
+        """
+        key = _ontology_key(job_source_key(job.parameters))
+        if key is None:
+            return None
+        # Activation commits the snapshot and its result together, so a stored
+        # result means an earlier attempt stopped only before marking the job
+        # succeeded.
+        completed = self._completed(job.job_id)
+        return None if completed is None else _stored(completed)
+
+    def apply(
+        self, job: Job, document: SourceDocument, report: ProgressReporter
+    ) -> RefreshOutcome:
+        """Parse, stage, and activate a new snapshot under the ontology's lock.
+
+        A document that is already the active snapshot is not applied. It is
+        checked before taking the lock, so it never waits on another job, and
+        again once the lock is held.
+
+        Raises:
+            OntologyRefreshBusyError: If another process holds the lock. This is
+                not a terminal failure, so the run is retried later.
+            TerminalRefreshError: With `invalid_document` if the OBO is invalid.
+            OntologyCandidateConflictError: If the job already staged a different
+                source, or a snapshot staged after this job's is already active.
+        """
+        key = OntologyKey(document.source_key)
+        definition = ontology_definition(key)
+        ontology_document = _ontology_document(key, document)
+        if self._matches_active(ontology_document):
+            return _unchanged(ontology_document)
+        # Stage and activate under the per-ontology lock, so two jobs cannot
+        # activate snapshots out of order and pruning cannot delete a candidate.
+        with self._try_lock(LockNamespace.ONTOLOGY, key.value) as acquired:
+            if not acquired:
+                # The job stays running; Celery retries the whole task later.
+                raise OntologyRefreshBusyError
+            # Another job may have activated this same document while this one
+            # was fetching, so check again now that the lock is held.
+            if self._matches_active(ontology_document):
+                return _unchanged(ontology_document)
+            try:
+                snapshot = parse_obo(ontology_document, definition)
+            except OntologyParseError as error:
+                # An invalid file stays invalid, so retrying cannot help.
+                raise TerminalRefreshError(
+                    failure_code=RefreshFailureCode.INVALID_DOCUMENT,
+                    failure_details={"message": str(error)},
+                ) from None
+            self._stage(
+                job_id=job.job_id, document=ontology_document, snapshot=snapshot
+            )
+            result = self._activate(
+                definition, job_id=job.job_id, actor_id=job.requested_by
+            )
+        return _stored(result.to_job_result())
+
+    def discard_staging(self, uow: SqlAlchemyUnitOfWork, job_id: UUID) -> None:
+        """Ontology candidates are removed by pruning, not on failure."""
+
+    def after_terminal(self, source_key: str) -> None:
+        """Prune old snapshot data now that this ontology's job has finished.
+
+        Celery workers enqueue `sab.ontology.prune`, which retries while the lock
+        is busy. The CLI prunes in its own process and skips pruning when the
+        lock is busy; the next finished job prunes instead.
+        """
+        if _ontology_key(source_key) is None:
+            return
+        if self._enqueue_prune is not None:
+            self._enqueue_prune(source_key)
+            return
+        try:
+            if not self.prune(source_key):
+                logger.info(
+                    "Ontology pruning skipped because the ontology is busy: "
+                    "ontology_key=%s",
+                    source_key,
+                )
+        except Exception as error:
+            # The job already finished and committed its result, so a pruning
+            # failure must not make the caller report the refresh as failed.
+            # Pruning is only cleanup: the next finished ontology job prunes
+            # again and removes whatever this attempt left behind. Log the
+            # exception type only, since details could expose infrastructure.
+            logger.error(
+                "Ontology pruning failed: ontology_key=%s failure_type=%s",
+                source_key,
+                type(error).__name__,
+            )
+
+    def prune(self, source_key: str) -> bool:
+        """Delete unneeded term and closure rows for one ontology.
+
+        Returns:
+            `False` if another process holds the ontology's lock, otherwise `True`.
+            An unsupported key has nothing to prune and also returns `True`.
+        """
+        key = _ontology_key(source_key)
+        if key is None:
+            return True
+        with self._try_lock(LockNamespace.ONTOLOGY, key.value) as acquired:
+            if not acquired:
+                return False
+            self._prune(key, pruned_at=datetime.now(UTC))
+        return True
+
+    def _matches_active(self, document: OntologyDocument) -> bool:
         """Return whether the document's source details match the active snapshot."""
         with self._unit_of_work_factory() as unit_of_work:
             return unit_of_work.ontologies.matches_active_source(document)
 
-    def completed(self, job_id: UUID) -> dict[str, object] | None:
-        """Return the stored result if this job completed ontology activation."""
+    def _completed(self, job_id: UUID) -> dict[str, object] | None:
+        """Return the stored result if this job completed ontology activation.
+
+        Raises:
+            RuntimeError: If the job's snapshot is active but has no stored result.
+        """
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.ontologies.get_by_job(job_id)
             if record is None:
@@ -63,72 +237,62 @@ class OntologyRefreshService:
                 raise RuntimeError("active ontology snapshot has no durable result")
             return None
 
-    def prune(self, *, pruned_at: datetime) -> tuple[UUID, ...]:
+    def _prune(self, key: OntologyKey, *, pruned_at: datetime) -> tuple[UUID, ...]:
         """Delete eligible snapshot term and closure rows and commit the transaction.
 
         Args:
+            key: Ontology whose snapshots are pruned.
             pruned_at: Time to record on each snapshot that is pruned.
 
         Returns:
             Version identifiers for snapshots pruned by this call.
         """
         with self._unit_of_work_factory() as unit_of_work:
-            pruned = unit_of_work.ontologies.prune_candidates(
-                self._definition.key, pruned_at
-            )
+            pruned = unit_of_work.ontologies.prune_candidates(key, pruned_at)
             unit_of_work.commit()
         return pruned
 
-    def stage(
+    def _stage(
         self,
         *,
         job_id: UUID,
         document: OntologyDocument,
         snapshot: OntologySnapshot,
-    ) -> OntologyVersion:
-        """Persist and commit one complete inactive candidate snapshot."""
+    ) -> None:
+        """Persist and commit one complete inactive candidate snapshot.
+
+        If the job already staged the same source, its existing candidate is kept.
+
+        Raises:
+            OntologyCandidateConflictError: If the job already staged a different
+                source.
+            OntologySnapshotPrunedError: If the job's existing candidate was
+                pruned.
+        """
         with self._unit_of_work_factory() as unit_of_work:
-            existing = unit_of_work.ontologies.get_by_job(job_id)
-            if existing is not None:
-                if (
-                    existing.ontology_key,
-                    existing.source_type,
-                    existing.source_locator,
-                    existing.source_revision,
-                    existing.source_checksum,
-                ) != (
-                    document.ontology_key.value,
-                    document.source_type,
-                    document.source_locator,
-                    document.source_revision,
-                    document.source_checksum,
-                ):
-                    raise OntologyCandidateConflictError(
-                        "staged ontology source differs from the resolved document"
-                    )
-                return _ontology_version(
-                    existing,
-                    term_count=unit_of_work.ontologies.term_count(existing.version_id),
-                    closure_count=unit_of_work.ontologies.closure_count(
-                        existing.version_id
-                    ),
-                )
             record = unit_of_work.ontologies.stage(
                 job_id=job_id,
                 document=document,
                 snapshot=snapshot,
                 closure_rows=compute_closure(snapshot),
             )
-            version = _ontology_version(
-                record,
-                term_count=len(snapshot.terms),
-                closure_count=unit_of_work.ontologies.closure_count(record.version_id),
-            )
+            # Reading the counts raises if a kept candidate was already pruned.
+            unit_of_work.ontologies.term_count(record.version_id)
+            unit_of_work.ontologies.closure_count(record.version_id)
             unit_of_work.commit()
-        return version
 
-    def activate(self, *, job_id: UUID, actor_id: str) -> OntologyRefreshResult:
-        """Activate a snapshot and apply replacements that do not create duplicates."""
+    def _activate(
+        self, definition: OntologyDefinition, *, job_id: UUID, actor_id: str
+    ) -> OntologyRefreshResult:
+        """Activate a snapshot and apply replacements that do not create duplicates.
+
+        Activation, annotation updates, audit events, and the stored result are
+        committed together.
+
+        Raises:
+            OntologyCandidateConflictError: If a snapshot staged after this job's
+                candidate is already active.
+        """
         with self._unit_of_work_factory() as unit_of_work:
             unit_of_work.annotations.acquire_exclusive_system_update_lock()
             candidate, previous = unit_of_work.ontologies.lock_activation_state(job_id)
@@ -146,7 +310,6 @@ class OntologyRefreshService:
             warnings = ontology_refresh_warnings(candidate_terms)
             if candidate.active:
                 return OntologyRefreshResult(
-                    True,
                     version,
                     0,
                     0,
@@ -154,14 +317,6 @@ class OntologyRefreshService:
                     (),
                     ontology_warnings=warnings,
                 )
-            if (
-                previous is not None
-                and previous.staging_sequence > candidate.staging_sequence
-            ):
-                raise OntologyCandidateConflictError(
-                    "a newer ontology snapshot is already active"
-                )
-
             previous_terms = (
                 {}
                 if previous is None
@@ -180,7 +335,7 @@ class OntologyRefreshService:
                     Annotation.model_validate(record.annotation_data),
                     snapshot,
                     previous_terms,
-                    self._definition,
+                    definition,
                 )
                 for record in records
             }
@@ -234,7 +389,7 @@ class OntologyRefreshService:
                             annotation_id,
                             proposals[annotation_id],
                             peers,
-                            self._definition.key,
+                            definition.key,
                         )
                     )
                 accepted.difference_update(newly_rejected)
@@ -264,7 +419,6 @@ class OntologyRefreshService:
                 if finding.annotation_id is not None
             }
             result = OntologyRefreshResult(
-                applied=True,
                 ontology_version=version,
                 annotation_scan_count=len(records),
                 annotation_update_count=len(accepted),
@@ -394,3 +548,63 @@ def _duplicate_findings(
         )
         for replacement in proposal.replacements
     )
+
+
+def _ontology_key(source_key: str) -> OntologyKey | None:
+    """Return the ontology for a source key, or `None` if it is not supported."""
+    try:
+        return OntologyKey(source_key)
+    except ValueError:
+        return None
+
+
+def _ontology_document(key: OntologyKey, document: SourceDocument) -> OntologyDocument:
+    """Convert a fetched document into the ontology parser's input."""
+    return OntologyDocument(
+        ontology_key=key,
+        content=document.content,
+        source_type=document.source_type,
+        source_locator=document.source_locator,
+        source_revision=document.source_revision,
+        source_checksum=document.source_checksum,
+        fetched_at=document.fetched_at,
+    )
+
+
+def _unchanged(document: OntologyDocument) -> RefreshOutcome:
+    """Build the outcome for a document that is already the active snapshot."""
+    result = OntologyRefreshResult.for_active_document(document).to_job_result()
+    return replace(_stored(result), unchanged=True)
+
+
+def _stored(result: dict[str, object]) -> RefreshOutcome:
+    """Build the job's outcome from a stored refresh result."""
+    findings = result.get("findings")
+    finding_count = len(findings) if isinstance(findings, list) else 0
+    ontology_warnings = result.get("ontology_warnings")
+    warning_count = len(ontology_warnings) if isinstance(ontology_warnings, list) else 0
+    warnings: list[str] = []
+    if warning_count:
+        noun = "warning" if warning_count == 1 else "warnings"
+        warnings.append(
+            f"Ontology refresh completed with {warning_count} ontology {noun}"
+        )
+    if finding_count:
+        warnings.append(f"Ontology refresh completed with {finding_count} findings")
+    return RefreshOutcome(
+        result=result,
+        counts={
+            "annotation_scan_count": _count(result, "annotation_scan_count"),
+            "annotation_update_count": _count(result, "annotation_update_count"),
+            "annotation_skip_count": _count(result, "annotation_skip_count"),
+            "finding_count": finding_count,
+            "ontology_warning_count": warning_count,
+        },
+        warnings=tuple(warnings),
+    )
+
+
+def _count(result: dict[str, object], key: str) -> int:
+    """Return a stored count, or 0 if it is missing or not an integer."""
+    value = result.get(key, 0)
+    return value if isinstance(value, int) else 0

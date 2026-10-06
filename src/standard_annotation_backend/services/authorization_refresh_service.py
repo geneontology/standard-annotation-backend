@@ -1,4 +1,10 @@
-"""Replace authorizations from a users document and record where it came from."""
+"""Run authorization refresh jobs for `RefreshRunner` from the go-site `users.yaml`.
+
+The complete document is validated before anything changes, and the replacement
+of users and grants commits in one transaction with its record and audit event.
+There is no staging to recover. A redelivered job fetches again, and `apply`
+recognizes the committed refresh as the current state.
+"""
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -7,16 +13,36 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
 
-from standard_annotation_backend.auth.users_yaml import parse_users_yaml
+from standard_annotation_backend.auth.users_yaml import (
+    InvalidUsersDocumentError,
+    parse_users_yaml,
+)
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
-from standard_annotation_backend.domain.refresh import SourceProvenance
+from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.refresh import (
+    ProgressReporter,
+    RefreshFailureCode,
+    RefreshKindName,
+    RefreshOutcome,
+    SourceDocument,
+    SourceProvenance,
+    TerminalRefreshError,
+)
+from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.models import AuthorizationRefreshRecord
 from standard_annotation_backend.persistence.repositories.auth import (
     SyncAuthorization,
     SyncUser,
     same_refresh_source,
 )
-from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.persistence.unit_of_work import (
+    SqlAlchemyUnitOfWork,
+    UnitOfWorkFactory,
+)
+from standard_annotation_backend.refresh.fetchers import SourceError
+from standard_annotation_backend.services.job_service import Job
+
+MAX_REPORTED_ISSUES = 100
 
 
 class InvalidAuthorizationRefreshSummaryError(RuntimeError):
@@ -55,7 +81,6 @@ class AuthorizationRefreshResult:
     user_count: int
     group_count: int
     assignment_count: int
-    applied: bool
 
     def to_job_result(self) -> dict[str, object]:
         """Return the result as a JSON-compatible dict for the job record."""
@@ -70,7 +95,6 @@ class AuthorizationRefreshResult:
             "user_count": self.user_count,
             "group_count": self.group_count,
             "assignment_count": self.assignment_count,
-            "applied": self.applied,
         }
 
 
@@ -84,14 +108,68 @@ class AuthorizationRefreshService:
     def __init__(self, unit_of_work_factory: UnitOfWorkFactory) -> None:
         self._unit_of_work_factory = unit_of_work_factory
 
-    def refresh(
+    @property
+    def name(self) -> RefreshKindName:
+        """Return `authorization`."""
+        return RefreshKindName.AUTHORIZATION
+
+    @property
+    def job_types(self) -> frozenset[JobType]:
+        """Return `authorization_refresh`."""
+        return frozenset({JobType.AUTHORIZATION_REFRESH})
+
+    def recover(self, job: Job) -> RefreshOutcome | None:
+        """Return `None`; `apply` recognizes a committed refresh as unchanged."""
+        return None
+
+    def apply(
+        self, job: Job, document: SourceDocument, report: ProgressReporter
+    ) -> RefreshOutcome:
+        """Validate the complete document, then replace users and grants.
+
+        A document identical to the one behind the most recent refresh is not
+        applied again.
+
+        Raises:
+            SourceError: With `invalid_utf8` if the bytes are not UTF-8.
+            TerminalRefreshError: With `invalid_document` if validation fails.
+        """
+        current = self._current(document.provenance)
+        if current is not None:
+            return _outcome(current, unchanged=True)
+        try:
+            yaml_text = document.content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise SourceError(RefreshFailureCode.INVALID_UTF8) from None
+        try:
+            result, applied = self._replace(
+                yaml_text,
+                document.provenance,
+                actor_id=job.requested_by,
+                job_id=job.job_id,
+            )
+        except InvalidUsersDocumentError as error:
+            raise TerminalRefreshError(
+                failure_code=RefreshFailureCode.INVALID_DOCUMENT,
+                failure_details=_issue_details(error.errors),
+            ) from None
+        # Another job may have applied this same document first.
+        return _outcome(result, unchanged=not applied)
+
+    def discard_staging(self, uow: SqlAlchemyUnitOfWork, job_id: UUID) -> None:
+        """Do nothing; authorization refreshes have no staging."""
+
+    def after_terminal(self, source_key: str) -> None:
+        """Do nothing; authorization refreshes have no follow-up work."""
+
+    def _replace(
         self,
         yaml_text: str,
         provenance: SourceProvenance,
         *,
-        actor_id: str = "authorization-refresh",
-        job_id: UUID | None = None,
-    ) -> AuthorizationRefreshResult:
+        actor_id: str,
+        job_id: UUID,
+    ) -> tuple[AuthorizationRefreshResult, bool]:
         """Replace users and grants, saving source details and audit in one commit.
 
         Any persistence or audit failure rolls back the entire operation. Raw
@@ -103,10 +181,12 @@ class AuthorizationRefreshService:
             yaml_text: Complete go-site users.yaml contents.
             provenance: Identifies the exact document that `yaml_text` came from.
             actor_id: Identity recorded on the audit event.
-            job_id: Job that requested the refresh, when there is one.
+            job_id: Job that requested the refresh.
 
         Returns:
-            Source details and active user, group, and assignment counts.
+            Source details with active user, group, and assignment counts, and
+            whether this call applied the document. `False` means the most
+            recent refresh already came from the same document.
 
         Raises:
             InvalidUsersDocumentError: If any source entry or YAML is invalid.
@@ -151,21 +231,19 @@ class AuthorizationRefreshService:
                 stored_summary = _StoredRefreshSummary.model_validate(summary)
             else:
                 stored_summary = _stored_summary(record)
-            result = _result(record, stored_summary, applied=replacement.applied)
+            result = _result(record, stored_summary)
             if replacement.applied:
-                details = result.to_job_result()
-                del details["applied"]
                 unit_of_work.audit.record(
                     action=AuditAction.AUTHORIZATION_REFRESHED,
                     actor_id=actor_id,
                     result=AuditResult.SUCCESS,
                     job_id=job_id,
-                    details={**details, **summary},
+                    details={**result.to_job_result(), **summary},
                 )
             unit_of_work.commit()
-        return result
+        return result, replacement.applied
 
-    def unchanged(
+    def _current(
         self, provenance: SourceProvenance
     ) -> AuthorizationRefreshResult | None:
         """Return the stored result when the current state came from this document.
@@ -180,7 +258,7 @@ class AuthorizationRefreshService:
             latest = unit_of_work.auth.latest_refresh()
             if latest is None or not same_refresh_source(latest, provenance):
                 return None
-            return _result(latest, _stored_summary(latest), applied=False)
+            return _result(latest, _stored_summary(latest))
 
 
 def _stored_summary(record: AuthorizationRefreshRecord) -> _StoredRefreshSummary:
@@ -192,10 +270,7 @@ def _stored_summary(record: AuthorizationRefreshRecord) -> _StoredRefreshSummary
 
 
 def _result(
-    record: AuthorizationRefreshRecord,
-    summary: _StoredRefreshSummary,
-    *,
-    applied: bool,
+    record: AuthorizationRefreshRecord, summary: _StoredRefreshSummary
 ) -> AuthorizationRefreshResult:
     """Build a result from a stored refresh record and its validated counts."""
     return AuthorizationRefreshResult(
@@ -209,5 +284,32 @@ def _result(
         user_count=summary.users,
         group_count=summary.groups,
         assignment_count=summary.assignments,
-        applied=applied,
     )
+
+
+def _outcome(result: AuthorizationRefreshResult, *, unchanged: bool) -> RefreshOutcome:
+    """Convert a service result into the job's outcome."""
+    return RefreshOutcome(
+        result=result.to_job_result(),
+        counts={
+            "user_count": result.user_count,
+            "group_count": result.group_count,
+            "assignment_count": result.assignment_count,
+        },
+        unchanged=unchanged,
+    )
+
+
+def _issue_details(issues: tuple[ValidationIssue, ...]) -> dict[str, object]:
+    """Describe validation issues for the job, keeping at most 100 of them."""
+    return {
+        "issue_count": len(issues),
+        "issues": [
+            {
+                "location": list(issue["location"]),
+                "message": issue["message"],
+                "type": issue["type"],
+            }
+            for issue in issues[:MAX_REPORTED_ISSUES]
+        ],
+    }

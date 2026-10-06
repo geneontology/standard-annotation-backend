@@ -10,12 +10,22 @@ from enum import StrEnum
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.refresh import (
+    RefreshFailureCode,
+    TerminalRefreshError,
+)
 
 
 class OntologyKey(StrEnum):
     """Identify ontologies configured for loading by SAB."""
 
     GO = "go"
+
+
+class OntologyCandidateConflictError(TerminalRefreshError):
+    """Report that a staged job conflicts with its source or activation order."""
+
+    failure_code = RefreshFailureCode.CANDIDATE_CONFLICT
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +174,6 @@ class OntologyVersion:
 class OntologyRefreshResult:
     """Summarize ontology activation, warnings, and annotation updates."""
 
-    applied: bool
     ontology_version: OntologyVersion | None
     annotation_scan_count: int
     annotation_update_count: int
@@ -174,16 +183,15 @@ class OntologyRefreshResult:
     ontology_warnings: tuple[OntologyRefreshWarning, ...] = ()
 
     @classmethod
-    def unchanged(cls, document: OntologyDocument) -> OntologyRefreshResult:
+    def for_active_document(cls, document: OntologyDocument) -> OntologyRefreshResult:
         """Return a refresh result for a document matching the active snapshot."""
-        return cls(False, None, 0, 0, 0, (), document)
+        return cls(None, 0, 0, 0, (), document)
 
     def to_job_result(self) -> dict[str, object]:
         """Return the complete successful outcome in job-storage format."""
         version = self.ontology_version
         document = self.document
         return {
-            "applied": self.applied,
             "ontology": (
                 version.ontology_key.value
                 if version is not None

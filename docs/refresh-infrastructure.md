@@ -16,7 +16,7 @@ SAB refreshes four kinds of reference data:
 | `annotation` | GPAD 2.0 | `annotations` (each entry names the `group` it replaces) | any key matching `^[a-z0-9][a-z0-9_-]*$` |
 
 The annotation kind has two job types, `annotation_refresh` and
-`annotation_cutover`, both served by `AnnotationRefreshKind`. A cutover is a
+`annotation_cutover`, both served by `AnnotationRefreshService`. A cutover is a
 final replacement that moves the group to SAB management. It starts only from
 the admin API, through `RefreshStartService.start_cutover`.
 
@@ -24,8 +24,8 @@ the admin API, through `RefreshStartService.start_cutover`.
 
 Every refresh, however it starts, goes through the same two services:
 `RefreshStartService` creates jobs, and `RefreshRunner` runs them. The runner
-handles the steps every kind shares and calls a *kind* object for the steps
-that differ.
+handles the steps every kind shares and calls the kind's refresh service for the
+steps that differ. Each refresh service implements the `RefreshKind` protocol.
 
 ```mermaid
 flowchart LR
@@ -51,9 +51,9 @@ flowchart LR
     inproc --> runner
     settings --> runner
     runner --> fetch["SourceFetchers<br/>(GitHub or HTTPS)"]
-    runner --> kinds["AuthorizationRefreshKind<br/>OntologyRefreshKind<br/>EntityRefreshKind<br/>AnnotationRefreshKind"]
-    kinds --> services["Refresh services<br/>and repositories"]
-    services --> tables[("kind-specific tables")]
+    runner --> services["AuthorizationRefreshService<br/>OntologyRefreshService<br/>EntityRefreshService<br/>AnnotationRefreshService"]
+    services --> repos["Repositories"]
+    repos --> tables[("kind-specific tables")]
     runner -->|"progress, result, status"| jobs
 ```
 
@@ -159,7 +159,7 @@ flowchart TD
     A["take job execution lock<br/>(try-lock on a dedicated connection)"] -->|held elsewhere| Z1["return: another process runs this job"]
     A -->|acquired| B["jobs.start: queued to running<br/>(audit job.started)"]
     B --> C{"job already<br/>succeeded or failed?"}
-    C -->|yes| Z2["kind.after_terminal; return"]
+    C -->|yes| Z2["after_terminal; return"]
     C -->|no| D{"known job type and<br/>valid source_key?"}
     D -->|no| F1["fail: invalid_parameters"]
     D -->|yes| E["kind.recover(job)"]
@@ -167,11 +167,9 @@ flowchart TD
     E -->|None| G{"source still in<br/>sources.yaml?"}
     G -->|no| F2["fail: unknown_source"]
     G -->|yes| I["progress phase: fetching<br/>SourceFetchers.fetch"]
-    I --> J["kind.unchanged(source_key, document)"]
-    J -->|result| H
-    J -->|None| K["progress phase: applying<br/>kind.apply(job, document, report)"]
+    I --> K["progress phase: applying<br/>kind.apply(job, document, report)"]
     K --> H
-    H["progress phase: completed + counts<br/>jobs.succeed(result)"] --> L["kind.after_terminal"]
+    H["progress phase: completed + counts + unchanged<br/>jobs.succeed(result + unchanged)"] --> L["kind.after_terminal"]
 ```
 
 Any exception raised after the job has started is classified:
@@ -181,13 +179,13 @@ Any exception raised after the job has started is classified:
 | `SourceError` (from fetching or decoding) | job fails with its code: `timeout`, `http_status`, `source_error`, `invalid_gzip`, `invalid_utf8` |
 | `UnknownSourceError` | job fails with `unknown_source` |
 | `TerminalRefreshError` (raised by a kind) | job fails with its code and `failure_details` |
-| an exception listed in `kind.terminal_errors` | job fails with the mapped code |
+| `RetryableRefreshError` (such as a busy lock) | logged at INFO and re-raised; the job stays `running` with its committed work |
 | anything else | re-raised; the job stays `running` with its committed work |
 
-A failed job is recorded by `kind.fail`, which calls `JobService.fail_refresh`.
-In one transaction it sets the status, stores
+The runner records a failed job through `JobService.fail_refresh`. In one
+transaction it sets the status, stores
 `{"phase": "failed", "failure_code": ..., "failure_details"?: ...}` as progress,
-writes the `job.failed` audit event, and runs any kind-specific cleanup.
+writes the `job.failed` audit event, and calls the service's `discard_staging`.
 
 A re-raised error means "try again later". Celery's wrapper
 (`_retry_safely` in `workers/tasks.py`) logs only the exception type and retries
@@ -211,22 +209,26 @@ stateDiagram-v2
 
 Kinds may report their own phases inside `applying`. Entity refreshes report
 `staging` and then `publishing`. When nothing was applied because the document
-was already active, completed progress includes `"unchanged": true`.
+was already active, `apply` returns an outcome with `unchanged` set. The runner
+alone records it: completed progress and the job result of every refresh job
+include `"unchanged"` (`true` or `false`). Retirement jobs record neither.
 
 ## What each kind does
 
-Each kind implements the `RefreshKind` protocol in `refresh/kinds.py`. Read the
-rows below side by side: the steps are the same, and only their contents differ.
+Each kind's refresh service implements the `RefreshKind` protocol in
+`refresh/runner.py`. Read the rows below side by side: the steps are the same,
+and only their contents differ. Recognizing an already active document is part
+of `apply`.
 
-| Step | Authorization (`refresh/authorization.py`) | Ontology (`refresh/ontology.py`) | Entity (`refresh/entity.py`) | Annotation (`refresh/annotation.py`) |
+| Step | Authorization (`AuthorizationRefreshService`) | Ontology (`OntologyRefreshService`) | Entity (`EntityRefreshService`) | Annotation (`AnnotationRefreshService`) |
 |---|---|---|---|---|
-| `recover` | nothing to recover; the replacement is one transaction | stored `refresh_result` on this job's `ontology_metadata` row | stored publication result, or committed staging, which it publishes without fetching | stored publication result from this job's `annotation_import` row; unpublished staging is discarded and redone, not resumed |
-| `unchanged` | most recent `authorization_refresh` row has the same type, locator, revision, and checksum | active `ontology_metadata` row has the same type, locator, revision, and checksum | active `entity_catalog_snapshot` has the same locator and checksum | ordinary refreshes only (a cutover never skips): the group is `gpad_imported`, its last published import has the same checksum and no `unknown_db_object_id` rejections, and the group has no local changes |
+| `recover` | nothing to recover; the replacement is one transaction, and `apply` recognizes it as unchanged | stored `refresh_result` on this job's `ontology_metadata` row | stored publication result, or committed staging, which it publishes without fetching | stored publication result from this job's `annotation_import` row; unpublished staging is discarded and redone, not resumed |
+| unchanged check (inside `apply`) | most recent `authorization_refresh` row has the same type, locator, revision, and checksum | active `ontology_metadata` row has the same type, locator, revision, and checksum | active `entity_catalog_snapshot` has the same locator and checksum | ordinary refreshes only (a cutover never skips): the group is `gpad_imported`, its last published import has the same checksum and no `unknown_db_object_id` rejections, and the group has no local changes |
 | `apply` | decode UTF-8, validate `users.yaml`, replace users and grants | take the ontology lock, check unchanged again, parse OBO, stage, activate | decode gzip and UTF-8, parse GPI, stage, publish | try the group lock, refuse a SAB-managed group, decode gzip and UTF-8, parse GPAD, stage, publish (replacing the group's annotations) |
 | Tables written | `sab_user`, `sab_group`, `authorization_assignment`, `authorization_refresh` | `ontology_metadata`, `ontology_term`, `ontology_closure`; `annotation` and its versions when terms are replaced | `entity_catalog_snapshot`, `entity_staging_record`, `entity_membership`, `entity_source_record` | `annotation_staging` (and its multivalued and duplicate-reference child tables), `annotation_import`, `group_annotation_management`; on publication, the group's `annotation` rows and dependents are deleted and replaced |
 | Audit action | `authorization.refreshed` | `ontology.refreshed`, plus `annotation.updated` per replaced term | `entity.refreshed` (`entity.retired` for retirement) | `annotation_refresh.published` or `annotation_cutover.published` |
 | Kind-specific failure codes | `invalid_document` | `invalid_document`, `candidate_conflict` | `header`, `row_validation`, `catalog_collision`, `candidate_conflict` | `header`, `no_valid_annotations`, `cutover_rejected`, `group_sab_managed` |
-| `fail` cleanup | none | none | deletes the job's staging rows | deletes the job's staging rows and unpublished `annotation_import` row |
+| `discard_staging` (on failure) | none | none | deletes the job's staging rows | deletes the job's staging rows and unpublished `annotation_import` row |
 | `after_terminal` | nothing | prune old snapshot data | nothing | nothing |
 
 Some details that matter when debugging:
@@ -235,11 +237,11 @@ Some details that matter when debugging:
   authorization refresh lock and checks the most recent refresh again inside the
   same transaction. Two concurrent refreshes of the same document therefore apply
   it once. A redelivered job fetches again, finds its own committed refresh
-  through `unchanged`, and succeeds with `applied: false`.
+  as unchanged, and succeeds with `"unchanged": true`.
 - **Ontology.** Staging and activation happen while the job holds the
   per-ontology lock (`ontology_refresh_lock`). If another process holds it,
-  `apply` raises `OntologyRefreshBusyError`, which is not a classified failure,
-  so the run is retried. Activation also takes the exclusive annotation
+  `apply` raises `OntologyRefreshBusyError`, a `RetryableRefreshError`, so the
+  job stays `running` and the run is retried. Activation also takes the exclusive annotation
   system-update lock, because it may rewrite annotations. Pruning runs after
   every finished ontology job: through `sab.ontology.prune` under Celery, or
   directly in the CLI process, where a busy lock or a pruning error is logged and
@@ -281,11 +283,11 @@ lock, which raises `AnnotationRefreshBusyError`).
 | A job stays `running` | worker logs for `Worker task unavailable` (Celery retries) or `Refresh job stopped before finishing` (CLI); start the same refresh again to dispatch and resume it |
 | A job failed | its `progress.failure_code` and `failure_details` through `GET /admin/jobs/{job_id}`; the table of classified errors above |
 | `unknown_source` | the job's `source_key` against `config/sources.yaml` as loaded by the running process (settings are cached per process) |
-| A refresh did nothing | completed progress with `"unchanged": true`: the source document is already active |
+| A refresh did nothing | completed progress with `"unchanged": true` (also in the job result): the source document is already active |
 | A scheduled refresh never ran | `workers/celery_app.py` Beat entries and the `SAB_*_REFRESH_CRON` settings |
 | Adding a source to an existing kind | `config/sources.yaml` only; no code change |
 | Adding a source type | `refresh/sources.py` (model) and `refresh/fetchers.py` (fetcher) |
-| Adding a refresh kind | a `RefreshKind` in `refresh/`, its job type and audit action in `domain/`, wiring in `workers/runtime.py`, a section in `config/sources.yaml`, a Beat entry, and an admin route |
+| Adding a refresh kind | a refresh service implementing `RefreshKind` in `services/`, its job type and audit action in `domain/`, wiring in `workers/runtime.py`, a section in `config/sources.yaml`, a Beat entry, and an admin route |
 
 ## Tests
 

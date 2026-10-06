@@ -139,9 +139,13 @@ def test_job_resource_explains_terminal_diagnostics_and_warning_counts(
     assert example["failure_details"]["issues"][0]["line_number"] == 412
     assert "failure_code" in properties["progress"]["description"]
     assert "failure_details" in properties["progress"]["description"]
-    assert properties["result"]["examples"] == [{"warning_count": 0, "warnings": []}]
+    assert properties["result"]["examples"] == [
+        {"unchanged": False, "warning_count": 0, "warnings": []}
+    ]
     assert "warning_count" in properties["result"]["description"]
-    assert "unchanged: true" in properties["result"]["description"]
+    assert "unchanged" in properties["progress"]["description"]
+    assert "unchanged" in properties["result"]["description"]
+    assert "except entity retirement" in properties["result"]["description"]
 
 
 def test_job_read_documents_path_parameter_and_typed_errors(schema: dict) -> None:

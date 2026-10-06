@@ -20,11 +20,9 @@ from standard_annotation_backend.persistence.models import (
     JobRecord,
     OntologyMetadataRecord,
 )
+from standard_annotation_backend.persistence.repositories import OntologyRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.job_service import JobService
-from standard_annotation_backend.services.ontology_refresh_service import (
-    OntologyRefreshService,
-)
 from standard_annotation_backend.workers import tasks
 from standard_annotation_backend.workers.tasks import (
     WorkerTaskUnavailableError,
@@ -127,8 +125,8 @@ def test_worker_loads_ontology_then_skips_unchanged_source(
     first = _load_job(unit_of_work_factory, first_id)
     second = _load_job(unit_of_work_factory, second_id)
     assert first.status == second.status == JobStatus.SUCCEEDED.value
-    assert first.result is not None and first.result["applied"] is True
-    assert second.result is not None and second.result["applied"] is False
+    assert first.result is not None and first.result["unchanged"] is False
+    assert second.result is not None and second.result["unchanged"] is True
     assert len(requests) == 4
     with session_factory() as session:
         assert (
@@ -210,8 +208,8 @@ def test_pruning_task_retries_infrastructure_failure(
 ) -> None:
     """A pruning infrastructure failure requests a task retry."""
     monkeypatch.setattr(
-        OntologyRefreshService,
-        "prune",
+        OntologyRepository,
+        "prune_candidates",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database")),
     )
 
@@ -226,8 +224,8 @@ def test_pruning_task_ignores_an_unknown_ontology_key(
     """A key that is not a supported ontology is neither pruned nor retried."""
     pruned: list[object] = []
     monkeypatch.setattr(
-        OntologyRefreshService,
-        "prune",
+        OntologyRepository,
+        "prune_candidates",
         lambda *_args, **_kwargs: pruned.append(object()),
     )
 
@@ -314,7 +312,7 @@ def test_staging_and_activation_infrastructure_failures_request_retry(
     job_id = _create_job(unit_of_work_factory)
     _install_source(monkeypatch, _source_responses())
     monkeypatch.setattr(
-        OntologyRefreshService,
+        OntologyRepository,
         method_name,
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("detail")),
     )
@@ -471,7 +469,8 @@ def test_redelivery_recovers_result_after_a_later_load_becomes_active(
 
     recovered = _load_job(unit_of_work_factory, first_id)
     assert recovered.status == JobStatus.SUCCEEDED.value
-    assert recovered.result == stored_result
+    # The recovered job reports the result its snapshot stored when activated.
+    assert recovered.result == {**stored_result, "unchanged": False}
     assert len(requests) == 4
 
 

@@ -12,17 +12,12 @@ from standard_annotation_backend.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
+from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
     create_unit_of_work_factory,
 )
-from standard_annotation_backend.refresh.annotation import AnnotationRefreshKind
-from standard_annotation_backend.refresh.authorization import (
-    AuthorizationRefreshKind,
-)
-from standard_annotation_backend.refresh.entity import EntityRefreshKind
 from standard_annotation_backend.refresh.fetchers import SourceFetcher, SourceFetchers
-from standard_annotation_backend.refresh.ontology import OntologyRefreshKind
 from standard_annotation_backend.refresh.runner import RefreshRunner
 from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.annotation_refresh_service import (
@@ -35,18 +30,21 @@ from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
 from standard_annotation_backend.services.job_service import JobService
+from standard_annotation_backend.services.ontology_refresh_service import (
+    OntologyRefreshService,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class RefreshComponents:
-    """Group the runner with the ontology kind that callers use directly.
+    """Group the runner with the ontology service that callers use directly.
 
     Attributes:
-        ontology: The ontology kind, whose `prune` the prune task calls.
+        ontology: The ontology service, whose `prune` the prune task calls.
         runner: Runs jobs of every kind.
     """
 
-    ontology: OntologyRefreshKind
+    ontology: OntologyRefreshService
     runner: RefreshRunner
 
 
@@ -58,7 +56,7 @@ def create_refresh_runner(
     fetchers: SourceFetcher,
     enqueue_prune: Callable[[str], None] | None = None,
 ) -> RefreshComponents:
-    """Build every refresh kind and a runner that can run all of them.
+    """Build every refresh service and a runner that can run all of them.
 
     Args:
         engine: Engine for advisory locks held on dedicated connections.
@@ -68,40 +66,20 @@ def create_refresh_runner(
         enqueue_prune: Schedules ontology pruning after an ontology job finishes.
             `None` prunes in the calling process instead (used by the CLI).
     """
+    try_lock = bind_try_lock(engine)
     jobs = JobService(unit_of_work_factory)
-    authorization = AuthorizationRefreshKind(
-        sources=sources,
-        service=AuthorizationRefreshService(unit_of_work_factory),
-        jobs=jobs,
-    )
-    entity = EntityRefreshKind(
-        sources=sources, service=EntityRefreshService(unit_of_work_factory), jobs=jobs
-    )
-    ontology = OntologyRefreshKind(
-        engine=engine,
-        sources=sources,
-        unit_of_work_factory=unit_of_work_factory,
-        jobs=jobs,
-        enqueue_prune=enqueue_prune,
-    )
-    annotation_service = AnnotationRefreshService(unit_of_work_factory)
-    annotation_kinds = tuple(
-        AnnotationRefreshKind(
-            engine=engine,
-            sources=sources,
-            service=annotation_service,
-            jobs=jobs,
-            cutover=cutover,
-        )
-        for cutover in (False, True)
-    )
+    authorization = AuthorizationRefreshService(unit_of_work_factory)
+    entity = EntityRefreshService(unit_of_work_factory, sources)
+    ontology = OntologyRefreshService(unit_of_work_factory, try_lock, enqueue_prune)
+    annotation = AnnotationRefreshService(unit_of_work_factory, sources, try_lock)
     return RefreshComponents(
         ontology=ontology,
         runner=RefreshRunner(
-            engine=engine,
+            try_lock=try_lock,
             jobs=jobs,
             fetchers=fetchers,
-            kinds=(authorization, entity, ontology, *annotation_kinds),
+            sources=sources,
+            kinds=(authorization, entity, ontology, annotation),
             retirer=entity,
         ),
     )
@@ -114,7 +92,7 @@ class WorkerRuntime:
     settings: Settings
     unit_of_work_factory: UnitOfWorkFactory
     jobs: JobService
-    ontology: OntologyRefreshKind
+    ontology: OntologyRefreshService
     runner: RefreshRunner
 
 

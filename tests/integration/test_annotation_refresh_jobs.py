@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 from annotation_refresh_helpers import gpad_bytes, gpad_row, seed_group_import
-from refresh_helpers import TEST_SOURCES, FakeFetchers, build_runner
+from refresh_helpers import TEST_SOURCES, FakeFetchers, build_runner, ignore_progress
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -19,6 +19,7 @@ from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
+    bind_try_lock,
     try_advisory_lock,
 )
 from standard_annotation_backend.persistence.models import (
@@ -27,9 +28,9 @@ from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.refresh.annotation import AnnotationRefreshBusyError
 from standard_annotation_backend.refresh.runner import RefreshRunner
 from standard_annotation_backend.services.annotation_refresh_service import (
+    AnnotationRefreshBusyError,
     AnnotationRefreshService,
 )
 from standard_annotation_backend.services.job_service import JobService
@@ -98,6 +99,7 @@ def test_refresh_job_publishes_and_records_counts(
         "annotations_published": 1,
         "records_rejected": 0,
         "annotations_deleted": 0,
+        "unchanged": False,
     }
     assert job.result is not None and job.result["mode"] == "gpad_imported"
     assert _group_annotations(session_factory) == 1
@@ -124,14 +126,18 @@ def test_unchanged_file_is_skipped_and_cutover_never_skips(
     first_result = jobs.find(first).result
     cutover_result = jobs.find(cutover).result
     assert first_result is not None and cutover_result is not None
+    assert first_result["unchanged"] is False
     assert jobs.find(second).progress["unchanged"] is True
     assert jobs.find(second).result == {
         "source_key": SOURCE,
         "group_key": "MGI",
         "import_job_id": str(first),
         "source_checksum": first_result["source_checksum"],
+        "unchanged": True,
     }
     assert cutover_result["mode"] == "sab_managed"
+    assert cutover_result["unchanged"] is False
+    assert jobs.find(cutover).progress["unchanged"] is False
     assert _group_annotations(session_factory) == 1
 
 
@@ -197,9 +203,9 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
         details = job.progress["failure_details"]
         assert isinstance(details, dict) and details["issue_count"] == 1
     assert _group_annotations(session_factory) == 1
-    assert AnnotationRefreshService(unit_of_work_factory).group_mode("MGI") is (
-        AnnotationManagementMode.GPAD_IMPORTED
-    )
+    with unit_of_work_factory() as uow:
+        mode = uow.annotation_imports.group_mode("MGI")
+    assert mode is AnnotationManagementMode.GPAD_IMPORTED
     # Leftover staging has no effect any client can see; it only occupies
     # storage. Counting staging rows is the only way to check that the failure
     # removed it.
@@ -232,6 +238,7 @@ def test_job_for_a_sab_managed_group_fails_with_group_sab_managed(
 def test_redelivery_after_publication_recovers_without_fetching(
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
+    database_engine: Engine,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -241,19 +248,17 @@ def test_redelivery_after_publication_recovers_without_fetching(
     changes nothing. The publication is audited once.
     """
     job_id = _job(jobs)
-    jobs.start(job_id)
-    service = AnnotationRefreshService(unit_of_work_factory)
-    service.stage(
-        job_id=job_id,
-        source_key=SOURCE,
-        group_key="MGI",
-        is_cutover=False,
-        provenance=FakeFetchers({SOURCE: GOOD})
-        .fetch(SOURCE, TEST_SOURCES.source(RefreshKindName.ANNOTATION, SOURCE))
-        .provenance,
-        text=GOOD.decode(),
+    job = jobs.start(job_id)
+    service = AnnotationRefreshService(
+        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
     )
-    service.publish(job_id=job_id, actor_id="curator")
+    service.apply(
+        job,
+        FakeFetchers({SOURCE: GOOD}).fetch(
+            SOURCE, TEST_SOURCES.source(RefreshKindName.ANNOTATION, SOURCE)
+        ),
+        ignore_progress,
+    )
     fetchers = FakeFetchers({})
 
     runner_for(fetchers).run(job_id)

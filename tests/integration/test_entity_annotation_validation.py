@@ -9,11 +9,12 @@ from threading import Event
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from refresh_helpers import TEST_SOURCES
 from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER, REVIEWER
 from test_entity_refresh_concurrency import TIMEOUT, wait_for_lock
-from test_entity_refresh_service import active_ids, stage
+from test_entity_refresh_service import active_ids, publish_catalog, stage_catalog
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
@@ -85,9 +86,8 @@ def test_unknown_subject_returns_exact_error_without_writes(
     accepted.
     """
     client = integration_api_client
-    imports = EntityRefreshService(unit_of_work_factory)
-    original = stage(imports, session_factory, validated_annotation.db_object_id)
-    imports.publish(job_id=original, actor_id="supplier")
+    imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    publish_catalog(imports, unit_of_work_factory, validated_annotation.db_object_id)
     payload = validated_annotation.model_dump(mode="json")
     to_unknown = operation.endswith("_to_unknown")
     annotation_id = None
@@ -128,8 +128,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
         if not to_unknown:
             assert client.post(f"{proposal_path}/preview").json()["can_accept"]
     if not to_unknown:
-        removal = stage(imports, session_factory)
-        imports.publish(job_id=removal, actor_id="supplier")
+        publish_catalog(imports, unit_of_work_factory)
     before = _counts(session_factory)
     if operation == "create":
         response = client.post(
@@ -154,10 +153,9 @@ def test_unknown_subject_returns_exact_error_without_writes(
         assert proposal["state"] == "proposed"
         assert proposal["reviewed_by"] is None
         # Publishing the subject makes the same proposal acceptable again.
-        restored = stage(
-            imports, session_factory, validated_annotation.db_object_id, UNKNOWN_ID
+        publish_catalog(
+            imports, unit_of_work_factory, validated_annotation.db_object_id, UNKNOWN_ID
         )
-        imports.publish(job_id=restored, actor_id="supplier")
         assert client.post(f"{proposal_path}/accept").status_code == status.HTTP_200_OK
 
 
@@ -172,9 +170,8 @@ def test_deletion_succeeds_after_subject_removal(
 
     The deleted annotation keeps its stored data and gains a new version.
     """
-    imports = EntityRefreshService(unit_of_work_factory)
-    original = stage(imports, session_factory, validated_annotation.db_object_id)
-    imports.publish(job_id=original, actor_id="supplier")
+    imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    publish_catalog(imports, unit_of_work_factory, validated_annotation.db_object_id)
     annotations = AnnotationService(unit_of_work_factory)
     created = annotations.create(
         payload=validated_annotation.model_dump(mode="json"),
@@ -189,8 +186,7 @@ def test_deletion_succeeds_after_subject_removal(
         if proposal_delete
         else None
     )
-    removal = stage(imports, session_factory)
-    imports.publish(job_id=removal, actor_id="supplier")
+    publish_catalog(imports, unit_of_work_factory)
     if proposal is not None:
         assert changes.accept(proposal.change_set_id, context=REVIEWER).is_deleted
     else:
@@ -214,8 +210,10 @@ def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
     A staged but unpublished identifier and a differently cased identifier are
     rejected, and rejected attempts write nothing.
     """
-    imports = EntityRefreshService(unit_of_work_factory)
-    job_id = stage(imports, session_factory, validated_annotation.db_object_id)
+    imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    job = stage_catalog(
+        imports, unit_of_work_factory, validated_annotation.db_object_id
+    )
     annotations = AnnotationService(unit_of_work_factory)
     payload = validated_annotation.model_dump(mode="json")
     before = _counts(session_factory)
@@ -224,7 +222,7 @@ def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
             payload=payload, owning_group_id="other-group", context=PROPOSER
         )
     assert _counts(session_factory) == before
-    imports.publish(job_id=job_id, actor_id="supplier")
+    assert imports.recover(job) is not None
     with pytest.raises(UnknownDbObjectIdError):
         annotations.create(
             payload={
@@ -254,12 +252,11 @@ def test_annotation_write_and_catalog_removal_are_serialized(
     The replacement removes the subject only after the create commits, and later
     updates to that annotation are rejected.
     """
-    imports = EntityRefreshService(unit_of_work_factory)
-    original = stage(
-        imports, session_factory, validated_annotation.db_object_id, "MGI:old"
+    imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    publish_catalog(
+        imports, unit_of_work_factory, validated_annotation.db_object_id, "MGI:old"
     )
-    imports.publish(job_id=original, actor_id="supplier")
-    replacement = stage(imports, session_factory, "MGI:new1", "MGI:new2")
+    replacement = stage_catalog(imports, unit_of_work_factory, "MGI:new1", "MGI:new2")
     validated = Event()
     release_write = Event()
     publishing = Event()
@@ -278,7 +275,7 @@ def test_annotation_write_and_catalog_removal_are_serialized(
         with session_factory() as session:
             pids.append(session.scalar(text("SELECT pg_backend_pid()")))
             publishing.set()
-            EntityRepository(session).publish(replacement)
+            EntityRepository(session).publish(replacement.job_id)
             session.commit()
 
     monkeypatch.setattr(EntityRepository, "require_active", hold_validation)

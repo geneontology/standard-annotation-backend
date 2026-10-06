@@ -11,6 +11,7 @@ import httpx2
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from refresh_helpers import apply_users_yaml
 from source_provenance import github_provenance
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -31,9 +32,6 @@ from standard_annotation_backend.persistence.repositories.auth import (
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.authentication_service import (
     AuthenticationService,
-)
-from standard_annotation_backend.services.authorization_refresh_service import (
-    AuthorizationRefreshService,
 )
 from standard_annotation_backend.services.token_service import (
     InvalidTokenError,
@@ -494,8 +492,8 @@ def test_users_yaml_login_can_start_management_without_a_numeric_id(
 - accounts: {github: curator}
   authorizations: {sab: [{role: edit, scope: self, group: MGI}]}
 """
-    AuthorizationRefreshService(unit_of_work_factory).refresh(
-        source, github_provenance("a" * 40, "test/repo")
+    apply_users_yaml(
+        unit_of_work_factory, source, github_provenance("a" * 40, "test/repo")
     )
     _login(integration_api_client)
     assert len(integration_api_client.get("/tokens/contexts").json()["items"]) == 1
@@ -519,12 +517,13 @@ def test_changed_login_gets_new_identity_and_cannot_inherit_old_tokens(
     session_factory: sessionmaker[Session],
 ) -> None:
     """A renamed login requires a new grant and cannot inherit the old identity."""
-    service = AuthorizationRefreshService(unit_of_work_factory)
     source = """
 - accounts: {github: curator}
   authorizations: {sab: [{role: edit, scope: self, group: MGI}]}
 """
-    service.refresh(source, github_provenance("a" * 40, "test/repo"))
+    apply_users_yaml(
+        unit_of_work_factory, source, github_provenance("a" * 40, "test/repo")
+    )
     responses = list(github_http_responses)
     _login(integration_api_client)
     context = integration_api_client.get("/tokens/contexts").json()["items"][0]
@@ -534,7 +533,8 @@ def test_changed_login_gets_new_identity_and_cannot_inherit_old_tokens(
         assert original is not None
         original_id = original.user_id
 
-    service.refresh(
+    apply_users_yaml(
+        unit_of_work_factory,
         source.replace("github: curator", "github: renamed-curator"),
         github_provenance("b" * 40, "test/repo"),
     )

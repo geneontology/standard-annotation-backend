@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     acquire_transaction_lock,
+    bind_try_lock,
     lock_key,
     try_advisory_lock,
 )
@@ -91,3 +92,14 @@ def test_transaction_lock_is_held_until_the_transaction_ends(
             assert _available_elsewhere(
                 database_engine, LockNamespace.REFRESH_START, None
             )
+
+
+def test_bound_try_lock_excludes_the_unbound_helper(database_engine: Engine) -> None:
+    """A try-lock bound to an engine shares keys with `try_advisory_lock`."""
+    try_lock = bind_try_lock(database_engine)
+    with try_lock(LockNamespace.ONTOLOGY, "go") as acquired:
+        assert acquired is True
+        with try_advisory_lock(
+            database_engine, LockNamespace.ONTOLOGY, "go"
+        ) as competing:
+            assert competing is False

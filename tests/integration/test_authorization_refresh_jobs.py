@@ -8,6 +8,7 @@ from uuid import UUID
 import httpx2
 import pytest
 from celery.exceptions import Retry
+from refresh_helpers import apply_users_yaml
 from source_provenance import github_provenance
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -20,10 +21,8 @@ from standard_annotation_backend.persistence.models import (
     AuthorizationRefreshRecord,
     JobRecord,
 )
+from standard_annotation_backend.persistence.repositories.auth import AuthRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.authorization_refresh_service import (
-    AuthorizationRefreshService,
-)
 from standard_annotation_backend.services.job_service import JobService
 from standard_annotation_backend.workers import tasks
 
@@ -129,7 +128,7 @@ def test_authorization_refresh_job_succeeds_with_durable_result(
         "user_count": 1,
         "group_count": 1,
         "assignment_count": 1,
-        "applied": True,
+        "unchanged": False,
     }
     assert job.error is None
     assert job.parameters == {"source_key": "go-site"}
@@ -155,8 +154,8 @@ def test_authorization_refresh_failure_is_safe_and_preserves_prior_state(
     failure_code: str,
 ) -> None:
     """Source and validation failures store one public error and no auth changes."""
-    prior = AuthorizationRefreshService(unit_of_work_factory).refresh(
-        VALID_SOURCE, github_provenance("b" * 40)
+    prior = apply_users_yaml(
+        unit_of_work_factory, VALID_SOURCE, github_provenance("b" * 40)
     )
     job_id = _create_job(unit_of_work_factory)
     requests = _install_github(monkeypatch, [source])
@@ -171,7 +170,7 @@ def test_authorization_refresh_failure_is_safe_and_preserves_prior_state(
     with session_factory() as session:
         refreshes = session.scalars(select(AuthorizationRefreshRecord)).all()
         assert len(refreshes) == 1
-        assert refreshes[0].refresh_id == prior.refresh_id
+        assert str(refreshes[0].refresh_id) == prior.result["refresh_id"]
     assert requests
 
 
@@ -187,7 +186,7 @@ def test_infrastructure_failure_requests_retry(
     def lose_database(*_args: object, **_kwargs: object) -> None:
         raise ConnectionResetError("database lost")
 
-    monkeypatch.setattr(AuthorizationRefreshService, "refresh", lose_database)
+    monkeypatch.setattr(AuthRepository, "replace_authorizations", lose_database)
     # Calling `.run` outside a worker has no broker, so replace the retry call
     # with one that raises `Retry` as a worker would.
     monkeypatch.setattr(
@@ -252,7 +251,7 @@ def test_redelivery_after_committed_refresh_fetches_again_and_applies_nothing(
 
     job = _load_job(unit_of_work_factory, job_id)
     assert job.status == JobStatus.SUCCEEDED.value
-    assert job.result is not None and job.result["applied"] is False
+    assert job.result is not None and job.result["unchanged"] is True
     assert job.parameters == {"source_key": "go-site"}
     # Each attempt resolves the commit and downloads the file again.
     assert len(requests) == 4
@@ -291,8 +290,8 @@ def test_two_jobs_for_same_sha_share_one_applied_refresh(
     assert first.status == second.status == JobStatus.SUCCEEDED.value
     assert first.result is not None and second.result is not None
     assert first.result["refresh_id"] == second.result["refresh_id"]
-    assert first.result["applied"] is True
-    assert second.result["applied"] is False
+    assert first.result["unchanged"] is False
+    assert second.result["unchanged"] is True
     with session_factory() as session:
         assert (
             session.scalar(select(func.count()).select_from(AuthorizationRefreshRecord))

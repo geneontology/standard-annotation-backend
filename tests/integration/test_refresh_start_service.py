@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 from annotation_refresh_helpers import seed_group_import
-from refresh_helpers import TEST_SOURCES
+from refresh_helpers import TEST_SOURCES, sources_with_entities
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
-from test_entity_refresh_service import stage
+from test_entity_refresh_service import publish_catalog
 
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
@@ -40,20 +40,24 @@ def _service(
     return RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatched.append)
 
 
+def _publish_unconfigured_catalog(unit_of_work_factory: UnitOfWorkFactory) -> None:
+    """Publish a `zfin` catalog, a source that `TEST_SOURCES` does not configure."""
+    zfin = sources_with_entities(
+        {"zfin": {"type": "https", "url": "https://example.org/zfin.gpi"}}
+    )
+    service = EntityRefreshService(unit_of_work_factory, zfin)
+    publish_catalog(service, unit_of_work_factory, "ZFIN:1", source="zfin")
+
+
 def _targets(jobs: tuple[Job, ...]) -> list[tuple[JobType, str]]:
     return [(job.job_type, str(job.parameters["source_key"])) for job in jobs]
 
 
 def test_refresh_all_entities_retires_removed_sources_first(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
 ) -> None:
     """Every configured source is refreshed and every removed one retired."""
-    service = EntityRefreshService(unit_of_work_factory)
-    service.publish(
-        job_id=stage(service, session_factory, "ZFIN:1", source="zfin"),
-        actor_id="curator",
-    )
+    _publish_unconfigured_catalog(unit_of_work_factory)
     dispatched: list[Job] = []
 
     jobs = _service(unit_of_work_factory, dispatched).start(
@@ -83,16 +87,11 @@ def test_refresh_all_entities_retires_removed_sources_first(
 )
 def test_refresh_all_for_kinds_without_retirement(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
     kind: RefreshKindName,
     expected: list[tuple[JobType, str]],
 ) -> None:
     """Authorization and ontology refreshes never create retirement jobs."""
-    service = EntityRefreshService(unit_of_work_factory)
-    service.publish(
-        job_id=stage(service, session_factory, "ZFIN:1", source="zfin"),
-        actor_id="curator",
-    )
+    _publish_unconfigured_catalog(unit_of_work_factory)
 
     jobs = _service(unit_of_work_factory, []).start(
         kind, requested_by="scheduler", source_key=None

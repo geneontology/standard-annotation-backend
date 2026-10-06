@@ -3,20 +3,29 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 from time import monotonic
-from uuid import UUID
 
+from refresh_helpers import TEST_SOURCES
 from sqlalchemy import Engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER
-from test_entity_refresh_service import active_ids, stage
+from test_entity_refresh_service import (
+    active_ids,
+    publish_catalog,
+    stage_catalog,
+    stored_result,
+)
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.entities import EntityCatalogCollisionError
+from standard_annotation_backend.persistence.repositories.entities import (
+    EntityRepository,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_service import AnnotationService
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
+from standard_annotation_backend.services.job_service import Job
 
 TIMEOUT = 10
 
@@ -81,11 +90,10 @@ def test_same_source_publications_serialize_and_readers_see_complete_catalogs(
     Until then, readers still see the previous catalog. Afterward, the second
     publication's catalog is the active one.
     """
-    service = EntityRefreshService(unit_of_work_factory)
-    old = stage(service, session_factory, "MGI:old1", "MGI:old2")
-    service.publish(job_id=old, actor_id="curator")
-    first = stage(service, session_factory, "MGI:first1", "MGI:first2")
-    second = stage(service, session_factory, "MGI:second1", "MGI:second2")
+    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    publish_catalog(service, unit_of_work_factory, "MGI:old1", "MGI:old2")
+    first = stage_catalog(service, unit_of_work_factory, "MGI:first1", "MGI:first2")
+    second = stage_catalog(service, unit_of_work_factory, "MGI:second1", "MGI:second2")
     entered = Event()
     pids: list[int] = []
 
@@ -93,16 +101,12 @@ def test_same_source_publications_serialize_and_readers_see_complete_catalogs(
         with session_factory() as session:
             pids.append(session.scalar(text("SELECT pg_backend_pid()")))
             entered.set()
-            from standard_annotation_backend.persistence.repositories.entities import (
-                EntityRepository,
-            )
-
-            EntityRepository(session).publish(second)
+            EntityRepository(session).publish(second.job_id)
             session.commit()
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         with unit_of_work_factory() as uow:
-            uow.entities.publish(first)
+            uow.entities.publish(first.job_id)
             future = pool.submit(publish_second)
             assert entered.wait(TIMEOUT)
             wait_for_lock(database_engine, pids[0])
@@ -120,15 +124,14 @@ def test_different_nonconflicting_sources_publish_without_waiting(
 
     The second source commits while the first source's transaction is still open.
     """
-    service = EntityRefreshService(unit_of_work_factory)
-    first = stage(service, session_factory, "MGI:1")
-    other = stage(service, session_factory, "RGD:1", source="rgd")
+    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    first = stage_catalog(service, unit_of_work_factory, "MGI:1")
+    other = stage_catalog(service, unit_of_work_factory, "RGD:1", source="rgd")
     with ThreadPoolExecutor(max_workers=1) as pool, unit_of_work_factory() as uow:
-        uow.entities.publish(first)
-        result = pool.submit(service.publish, job_id=other, actor_id="curator").result(
-            TIMEOUT
-        )
-        assert result.source_key == "rgd"
+        uow.entities.publish(first.job_id)
+        outcome = pool.submit(service.recover, other).result(TIMEOUT)
+        assert outcome is not None
+        assert outcome.result["source_key"] == "rgd"
         assert active_ids(session_factory) == ["RGD:1"]
         uow.commit()
     assert active_ids(session_factory) == ["MGI:1", "RGD:1"]
@@ -144,14 +147,13 @@ def test_cross_source_membership_race_has_one_complete_winner(
     The other publication fails with a collision and its source keeps its previous
     catalog.
     """
-    service = EntityRefreshService(unit_of_work_factory)
+    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
     prefixes = {"mgi": "MGI", "rgd": "RGD"}
-    jobs: dict[str, UUID] = {}
+    jobs: dict[str, Job] = {}
     for key, prefix in prefixes.items():
-        old = stage(service, session_factory, f"{prefix}:old", source=key)
-        service.publish(job_id=old, actor_id="curator")
-        jobs[key] = stage(
-            service, session_factory, "SHARED:1", f"{prefix}:new", source=key
+        publish_catalog(service, unit_of_work_factory, f"{prefix}:old", source=key)
+        jobs[key] = stage_catalog(
+            service, unit_of_work_factory, "SHARED:1", f"{prefix}:new", source=key
         )
     barrier = Barrier(2)
 
@@ -168,7 +170,7 @@ def test_cross_source_membership_race_has_one_complete_winner(
 
     def publish(key: str) -> tuple[str, bool]:
         try:
-            service.publish(job_id=jobs[key], actor_id="curator")
+            service.recover(jobs[key])
         except EntityCatalogCollisionError:
             return key, False
         return key, True
@@ -189,8 +191,8 @@ def test_cross_source_membership_race_has_one_complete_winner(
     assert active_ids(session_factory) == sorted(
         [f"{prefixes[winner]}:new", f"{prefixes[loser]}:old", "SHARED:1"]
     )
-    assert service.completed(jobs[winner]) is not None
-    assert service.completed(jobs[loser]) is None
+    assert stored_result(unit_of_work_factory, jobs[winner]) is not None
+    assert stored_result(unit_of_work_factory, jobs[loser]) is None
 
 
 def test_waiting_validation_resolves_the_replacement_of_a_retained_identifier(
@@ -204,16 +206,15 @@ def test_waiting_validation_resolves_the_replacement_of_a_retained_identifier(
     When the replacement keeps the annotation's subject, the waiting create sees
     the new catalog after it commits and creates version 1 of the annotation.
     """
-    service = EntityRefreshService(unit_of_work_factory)
-    old = stage(service, session_factory, "MGI:1")
-    service.publish(job_id=old, actor_id="curator")
-    replacement = stage(service, session_factory, "MGI:1", "MGI:2")
+    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    publish_catalog(service, unit_of_work_factory, "MGI:1")
+    replacement = stage_catalog(service, unit_of_work_factory, "MGI:1", "MGI:2")
     annotations = AnnotationService(unit_of_work_factory)
     payload = {**validated_annotation.model_dump(mode="json"), "db_object_id": "MGI:1"}
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         with unit_of_work_factory() as uow:
-            uow.entities.publish(replacement)
+            uow.entities.publish(replacement.job_id)
             holder_pid = uow.entities.session.scalar(text("SELECT pg_backend_pid()"))
             write = pool.submit(
                 annotations.create,

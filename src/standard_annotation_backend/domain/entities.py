@@ -13,7 +13,11 @@ from uuid import UUID
 
 from go_standard_annotation_schema.datamodel import Entity
 
-from standard_annotation_backend.domain.refresh import SourceProvenance
+from standard_annotation_backend.domain.refresh import (
+    RefreshFailureCode,
+    SourceProvenance,
+    TerminalRefreshError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +65,7 @@ class UnknownDbObjectIdError(ValueError):
         super().__init__("db_object_id is not present in the active entity catalog")
 
 
-class EntityCandidateConflictError(RuntimeError):
+class EntityCandidateConflictError(TerminalRefreshError):
     """Report staged catalog data that cannot be used for a job.
 
     Raised when a job's staged catalog differs from a new parse of its source, is
@@ -69,18 +73,22 @@ class EntityCandidateConflictError(RuntimeError):
     that has already finished.
     """
 
+    failure_code = RefreshFailureCode.CANDIDATE_CONFLICT
+
     def __init__(self) -> None:
         super().__init__(
             "Entity catalog candidate conflicts with its job or publication state"
         )
 
 
-class EntityCatalogCollisionError(RuntimeError):
+class EntityCatalogCollisionError(TerminalRefreshError):
     """Report exact identifiers already supplied by another source.
 
     The identifiers are available as `colliding_ids`. The exception message
     leaves them out, so logs stay short and contain no source data.
     """
+
+    failure_code = RefreshFailureCode.CATALOG_COLLISION
 
     def __init__(self, colliding_ids: tuple[str, ...]) -> None:
         self.colliding_ids = tuple(sorted(set(colliding_ids)))
@@ -180,7 +188,6 @@ class EntityRefreshUnchangedResult:
             "source_key": self.source_key,
             "snapshot_id": str(self.snapshot_id),
             "source_checksum": self.source_checksum,
-            "unchanged": True,
         }
 
 

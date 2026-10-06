@@ -37,8 +37,10 @@ from celery.exceptions import Reject, Retry
 
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
-from standard_annotation_backend.refresh.ontology import OntologyRefreshBusyError
 from standard_annotation_backend.services.job_service import Job
+from standard_annotation_backend.services.ontology_refresh_service import (
+    OntologyRefreshBusyError,
+)
 from standard_annotation_backend.services.refresh_start_service import (
     RefreshStartService,
 )

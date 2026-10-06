@@ -3,47 +3,44 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy.orm import Session, sessionmaker
+import pytest
+from refresh_helpers import OboTerm, go_document, ignore_progress, obo, start_job
+from sqlalchemy import Engine
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
     OntologyDocument,
     OntologyKey,
     OntologySnapshot,
     OntologyTerm,
 )
-from standard_annotation_backend.ontology.definitions import GO_DEFINITION
-from standard_annotation_backend.persistence.models import AnnotationOrigin, JobRecord
+from standard_annotation_backend.ontology import obo_parser
+from standard_annotation_backend.persistence.locks import bind_try_lock
+from standard_annotation_backend.persistence.models import AnnotationOrigin
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
 )
 
-OLD_JOB_ID = UUID("00000000-0000-0000-0000-000000000041")
-LOAD_JOB_ID = UUID("00000000-0000-0000-0000-000000000042")
 NOW = datetime(2026, 9, 28, 15, tzinfo=UTC)
+TERM_A = "GO:0000001"
+TERM_B = "GO:0000002"
+TERM_C = "GO:0000003"
+TERM_X = "GO:0000004"
 
 
-def _term(
-    term_id: str,
-    *,
-    obsolete: bool = False,
-    replaced_by: tuple[str, ...] = (),
-) -> OntologyTerm:
-    return OntologyTerm(term_id, obsolete, replaced_by, ())
-
-
-def _snapshot(revision: str, terms: dict[str, OntologyTerm]) -> OntologySnapshot:
+def _old_snapshot(terms: dict[str, OntologyTerm]) -> OntologySnapshot:
     document = OntologyDocument(
         ontology_key=OntologyKey.GO,
-        content=revision.encode(),
+        content=b"old",
         source_type="test",
         source_locator="fixture/go.obo",
-        source_revision=revision,
-        source_checksum=("a" if revision == "old" else "b") * 64,
+        source_revision="old",
+        source_checksum="a" * 64,
         fetched_at=NOW,
     )
-    return OntologySnapshot(document, revision, (), terms, ())
+    return OntologySnapshot(document, "old", (), terms, ())
 
 
 def _annotation(term_id: str) -> Annotation:
@@ -65,31 +62,16 @@ def _annotation(term_id: str) -> Annotation:
 
 def _prepare(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
     *,
     annotations: tuple[tuple[UUID, Annotation], ...],
     old_terms: dict[str, OntologyTerm],
 ) -> None:
-    with session_factory() as session:
-        for job_id in (OLD_JOB_ID, LOAD_JOB_ID):
-            session.add(
-                JobRecord(
-                    job_id=job_id,
-                    job_type="authorization_refresh",
-                    status="queued",
-                    requested_by="test",
-                    parameters={},
-                    progress={},
-                    warnings=[],
-                    created_at=NOW,
-                    updated_at=NOW,
-                )
-            )
-        session.commit()
-    old_snapshot = _snapshot("old", old_terms)
+    """Activate an old snapshot directly and create the annotations it covers."""
+    old_job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
+    old_snapshot = _old_snapshot(old_terms)
     with unit_of_work_factory() as uow:
         old = uow.ontologies.stage(
-            job_id=OLD_JOB_ID,
+            job_id=old_job.job_id,
             document=old_snapshot.document,
             snapshot=old_snapshot,
             closure_rows=(),
@@ -109,7 +91,8 @@ def _prepare(
 
 def test_duplicate_rejections_repeat_to_a_fixed_point(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reverting one conflict also rejects replacements that then conflict."""
     first_id = UUID("00000000-0000-0000-0000-000000000051")
@@ -117,49 +100,52 @@ def test_duplicate_rejections_repeat_to_a_fixed_point(
     third_id = UUID("00000000-0000-0000-0000-000000000053")
     _prepare(
         unit_of_work_factory,
-        session_factory,
         annotations=(
-            (first_id, _annotation("GO:A")),
-            (second_id, _annotation("GO:B")),
-            (third_id, _annotation("GO:C")),
+            (first_id, _annotation(TERM_A)),
+            (second_id, _annotation(TERM_B)),
+            (third_id, _annotation(TERM_C)),
         ),
-        old_terms={term: _term(term) for term in ("GO:A", "GO:B", "GO:C")},
-    )
-    candidate = _snapshot(
-        "new",
-        {
-            "GO:A": _term("GO:A", obsolete=True, replaced_by=("GO:X",)),
-            "GO:B": _term("GO:B", obsolete=True, replaced_by=("GO:X",)),
-            "GO:C": _term("GO:C", obsolete=True, replaced_by=("GO:A",)),
-            "GO:X": _term("GO:X"),
+        old_terms={
+            term: OntologyTerm(term, False, (), ()) for term in (TERM_A, TERM_B, TERM_C)
         },
     )
-    service = OntologyRefreshService(unit_of_work_factory, GO_DEFINITION)
-    service.stage(
-        job_id=LOAD_JOB_ID,
-        document=candidate.document,
-        snapshot=candidate,
+    # A and B both move to X and conflict. Reverting the first annotation to A
+    # then conflicts with C moving to A, which needs a replacement target that
+    # is itself obsolete. The parser rejects such documents, so its reference
+    # check is disabled to reach this second round of rejections.
+    monkeypatch.setattr(obo_parser, "_validate_references", lambda *_args: None)
+    candidate = obo(
+        OboTerm(TERM_A, obsolete=True, replaced_by=(TERM_X,)),
+        OboTerm(TERM_B, obsolete=True, replaced_by=(TERM_X,)),
+        OboTerm(TERM_C, obsolete=True, replaced_by=(TERM_A,)),
+        OboTerm(TERM_X),
+    )
+    job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
+    service = OntologyRefreshService(
+        unit_of_work_factory, bind_try_lock(database_engine), None
     )
 
-    result = service.activate(job_id=LOAD_JOB_ID, actor_id="ontology-worker")
+    outcome = service.apply(job, go_document(candidate), ignore_progress)
 
-    assert result.annotation_scan_count == 3
-    assert result.annotation_update_count == 0
-    assert result.annotation_skip_count == 3
+    assert outcome.result["annotation_scan_count"] == 3
+    assert outcome.result["annotation_update_count"] == 0
+    assert outcome.result["annotation_skip_count"] == 3
+    findings = outcome.result["findings"]
+    assert isinstance(findings, list)
     duplicate_findings = [
-        finding for finding in result.findings if finding.code == "duplicate_conflict"
+        finding for finding in findings if finding["code"] == "duplicate_conflict"
     ]
-    assert {finding.annotation_id for finding in duplicate_findings} == {
-        first_id,
-        second_id,
-        third_id,
+    assert {finding["annotation_id"] for finding in duplicate_findings} == {
+        str(first_id),
+        str(second_id),
+        str(third_id),
     }
-    assert all(finding.conflicting_annotation_ids for finding in duplicate_findings)
+    assert all(finding["conflicting_annotation_ids"] for finding in duplicate_findings)
     with unit_of_work_factory() as uow:
         for annotation_id, expected_term in (
-            (first_id, "GO:A"),
-            (second_id, "GO:B"),
-            (third_id, "GO:C"),
+            (first_id, TERM_A),
+            (second_id, TERM_B),
+            (third_id, TERM_C),
         ):
             record = uow.annotations.get(annotation_id)
             assert record is not None

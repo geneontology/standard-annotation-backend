@@ -1,28 +1,39 @@
 """Verify atomic refresh of users, grants, provenance, and audit events."""
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
-from uuid import uuid4
+from uuid import UUID
 
 import pytest
+from refresh_helpers import (
+    apply_users_yaml,
+    ignore_progress,
+    start_job,
+    users_document,
+)
 from source_provenance import github_provenance
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.auth.users_yaml import InvalidUsersDocumentError
-from standard_annotation_backend.domain.refresh import SourceProvenance
+from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.refresh import (
+    RefreshFailureCode,
+    RefreshOutcome,
+    SourceProvenance,
+    TerminalRefreshError,
+)
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     AuthorizationAssignmentRecord,
     AuthorizationRefreshRecord,
+    JobRecord,
     SabGroupRecord,
     SabUserRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services import authorization_refresh_service
 from standard_annotation_backend.services.authorization_refresh_service import (
-    AuthorizationRefreshResult,
     AuthorizationRefreshService,
 )
 
@@ -54,22 +65,26 @@ REPLACEMENT = """
 """
 
 
-def _service(factory: UnitOfWorkFactory) -> AuthorizationRefreshService:
-    return AuthorizationRefreshService(factory)
-
-
 def _snapshot(session_factory: sessionmaker[Session]) -> tuple[object, ...]:
+    """Return authorization state and every audit event except job lifecycle ones."""
     with session_factory() as session:
-        return tuple(
+        state = tuple(
             tuple(session.execute(select(record).order_by(*record.primary_key)).all())
             for record in (
                 SabUserRecord.__table__,
                 SabGroupRecord.__table__,
                 AuthorizationAssignmentRecord.__table__,
                 AuthorizationRefreshRecord.__table__,
-                AuditEventRecord.__table__,
             )
         )
+        audits = tuple(
+            session.execute(
+                select(AuditEventRecord.__table__)
+                .where(AuditEventRecord.action.not_like("job.%"))
+                .order_by(AuditEventRecord.audit_event_id)
+            ).all()
+        )
+        return (*state, audits)
 
 
 @pytest.mark.parametrize(
@@ -87,11 +102,11 @@ def test_invalid_sync_preserves_all_last_valid_state(
     source: str,
 ) -> None:
     """A malformed document cannot replace any grants or their provenance."""
-    service = _service(unit_of_work_factory)
-    service.refresh(INITIAL, github_provenance("a" * 40))
+    apply_users_yaml(unit_of_work_factory, INITIAL, github_provenance("a" * 40))
     before = _snapshot(session_factory)
-    with pytest.raises(InvalidUsersDocumentError):
-        service.refresh(source, github_provenance("b" * 40))
+    with pytest.raises(TerminalRefreshError) as raised:
+        apply_users_yaml(unit_of_work_factory, source, github_provenance("b" * 40))
+    assert raised.value.failure_code is RefreshFailureCode.INVALID_DOCUMENT
     assert _snapshot(session_factory) == before
 
 
@@ -100,8 +115,7 @@ def test_successful_replacement_records_counts_and_preserves_unchanged_contexts(
     session_factory: sessionmaker[Session],
 ) -> None:
     """A replacement updates users and grants and commits matching audit provenance."""
-    service = _service(unit_of_work_factory)
-    service.refresh(INITIAL, github_provenance("a" * 40))
+    apply_users_yaml(unit_of_work_factory, INITIAL, github_provenance("a" * 40))
     with unit_of_work_factory() as uow:
         alice = uow.auth.get_user_by_github_login("alice")
         assert alice is not None
@@ -112,11 +126,20 @@ def test_successful_replacement_records_counts_and_preserves_unchanged_contexts(
         }
 
     start = datetime.now(UTC)
-    result = service.refresh(REPLACEMENT, github_provenance("b" * 40))
-    assert (result.user_count, result.group_count, result.assignment_count) == (3, 2, 3)
-    assert result.source_locator == "github:geneontology/go-site:metadata/users.yaml"
-    assert result.source_revision == "b" * 40
-    assert start <= result.refreshed_at <= datetime.now(UTC)
+    outcome = apply_users_yaml(
+        unit_of_work_factory, REPLACEMENT, github_provenance("b" * 40)
+    )
+    result = outcome.result
+    refresh_id = UUID(str(result["refresh_id"]))
+    refreshed_at = datetime.fromisoformat(str(result["refreshed_at"]))
+    assert (
+        result["user_count"],
+        result["group_count"],
+        result["assignment_count"],
+    ) == (3, 2, 3)
+    assert result["source_locator"] == "github:geneontology/go-site:metadata/users.yaml"
+    assert result["source_revision"] == "b" * 40
+    assert start <= refreshed_at <= datetime.now(UTC)
     with unit_of_work_factory() as uow:
         alice = uow.auth.get_user_by_github_login("ALICE")
         assert alice is not None
@@ -141,27 +164,28 @@ def test_successful_replacement_records_counts_and_preserves_unchanged_contexts(
         assert uow.auth.list_active_assignments(reader.user_id) == ()
 
     with session_factory() as session:
-        provenance = session.get(AuthorizationRefreshRecord, result.refresh_id)
+        provenance = session.get(AuthorizationRefreshRecord, refresh_id)
         assert provenance is not None
         assert provenance.summary == {"users": 3, "groups": 2, "assignments": 3}
         assert provenance.source_revision == "b" * 40
-        assert provenance.refreshed_at == result.refreshed_at
+        assert provenance.refreshed_at == refreshed_at
         audits = session.scalars(
-            select(AuditEventRecord).order_by(AuditEventRecord.created_at)
+            select(AuditEventRecord)
+            .where(AuditEventRecord.action == "authorization.refreshed")
+            .order_by(AuditEventRecord.created_at)
         ).all()
         assert len(audits) == 2
         latest = audits[-1]
-        assert latest.action == "authorization.refreshed"
         assert latest.actor_id == "authorization-refresh"
         assert latest.result == "success"
         assert latest.details == {
-            "refresh_id": str(result.refresh_id),
+            "refresh_id": str(refresh_id),
             "source_type": "github",
             "source_locator": "github:geneontology/go-site:metadata/users.yaml",
             "source_revision": "b" * 40,
             "source_checksum": "b" * 64,
-            "fetched_at": result.fetched_at.isoformat(),
-            "refreshed_at": result.refreshed_at.isoformat(),
+            "fetched_at": result["fetched_at"],
+            "refreshed_at": refreshed_at.isoformat(),
             "user_count": 3,
             "group_count": 2,
             "assignment_count": 3,
@@ -180,8 +204,8 @@ def test_audit_failure_rolls_back_sync_and_its_provenance(
     session_factory: sessionmaker[Session],
 ) -> None:
     """A failed audit insertion restores the complete previous authorization state."""
-    service = _service(unit_of_work_factory)
-    service.refresh(INITIAL, github_provenance("a" * 40))
+    apply_users_yaml(unit_of_work_factory, INITIAL, github_provenance("a" * 40))
+    job = start_job(unit_of_work_factory, JobType.AUTHORIZATION_REFRESH, "go-site")
     before = _snapshot(session_factory)
 
     def reject_audit(*_: object) -> None:
@@ -190,7 +214,11 @@ def test_audit_failure_rolls_back_sync_and_its_provenance(
     event.listen(AuditEventRecord, "before_insert", reject_audit)
     try:
         with pytest.raises(RuntimeError, match="audit unavailable"):
-            service.refresh(REPLACEMENT, github_provenance("b" * 40))
+            AuthorizationRefreshService(unit_of_work_factory).apply(
+                job,
+                users_document(REPLACEMENT, github_provenance("b" * 40)),
+                ignore_progress,
+            )
     finally:
         event.remove(AuditEventRecord, "before_insert", reject_audit)
     assert _snapshot(session_factory) == before
@@ -200,8 +228,7 @@ def test_removed_and_identically_regranted_context_never_revives_old_token(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
     """A later identical regrant receives a new ID and leaves old bearer tokens unusable."""
-    service = _service(unit_of_work_factory)
-    service.refresh(INITIAL, github_provenance("a" * 40))
+    apply_users_yaml(unit_of_work_factory, INITIAL, github_provenance("a" * 40))
     now = datetime.now(UTC)
     with unit_of_work_factory() as uow:
         alice = uow.auth.get_user_by_github_login("alice")
@@ -217,9 +244,11 @@ def test_removed_and_identically_regranted_context_never_revives_old_token(
             expires_at=now + timedelta(days=1),
         )
         uow.commit()
-    service.refresh("[]", github_provenance("b" * 40))
-    result = service.refresh(INITIAL, github_provenance("c" * 40))
-    assert result.assignment_count == 3
+    apply_users_yaml(unit_of_work_factory, "[]", github_provenance("b" * 40))
+    outcome = apply_users_yaml(
+        unit_of_work_factory, INITIAL, github_provenance("c" * 40)
+    )
+    assert outcome.result["assignment_count"] == 3
     with unit_of_work_factory() as uow:
         assert uow.auth.get_active_assignment(user_id, assignment_id) is None
         assert uow.auth.get_active_token("1" * 64, now=now) is None
@@ -230,6 +259,8 @@ def test_successful_sync_commits_exactly_once(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
     """A synchronization makes its state and audit durable in one commit."""
+    job = start_job(unit_of_work_factory, JobType.AUTHORIZATION_REFRESH, "go-site")
+    document = users_document(INITIAL, github_provenance("a" * 40))
     commits: list[None] = []
 
     def committed(_: Session) -> None:
@@ -237,7 +268,9 @@ def test_successful_sync_commits_exactly_once(
 
     event.listen(Session, "after_commit", committed)
     try:
-        _service(unit_of_work_factory).refresh(INITIAL, github_provenance("a" * 40))
+        AuthorizationRefreshService(unit_of_work_factory).apply(
+            job, document, ignore_progress
+        )
     finally:
         event.remove(Session, "after_commit", committed)
     assert len(commits) == 1
@@ -248,19 +281,20 @@ def test_repeated_revision_is_idempotent_without_state_or_audit_changes(
     session_factory: sessionmaker[Session],
 ) -> None:
     """Repeating a repository and commit returns the stored result unchanged."""
-    service = _service(unit_of_work_factory)
-    first = service.refresh(INITIAL, github_provenance("a" * 40))
+    first = apply_users_yaml(unit_of_work_factory, INITIAL, github_provenance("a" * 40))
     before = _snapshot(session_factory)
 
-    repeated = service.refresh(INITIAL, github_provenance("a" * 40))
+    repeated = apply_users_yaml(
+        unit_of_work_factory, INITIAL, github_provenance("a" * 40)
+    )
 
-    assert first.applied is True
-    assert repeated.applied is False
-    assert repeated.refresh_id == first.refresh_id
+    assert first.unchanged is False
+    assert repeated.unchanged is True
+    assert repeated.result == first.result
     assert (
-        repeated.user_count,
-        repeated.group_count,
-        repeated.assignment_count,
+        repeated.result["user_count"],
+        repeated.result["group_count"],
+        repeated.result["assignment_count"],
     ) == (2, 2, 3)
     assert _snapshot(session_factory) == before
 
@@ -268,21 +302,29 @@ def test_repeated_revision_is_idempotent_without_state_or_audit_changes(
 def test_concurrent_same_revision_is_applied_once(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Concurrent requests for one source revision create one sync and audit."""
+    """Concurrent applies of one revision reach the repository's locked check.
+
+    The service's lock-free pre-check is disabled so both requests reach the
+    repository, whose locked duplicate check applies the document exactly once.
+    """
+    monkeypatch.setattr(
+        authorization_refresh_service, "same_refresh_source", lambda *_: False
+    )
     ready = Barrier(2)
 
-    def synchronize() -> AuthorizationRefreshResult:
+    def synchronize() -> RefreshOutcome:
         ready.wait(timeout=3)
-        return _service(unit_of_work_factory).refresh(
-            INITIAL, github_provenance("a" * 40)
+        return apply_users_yaml(
+            unit_of_work_factory, INITIAL, github_provenance("a" * 40)
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = tuple(executor.map(lambda _: synchronize(), range(2)))
+        outcomes = tuple(executor.map(lambda _: synchronize(), range(2)))
 
-    assert {result.applied for result in results} == {True, False}
-    assert len({result.refresh_id for result in results}) == 1
+    assert {outcome.unchanged for outcome in outcomes} == {True, False}
+    assert len({outcome.result["refresh_id"] for outcome in outcomes}) == 1
     with session_factory() as session:
         assert len(session.scalars(select(AuthorizationRefreshRecord)).all()) == 1
         audits = session.scalars(
@@ -297,18 +339,23 @@ def test_worker_sync_audit_retains_actor_and_job_context(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
-    """A worker-created sync audit records its actor and job identifier."""
-    job_id = uuid4()
-
-    result = _service(unit_of_work_factory).refresh(
+    """A job's refresh audit records the job's requester and identifier."""
+    outcome = apply_users_yaml(
+        unit_of_work_factory,
         INITIAL,
         github_provenance("a" * 40),
-        actor_id="scheduler",
-        job_id=job_id,
+        requested_by="scheduler",
     )
 
-    assert result.applied is True
+    assert outcome.unchanged is False
     with session_factory() as session:
+        job_id = session.scalar(
+            select(JobRecord.job_id).where(
+                JobRecord.job_type == JobType.AUTHORIZATION_REFRESH.value,
+                JobRecord.requested_by == "scheduler",
+            )
+        )
+        assert job_id is not None
         audit = session.scalar(
             select(AuditEventRecord).where(
                 AuditEventRecord.action == "authorization.refreshed"
@@ -323,8 +370,7 @@ def test_changed_login_creates_new_user_and_deactivates_old_assignments(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
     """A changed source login is a new identity and cannot inherit old credentials."""
-    service = _service(unit_of_work_factory)
-    service.refresh(INITIAL, github_provenance("a" * 40))
+    apply_users_yaml(unit_of_work_factory, INITIAL, github_provenance("a" * 40))
     with unit_of_work_factory() as uow:
         original = uow.auth.get_user_by_github_login("alice")
         assert original is not None
@@ -332,8 +378,10 @@ def test_changed_login_creates_new_user_and_deactivates_old_assignments(
         grants = {
             item.assignment_id for item in uow.auth.list_active_assignments(user_id)
         }
-    service.refresh(
-        INITIAL.replace("ALICE", "Renamed-Alice"), github_provenance("b" * 40)
+    apply_users_yaml(
+        unit_of_work_factory,
+        INITIAL.replace("ALICE", "Renamed-Alice"),
+        github_provenance("b" * 40),
     )
     with unit_of_work_factory() as uow:
         renamed = uow.auth.get_user_by_github_login("renamed-alice")
@@ -360,24 +408,25 @@ def test_returning_to_an_earlier_document_applies_it_again(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
     """Only the most recent refresh counts as unchanged, so a revert reapplies."""
-    service = AuthorizationRefreshService(unit_of_work_factory)
     first = _provenance("a" * 40, "1" * 64)
     second = _provenance("b" * 40, "2" * 64)
 
-    assert service.refresh(INITIAL, first).applied is True
-    assert service.refresh(INITIAL, second).applied is True
-    assert service.unchanged(first) is None
-    reverted = service.refresh(INITIAL, first)
+    original = apply_users_yaml(unit_of_work_factory, INITIAL, first)
+    assert original.unchanged is False
+    assert apply_users_yaml(unit_of_work_factory, INITIAL, second).unchanged is False
+    reverted = apply_users_yaml(unit_of_work_factory, INITIAL, first)
+    repeated = apply_users_yaml(unit_of_work_factory, INITIAL, first)
 
-    assert reverted.applied is True
-    assert service.unchanged(first) == replace(reverted, applied=False)
+    assert reverted.unchanged is False
+    assert reverted.result["refresh_id"] != original.result["refresh_id"]
+    assert repeated.unchanged is True
+    assert repeated.result == reverted.result
 
 
 def test_https_source_without_revision_is_unchanged_by_checksum(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
     """An HTTPS source has no revision, so its checksum identifies the document."""
-    service = AuthorizationRefreshService(unit_of_work_factory)
     https = SourceProvenance(
         source_type="https",
         source_locator="https://example.org/users.yaml",
@@ -385,14 +434,23 @@ def test_https_source_without_revision_is_unchanged_by_checksum(
         source_checksum="3" * 64,
         fetched_at=datetime(2026, 10, 1, tzinfo=UTC),
     )
+    changed = SourceProvenance(
+        source_type="https",
+        source_locator="https://example.org/users.yaml",
+        source_revision=None,
+        source_checksum="4" * 64,
+        fetched_at=datetime(2026, 10, 1, tzinfo=UTC),
+    )
 
-    applied = service.refresh(INITIAL, https)
-    repeated = service.refresh(INITIAL, https)
+    applied = apply_users_yaml(unit_of_work_factory, INITIAL, https)
+    repeated = apply_users_yaml(unit_of_work_factory, INITIAL, https)
+    different = apply_users_yaml(unit_of_work_factory, INITIAL, changed)
 
-    assert applied.applied is True
-    assert repeated.applied is False
-    assert repeated.refresh_id == applied.refresh_id
-    assert service.unchanged(replace(https, source_checksum="4" * 64)) is None
+    assert applied.unchanged is False
+    assert repeated.unchanged is True
+    assert repeated.result == applied.result
+    assert different.unchanged is False
+    assert different.result["refresh_id"] != applied.result["refresh_id"]
 
 
 def test_latest_refresh_follows_apply_order_not_transaction_start(
@@ -404,7 +462,7 @@ def test_latest_refresh_follows_apply_order_not_transaction_start(
     with unit_of_work_factory() as late:
         # Start this transaction before the other refresh begins.
         late.auth.session.execute(select(1))
-        _service(unit_of_work_factory).refresh(INITIAL, first_applied)
+        apply_users_yaml(unit_of_work_factory, INITIAL, first_applied)
         late.auth.replace_authorizations(
             users=(),
             provenance=last_applied,
@@ -416,6 +474,5 @@ def test_latest_refresh_follows_apply_order_not_transaction_start(
         latest = uow.auth.latest_refresh()
         assert latest is not None
         assert latest.source_revision == "b" * 40
-    service = _service(unit_of_work_factory)
-    assert service.unchanged(first_applied) is None
-    assert service.unchanged(last_applied) is not None
+        assert latest.source_checksum == last_applied.source_checksum
+        assert latest.source_checksum != first_applied.source_checksum
