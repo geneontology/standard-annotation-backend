@@ -1,9 +1,10 @@
 """Define the vocabulary shared by every reference data refresh.
 
-SAB keeps three kinds of reference data current from external sources:
-authorization from go-site `users.yaml`, ontologies from OBO files, and entities
-from GPI files. Refreshing one source means fetching it and applying it. These
-values are shared by every kind and need neither HTTP nor a database.
+SAB keeps reference data current from external sources: authorization from
+go-site `users.yaml`, ontologies from OBO files, entities from GPI files, and
+annotations from group GPAD files. Refreshing one source means fetching it and
+applying it. These values are shared by every kind and need neither HTTP nor a
+database.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ class RefreshKindName(StrEnum):
     AUTHORIZATION = "authorization"
     ONTOLOGY = "ontology"
     ENTITY = "entity"
+    ANNOTATION = "annotation"
 
 
 class RefreshFailureCode(StrEnum):
@@ -52,6 +54,9 @@ class RefreshFailureCode(StrEnum):
     ROW_VALIDATION = "row_validation"
     CANDIDATE_CONFLICT = "candidate_conflict"
     CATALOG_COLLISION = "catalog_collision"
+    NO_VALID_ANNOTATIONS = "no_valid_annotations"
+    CUTOVER_REJECTED = "cutover_rejected"
+    GROUP_SAB_MANAGED = "group_sab_managed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,8 +95,13 @@ REFRESH_JOB_TYPES: Mapping[RefreshKindName, JobType] = {
     RefreshKindName.AUTHORIZATION: JobType.AUTHORIZATION_REFRESH,
     RefreshKindName.ONTOLOGY: JobType.ONTOLOGY_REFRESH,
     RefreshKindName.ENTITY: JobType.ENTITY_REFRESH,
+    RefreshKindName.ANNOTATION: JobType.ANNOTATION_REFRESH,
 }
-"""Job type that refreshes one source of each kind."""
+"""Job type that refreshes one source of each kind.
+
+Annotation cutovers use `JobType.ANNOTATION_CUTOVER` and are started only by
+`RefreshStartService.start_cutover`.
+"""
 
 _SOURCE_KEY = re.compile(SOURCE_KEY_PATTERN)
 

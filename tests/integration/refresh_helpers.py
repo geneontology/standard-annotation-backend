@@ -17,12 +17,31 @@ from standard_annotation_backend.refresh.sources import (
 )
 from standard_annotation_backend.workers.runtime import create_refresh_runner
 
+TEST_ANNOTATION_SOURCES: dict[str, object] = {
+    "mgi-gpad": {
+        "type": "https",
+        "group": "MGI",
+        "url": "https://example.org/mgi.gpad",
+    },
+    "rgd-gpad": {
+        "type": "https",
+        "group": "RGD",
+        "url": "https://example.org/rgd.gpad",
+    },
+}
 
-def sources_with_entities(entities: dict[str, object]) -> RefreshSources:
+
+def sources_with(
+    *,
+    entities: dict[str, object] | None = None,
+    annotations: dict[str, object] | None = None,
+) -> RefreshSources:
     """Return test sources with the standard authorization and GO entries.
 
     Args:
-        entities: The `entities` section of the sources file.
+        entities: The `entities` section of the sources file; empty if omitted.
+        annotations: The `annotations` section of the sources file; empty if
+            omitted.
     """
     return RefreshSources(
         SourcesFile.model_validate(
@@ -41,10 +60,16 @@ def sources_with_entities(entities: dict[str, object]) -> RefreshSources:
                         "path": "src/ontology/go-edit.obo",
                     }
                 },
-                "entities": entities,
+                "entities": entities or {},
+                "annotations": annotations or {},
             }
         )
     )
+
+
+def sources_with_entities(entities: dict[str, object]) -> RefreshSources:
+    """Return test sources with the given entity sources and the test GPAD sources."""
+    return sources_with(entities=entities, annotations=TEST_ANNOTATION_SOURCES)
 
 
 TEST_SOURCES = sources_with_entities(

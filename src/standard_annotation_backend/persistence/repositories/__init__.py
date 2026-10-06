@@ -1,5 +1,8 @@
 """Expose repositories that share a caller-managed transaction."""
 
+from standard_annotation_backend.persistence.repositories.annotation_imports import (
+    AnnotationImportRepository,
+)
 from standard_annotation_backend.persistence.repositories.annotations import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
@@ -39,6 +42,7 @@ from standard_annotation_backend.persistence.repositories.pagination import Page
 __all__ = [
     "AnnotationCommentRepository",
     "AnnotationDeletedError",
+    "AnnotationImportRepository",
     "AnnotationNotFoundError",
     "AnnotationRepository",
     "AnnotationSearchFilters",

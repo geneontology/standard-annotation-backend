@@ -1,7 +1,8 @@
 """Read the reviewed file that configures every reference data source.
 
-`config/sources.yaml` lists the authorization source, each ontology source, and
-each entity source. Each entry is a file in a GitHub repository or an HTTPS URL.
+`config/sources.yaml` lists the authorization source, each ontology source, each
+entity source, and each group's GPAD annotation source. Each entry is a file in a
+GitHub repository or an HTTPS URL.
 `Settings` validates the file when it is constructed, so an invalid file stops the
 API, worker, scheduler, and CLI at startup instead of failing later inside a job.
 """
@@ -103,9 +104,38 @@ class HttpsEntitySource(HttpsSource):
     format: Literal["gpi"] = "gpi"
 
 
+class GitHubAnnotationSource(GitHubSource):
+    """Configure a group's GPAD annotation source stored in GitHub.
+
+    Attributes:
+        group: Group that owns every annotation in the file. Each successful
+            refresh replaces all of this group's annotations.
+        format: Serialization format of the file. GPAD 2.0 is the only format.
+    """
+
+    group: TrimmedNonBlankString
+    format: Literal["gpad"] = "gpad"
+
+
+class HttpsAnnotationSource(HttpsSource):
+    """Configure a group's GPAD annotation source published over HTTPS.
+
+    Attributes:
+        group: Group that owns every annotation in the file. Each successful
+            refresh replaces all of this group's annotations.
+        format: Serialization format of the file. GPAD 2.0 is the only format.
+    """
+
+    group: TrimmedNonBlankString
+    format: Literal["gpad"] = "gpad"
+
+
 SourceSpec = Annotated[GitHubSource | HttpsSource, Field(discriminator="type")]
 EntitySourceSpec = Annotated[
     GitHubEntitySource | HttpsEntitySource, Field(discriminator="type")
+]
+AnnotationSourceSpec = Annotated[
+    GitHubAnnotationSource | HttpsAnnotationSource, Field(discriminator="type")
 ]
 
 
@@ -117,6 +147,8 @@ class SourcesFile(BaseModel):
         ontologies: Ontology sources keyed by ontology. GO is required.
         entities: Entity sources keyed by stable source key. Keys are stored with
             published catalogs, so renaming a key retires the old catalog.
+        annotations: GPAD annotation sources keyed by stable source key. No two
+            may name the same group, because each refresh replaces the whole group.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -124,8 +156,9 @@ class SourcesFile(BaseModel):
     authorization: SourceSpec
     ontologies: dict[OntologyKey, SourceSpec]
     entities: dict[SourceKey, EntitySourceSpec] = Field(default_factory=dict)
+    annotations: dict[SourceKey, AnnotationSourceSpec] = Field(default_factory=dict)
 
-    @field_validator("ontologies", "entities", mode="before")
+    @field_validator("ontologies", "entities", "annotations", mode="before")
     @classmethod
     def null_sections_are_empty(cls, value: object) -> object:
         """Treat a section key with no value as an empty mapping."""
@@ -139,6 +172,20 @@ class SourcesFile(BaseModel):
         """Require a GO source, because every SAB deployment refreshes GO."""
         if OntologyKey.GO not in value:
             raise ValueError("must configure the GO ontology")
+        return value
+
+    @field_validator("annotations")
+    @classmethod
+    def require_one_source_per_group(
+        cls, value: dict[str, GitHubAnnotationSource | HttpsAnnotationSource]
+    ) -> dict[str, GitHubAnnotationSource | HttpsAnnotationSource]:
+        """Reject two sources for one group; each would replace the other's data."""
+        groups = [source.group for source in value.values()]
+        shared = sorted({group for group in groups if groups.count(group) > 1})
+        if shared:
+            raise ValueError(
+                "each group may have only one annotation source: " + ", ".join(shared)
+            )
         return value
 
 
@@ -174,6 +221,10 @@ class RefreshSources:
                 key.value: source for key, source in file.ontologies.items()
             },
             RefreshKindName.ENTITY: dict(file.entities),
+            RefreshKindName.ANNOTATION: dict(file.annotations),
+        }
+        self._annotation_groups = {
+            key: source.group for key, source in file.annotations.items()
         }
 
     def sources(
@@ -196,6 +247,17 @@ class RefreshSources:
         if source is None:
             raise UnknownSourceError(kind, key)
         return source
+
+    def annotation_group(self, key: str) -> str:
+        """Return the group that owns the annotations of one annotation source.
+
+        Raises:
+            UnknownSourceError: If `key` is not a configured annotation source.
+        """
+        group = self._annotation_groups.get(key)
+        if group is None:
+            raise UnknownSourceError(RefreshKindName.ANNOTATION, key)
+        return group
 
 
 def _is_github_path_segment(value: str) -> bool:

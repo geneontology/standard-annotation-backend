@@ -2,9 +2,12 @@
 set default-list
 
 # Prepare local settings, build the development images, and migrate the database.
-setup: _ensure-env
-    docker compose build web worker scheduler tools
+setup: _ensure-env build
     docker compose run --rm web alembic upgrade head
+
+# Rebuild the development images
+build:
+    docker compose build web worker scheduler tools
 
 # Start the application and its supporting services.
 up:
@@ -23,7 +26,7 @@ logs:
 migrate:
     docker compose run --build --rm web alembic upgrade head
 
-# Refresh reference data from config/sources.yaml: KIND is authorization, ontology, or entity.
+# Refresh reference data from config/sources.yaml: KIND is authorization, ontology, entity, or annotation.
 [positional-arguments]
 refresh KIND *SOURCE:
     docker compose run --build --rm web python -m standard_annotation_backend.cli.refresh "$@"

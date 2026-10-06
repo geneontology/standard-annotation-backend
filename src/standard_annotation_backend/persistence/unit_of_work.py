@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from standard_annotation_backend.persistence.repositories import (
     AnnotationCommentRepository,
+    AnnotationImportRepository,
     AnnotationRepository,
     AuditRepository,
     AuthRepository,
@@ -40,6 +41,7 @@ class SqlAlchemyUnitOfWork:
         self._session: Session | None = None
         self._committed = False
         self.annotations: AnnotationRepository
+        self.annotation_imports: AnnotationImportRepository
         self.comments: AnnotationCommentRepository
         self.audit: AuditRepository
         self.auth: AuthRepository
@@ -52,6 +54,7 @@ class SqlAlchemyUnitOfWork:
         self._session = self._session_factory()
         self._committed = False
         self.annotations = AnnotationRepository(self._session)
+        self.annotation_imports = AnnotationImportRepository(self._session)
         self.comments = AnnotationCommentRepository(self._session)
         self.audit = AuditRepository(self._session)
         self.auth = AuthRepository(self._session)

@@ -5,7 +5,9 @@ Four tasks make up the refresh pipeline:
 - `sab.refresh.schedule(kind)` is published by Celery Beat once per refresh kind.
   It starts a job for every configured source of that kind through
   `RefreshStartService`, which commits each job to PostgreSQL before sending it.
-- `sab.refresh.run(job_id)` runs one authorization, ontology, or entity job.
+  Annotation sources whose group is SAB-managed are skipped.
+- `sab.refresh.run(job_id)` runs one authorization, ontology, entity, or
+  annotation refresh job, or one annotation cutover job.
 - `sab.entity_retirement.run(job_id)` retires the catalog of an entity source
   that is no longer configured.
 - `sab.ontology.prune(ontology_key)` deletes old snapshot data. `RefreshRunner`

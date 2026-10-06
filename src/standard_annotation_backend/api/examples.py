@@ -123,3 +123,39 @@ ANNOTATION_COMMENT_EDIT_EXAMPLES: dict[str, Example] = {
         },
     }
 }
+
+ONTOLOGY_REFRESH_EXAMPLES: dict[str, Example] = {
+    "single-source": {
+        "summary": "Refresh a single ontology source",
+        "value": {"source_key": "go"},
+    },
+    "all-sources": {
+        "summary": "Refresh all configured ontology sources",
+        "value": {},
+    },
+}
+
+ENTITY_REFRESH_EXAMPLES: dict[str, Example] = {
+    "single-source": {
+        "summary": "Refresh a single entity source",
+        "value": {"source_key": "caeel"},
+    },
+    "all-sources": {
+        "summary": "Refresh all configured entity sources",
+        "value": {},
+    },
+}
+
+ANNOTATION_REFRESH_EXAMPLES: dict[str, Example] = {
+    "single-source": {
+        "summary": "Refresh a single annotation source",
+        "value": {"source_key": "mgi"},
+    },
+    "all-sources": {
+        "summary": (
+            "Refresh every configured annotation source for groups which have not been "
+            "cut over to SAB-managed annotations"
+        ),
+        "value": {},
+    },
+}

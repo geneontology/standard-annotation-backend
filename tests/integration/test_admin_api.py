@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from annotation_refresh_helpers import seed_group_import
 from fastapi import status
 from fastapi.testclient import TestClient
 from refresh_helpers import TEST_SOURCES, sources_with_entities
@@ -13,6 +14,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.api.dependencies import get_authenticated_context
 from standard_annotation_backend.api.routes import admin
+from standard_annotation_backend.domain.annotation_management import (
+    AnnotationManagementMode,
+)
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
@@ -27,7 +31,13 @@ ROUTES = {
     "/admin/authorization-refreshes": ("authorization_refresh", ["go-site"], "go-site"),
     "/admin/ontology-refreshes": ("ontology_refresh", ["go"], "go"),
     "/admin/entity-refreshes": ("entity_refresh", ["mgi", "rgd"], "rgd"),
+    "/admin/annotation-refreshes": (
+        "annotation_refresh",
+        ["mgi-gpad", "rgd-gpad"],
+        "rgd-gpad",
+    ),
 }
+CUTOVER_ROUTE = "/admin/annotation-cutovers"
 AUTHORIZATION_ROUTE = "/admin/authorization-refreshes"
 SOURCE_KEY_ROUTES = sorted(path for path in ROUTES if path != AUTHORIZATION_ROUTE)
 
@@ -153,7 +163,7 @@ DENIED = [
 ]
 
 
-@pytest.mark.parametrize("path", sorted(ROUTES))
+@pytest.mark.parametrize("path", [*sorted(ROUTES), CUTOVER_ROUTE])
 @pytest.mark.parametrize(("role", "scope"), DENIED)
 def test_only_global_admins_can_refresh_and_denial_precedes_lookup(
     integration_api_client: TestClient,
@@ -245,7 +255,7 @@ def test_refresh_all_entities_with_no_sources_returns_no_jobs(
     assert response.json() == {"jobs": []}
 
 
-@pytest.mark.parametrize("path", sorted(ROUTES))
+@pytest.mark.parametrize("path", [*sorted(ROUTES), CUTOVER_ROUTE])
 @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer invalid"}])
 def test_missing_and_invalid_bearer_credentials_are_rejected(
     integration_api_client: TestClient,
@@ -340,3 +350,64 @@ def test_job_read_requires_valid_bearer_authentication(
 
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
     assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_cutover_starts_one_cutover_job(
+    integration_api_client: TestClient, dispatched: list[Job]
+) -> None:
+    """A cutover request returns 202 with one queued cutover job."""
+    response = integration_api_client.post(
+        CUTOVER_ROUTE, json={"source_key": "mgi-gpad"}
+    )
+
+    assert response.status_code == status.HTTP_202_ACCEPTED
+    [job] = response.json()["jobs"]
+    assert (job["job_type"], job["status"]) == ("annotation_cutover", "queued")
+    assert [item.job_type.value for item in dispatched] == ["annotation_cutover"]
+
+
+@pytest.mark.parametrize(
+    ("body", "code"),
+    [({}, "request_validation_error"), ({"source_key": "zfin"}, "unknown_source")],
+)
+def test_cutover_requires_a_configured_source(
+    integration_api_client: TestClient,
+    dispatched: list[Job],
+    body: dict[str, object],
+    code: str,
+) -> None:
+    """A cutover without a configured source key returns 422 and starts nothing."""
+    response = integration_api_client.post(CUTOVER_ROUTE, json=body)
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["error"]["code"] == code
+    assert dispatched == []
+
+
+@pytest.mark.parametrize("path", ["/admin/annotation-refreshes", CUTOVER_ROUTE])
+def test_sab_managed_group_is_409_and_creates_no_job(
+    integration_api_client: TestClient,
+    dispatched: list[Job],
+    session_factory: sessionmaker[Session],
+    path: str,
+) -> None:
+    """GPAD requests for a SAB-managed group return 409 and create no job."""
+    seed_group_import(
+        session_factory,
+        group_key="MGI",
+        source_key="mgi-gpad",
+        mode=AnnotationManagementMode.SAB_MANAGED,
+    )
+
+    with session_factory() as session:
+        jobs_before = session.scalar(select(func.count()).select_from(JobRecord))
+
+    response = integration_api_client.post(path, json={"source_key": "mgi-gpad"})
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    assert response.json()["error"]["code"] == "group_sab_managed"
+    assert dispatched == []
+    with session_factory() as session:
+        assert (
+            session.scalar(select(func.count()).select_from(JobRecord)) == jobs_before
+        )

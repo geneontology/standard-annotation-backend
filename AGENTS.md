@@ -20,8 +20,8 @@ The supported development environment uses Docker Compose and `just`.
 - Run `just up` to start the web application, PostgreSQL, Redis, and the worker.
 - Run `just logs` to follow web application logs.
 - Run `just migrate` after adding or receiving a database migration.
-- Run `just sync-authorizations` to replace local authorization state from the current
-  go-site `users.yaml` at an immutable source commit.
+- Run `just refresh KIND [SOURCE]` to refresh reference data (authorization, ontology,
+  entity, or annotation) from `config/sources.yaml`.
 - Run `just test` to execute the complete test suite with PostgreSQL available.
 - Run `just check` to check formatting, lint, and static types.
 - Run `just down` to stop services without deleting local database data.

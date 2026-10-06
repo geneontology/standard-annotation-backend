@@ -19,6 +19,7 @@ _REFRESH_START_LOCK_KEY = 0x5341425253545254  # "SABRSTRT"
 _JOB_LOCK_PERSON = b"SABJOB"
 _ONTOLOGY_LOCK_PERSON = b"SABONTO"
 _ENTITY_LOCK_PERSON = b"SABENT"
+_ANNOTATION_GROUP_LOCK_PERSON = b"SABGPAD"
 
 
 def acquire_authorization_refresh_lock(session: Session) -> None:
@@ -220,6 +221,57 @@ def ontology_refresh_lock(engine: Engine, key: OntologyKey | str) -> Iterator[bo
                 )
                 if released is not True:
                     raise RuntimeError("ontology refresh lock was not released")
+
+
+def annotation_group_lock_key(group_key: str) -> int:
+    """Return the PostgreSQL advisory-lock key for one group's GPAD imports.
+
+    The key is a 64-bit BLAKE2b hash of the group key. The hash is computed with
+    `SABGPAD` as its `person` value, which no other SAB lock uses, so these keys
+    do not match the keys of other SAB locks.
+
+    Raises:
+        ValueError: If the group key is blank.
+    """
+    if not group_key.strip():
+        raise ValueError("group key must not be blank")
+    digest = hashlib.blake2b(
+        group_key.encode("utf-8"), digest_size=8, person=_ANNOTATION_GROUP_LOCK_PERSON
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+@contextmanager
+def annotation_group_lock(engine: Engine, group_key: str) -> Iterator[bool]:
+    """Try to lock one group's GPAD imports until the context exits.
+
+    Only one GPAD job per group stages and publishes at a time; jobs for other
+    groups are not blocked. The lock is not waited for: if another connection
+    holds it, the context yields `False` at once, and the caller decides whether
+    to retry later. PostgreSQL releases the lock if the connection is lost.
+
+    Yields:
+        `True` when this connection owns the lock, otherwise `False`.
+
+    Raises:
+        RuntimeError: If PostgreSQL reports that an owned lock was not released.
+    """
+    lock_key = annotation_group_lock_key(group_key)
+    with engine.connect() as connection:
+        acquired = bool(
+            connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_key)"), {"lock_key": lock_key}
+            )
+        )
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                released = connection.scalar(
+                    text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": lock_key}
+                )
+                if released is not True:
+                    raise RuntimeError("annotation group lock was not released")
 
 
 @contextmanager

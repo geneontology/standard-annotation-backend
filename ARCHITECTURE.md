@@ -12,7 +12,7 @@ This document proposes an architecture for a stable, initial version of the new 
 
 SAB is a *de novo* replacement for GO's current standard annotation storage and access patterns. It is intended to be a long-term maintainable backend service that owns Standard Annotation records, exposes them through a stable programmatic API, supports reviewable change-set and direct mutation operations, and can derive GPAD/GPI-style outputs from its database.
 
-After the bootstrap period and project-approved cutover, SAB is authoritative for Standard Annotation records and their lifecycle (creation, modification, deletion). Until that cutover, the imported GPAD/GPI sources remain authoritative and bootstrap replacement may discard SAB-side annotation records and their history as described below. SAB stores references to external identifiers, ontology terms, evidence terms, publications, and gene products, but it is explicitly not authoritative for those external resources. External metadata may be cached for display, search, validation, or export support, but those caches are not the source of truth.
+Once a group has been cut over, SAB is authoritative for that group's Standard Annotation records and their lifecycle (creation, modification, deletion). Until then, the group's imported GPAD source remains authoritative and its refresh may discard SAB-side annotation records and their history as described below. SAB stores references to external identifiers, ontology terms, evidence terms, publications, and gene products, but it is explicitly not authoritative for those external resources. External metadata may be cached for display, search, validation, or export support, but those caches are not the source of truth.
 
 Primary goals:
 
@@ -21,7 +21,7 @@ Primary goals:
 * Store annotations in PostgreSQL using a relational-first model with JSONB snapshots.  
 * Support both direct [CRUD](https://en.wikipedia.org/wiki/Create,_read,_update_and_delete#RESTful_APIs) writes and reviewable [JSON Patch](https://jsonpatch.com/)\-based change sets.  
 * Preserve immutable annotation versions and first-class audit events.  
-* Support API-triggered asynchronous GPAD/GPI import and export jobs.  
+* Support asynchronous GPAD annotation refresh and per-group cutover jobs, and (planned) GPAD/GPI export jobs.
 * Support semantic validation and reporting.  
 * Prevent direct creates, direct updates, and accepted create/update change sets from creating duplicate annotations under a defined pairwise policy.
 * Use GitHub OAuth as an identity provider and a simple role/scope model for authorization.  
@@ -109,11 +109,11 @@ annotation_duplicate_reference
   one distinct canonical reference per row; indexed by base signature and
   canonical reference for conflict lookup
 
-import_staging_annotation
-  structurally valid annotations prepared by a bootstrap import job and keyed
+annotation_staging
+  structurally valid annotations prepared by a GPAD refresh or cutover job and keyed
   by job ID, isolated from live annotation state until publication
 
-import_staging_annotation_duplicate_reference
+annotation_staging_duplicate_reference
   per-reference duplicate lookup data prepared for staged annotations and keyed
   by the same import job ID
 
@@ -130,7 +130,7 @@ change_set
 
 audit_event
   operational history across annotations, change sets, jobs, authorization refreshes, and
-  admin actions; normally append-only, with a bootstrap replacement exception
+  admin actions; normally append-only, with a group-replacement exception
 
 job
   records for import/export jobs and other asynchronous work
@@ -159,9 +159,9 @@ authorization_assignment
   roles and scopes such as edit/group, admin/global, or edit/self
 ```
 
-Bootstrap imports should load into shared staging tables keyed by import job ID rather than directly into `annotation`. Staged rows are not visible to active queries or duplicate-conflict lookups. They enter the main annotation and derived-value tables only through the transactional publication process described below.
+GPAD refreshes and cutovers load into shared staging tables keyed by job ID rather than directly into `annotation`. Staged rows are not visible to active queries or duplicate-conflict lookups. They enter the main annotation and derived-value tables only through the transactional publication process described below.
 
-Soft deletion should be used for normal deletes. Deleting an annotation marks it deleted, creates a new version and audit event, and removes it from normal active queries by default. Rows should not be physically removed as part of normal application behavior; pre-cutover bootstrap replacement is the explicit exception.
+Soft deletion should be used for normal deletes. Deleting an annotation marks it deleted, creates a new version and audit event, and removes it from normal active queries by default. Rows should not be physically removed as part of normal application behavior; replacement of a not-yet-cut-over group's annotations is the explicit exception.
 
 ### Duplicate Annotation Policy
 
@@ -339,7 +339,7 @@ Direct CRUD writes should also use optimistic concurrency. A client should ident
 
 Duplicate checking is vulnerable to a concurrency race: two independent transactions can both find no conflicting annotation and then both write one. SAB must perform writes that involve the same duplicate base signature serially so only one transaction can check and write that state at a time, while allowing unrelated annotation writes to proceed concurrently.
 
-Every annotation create, update, and soft delete, whether direct or performed by accepting a change set, should therefore run in a PostgreSQL `READ COMMITTED` transaction using transaction-scoped advisory locks. The transaction first takes the global annotation-write lock in shared mode, then takes exclusive locks for the affected old and new duplicate base signatures in a consistent order. Writes to dependent records such as comments and proposed change sets need only the shared global lock. Normal writes can share that global lock, while bootstrap publication takes it exclusively so those writes wait during publication.
+Every annotation create, update, and soft delete, whether direct or performed by accepting a change set, should therefore run in a PostgreSQL `READ COMMITTED` transaction using transaction-scoped advisory locks. The transaction first takes the global annotation-write lock in shared mode, then takes exclusive locks for the affected old and new duplicate base signatures in a consistent order. Writes to dependent records such as comments and proposed change sets need only the shared global lock. Normal writes can share that global lock, while annotation publication takes it exclusively so those writes wait during publication.
 
 After acquiring the locks, the transaction should freshly read the annotation version and duplicate conflicts before making the change. `READ COMMITTED` ensures that a transaction which waited for a lock sees the preceding transaction's commit when it performs those reads. The checks, annotation and version writes, duplicate lookup changes, and audit recording must then commit or roll back together; the advisory locks are released when the transaction ends.
 
@@ -489,7 +489,7 @@ For example, the `curatorB` example above has two SAB authorization entries. The
 
 ### Audit
 
-Audit should be first-class and normally append-only. The `audit_event` table should record important actions even when they do not create annotation versions: token creation/revocation, direct writes, soft deletes, change-set proposal/acceptance/rejection/staleness, imports, exports, authorization refreshes, and administrative changes. The only initial exception is pre-cutover bootstrap replacement, which permanently removes annotation-specific audit events associated with the superseded import while retaining the import job's aggregate audit events and report. Failed authentication and authorization attempts should be handled through application or security logs rather than stored as first-class database audit events in the initial design.
+Audit should be first-class and normally append-only. The `audit_event` table should record important actions even when they do not create annotation versions: token creation/revocation, direct writes, soft deletes, change-set proposal/acceptance/rejection/staleness, imports, exports, authorization refreshes, and administrative changes. The only initial exception is replacement of a group's annotations by a GPAD refresh or cutover, which permanently removes the annotation-specific audit events of the replaced annotations and change sets while retaining job-level audit events and import reports. Failed authentication and authorization attempts should be handled through application or security logs rather than stored as first-class database audit events in the initial design.
 
 Annotation versions, change sets, and audit events should be linked but distinct:
 
@@ -511,10 +511,7 @@ Imports, exports, reference data refreshes, and QC reports can be long-running, 
 The common job API should look like:
 
 ```
-POST /imports
-  Creates an annotation import job and returns 202 Accepted with a job ID.
-
-POST /exports
+POST /exports  (planned)
   Creates an annotation export job and returns 202 Accepted with a job ID.
 
 POST /admin/authorization-refreshes
@@ -523,8 +520,13 @@ POST /admin/authorization-refreshes
 
 POST /admin/ontology-refreshes
 POST /admin/entity-refreshes
+POST /admin/annotation-refreshes
   Global-admin requests that refresh one configured source, or every configured
   source of the kind, and return 202 Accepted with the created or reused jobs.
+
+POST /admin/annotation-cutovers
+  Global-admin request that replaces one source's group annotations a final time
+  and makes the group permanently SAB-managed. Requires `source_key`.
 
 POST /reports/annotation-qc
   Creates an annotation QC / semantic validation report job and returns
@@ -540,14 +542,17 @@ Job handlers should be idempotent where practical and designed for retry without
 
 ### Reference Data Refreshes
 
-SAB keeps authorization, ontologies, and entity catalogs current from the sources
-in `config/sources.yaml`. Every kind follows the same pattern. A refresh job
-fetches one source, records its provenance (type, locator, resolved revision,
-checksum, and fetch time), skips the source if that exact document is already
-active, and otherwise validates the complete document before any of it becomes
-active. Invalid documents and unreachable sources fail the job with a stable
-failure code and leave the previous data in place; the next scheduled refresh
-tries again. Jobs start from a schedule, a global-admin API request, or the
+SAB keeps authorization, ontologies, entity catalogs, and group annotations
+current from the sources in `config/sources.yaml`. Every kind follows the same
+pattern. A refresh job fetches one source, records its provenance (type, locator,
+resolved revision, checksum, and fetch time), skips the source if that exact
+document is already active, and otherwise validates the document before any of it
+becomes active. Annotation refreshes qualify this in two ways. They skip only when
+the group also has no local changes and no earlier unknown-entity rejections, and
+an ordinary annotation refresh publishes the valid rows while reporting the
+rejected ones. Invalid documents and unreachable sources fail the job with a
+stable failure code and leave the previous data in place; the next scheduled
+refresh tries again. Jobs start from a schedule, a global-admin API request, or the
 `just refresh` CLI. All three reuse an unfinished job for the same source instead
 of creating another. The [refresh infrastructure guide](docs/refresh-infrastructure.md)
 shows how these pieces fit together in the code.
@@ -582,23 +587,68 @@ job result lists the annotations that reference each removed identifier. Removin
 a source from the configuration retires its catalog on the next refresh of all
 entity sources.
 
+**Annotation refreshes.** Each entry in the `annotations` section of the sources
+file names a GPAD 2.0 file and the group (`owning_group_id`) whose annotations it
+supplies. A group is `gpad_imported` by default, and its file is the source of
+truth: every refresh replaces the group's complete annotation set. A cutover is
+the same replacement followed by a permanent move to `sab_managed`. The move is
+one-way and happens only when a cutover publishes. After it, SAB rejects refreshes
+and cutovers for that group with `group_sab_managed`, and the schedule skips it.
+Cutovers start only from the global-admin API, never from the schedule or CLI.
+
+Staging happens outside the global annotation-write lock. A row the reader cannot
+parse, or whose `db_object_id` is not active in the entity catalog, is rejected
+and reported with its line number, and the rest of the file is still staged.
+Publication takes the global annotation-write lock exclusively, so readers keep
+seeing the complete old data while annotation writes wait, then see the complete
+new data after commit. For the target group only, it deletes annotations
+(with their versions, comments, and lookup rows), all change sets including
+pending create proposals, and the audit events tied to those annotations or change
+sets. It then inserts the staged annotations as version 1 imports. Other groups,
+jobs, job audit events, and `annotation_import` records are never deleted. A
+failure rolls everything back, and nothing can be undone after commit.
+
+Jobs for one group run one at a time. A job that finds the group busy is retried
+later instead of waiting on a worker. Jobs for different groups stage in parallel.
+
+Any refresh, ordinary or cutover, fails with `no_valid_annotations` and publishes
+nothing when no valid annotation remains after staging. A cutover that has at least
+one valid annotation fails with `cutover_rejected` if any record was rejected. It
+also fails with `cutover_rejected` at publication if a staged identifier is no
+longer an active entity, because publication rechecks every staged identifier while
+holding membership locks. A cutover never skips as unchanged.
+
+An ordinary refresh skips as unchanged only when the file checksum matches the
+group's last published import, that import rejected no record as
+`unknown_db_object_id`, and nothing local has changed since: no annotation
+that is not an import from that job, no version above 1 (except automatic ontology
+term replacements, which are not local edits), no comment, and no change set for the
+group. The rejection condition lets a rerun admit annotations once their entity
+joins the catalog, even when the file bytes stay the same. Known limitation: when the file does change, the re-import restores any
+obsolete terms it contains until the next ontology activation replaces them.
+
+If a job is redelivered after publication committed, it returns the stored result
+without fetching. Interrupted staging is discarded and staged again. Removing a
+source from the configuration stops its refreshes only; the group's annotations and
+mode are unchanged.
+
 ### Annotation Import and Export
 
-Eventually, SAB's PostgreSQL database is the source of truth for Standard Annotations, and GPAD/GPI files can be exported from SAB when needed. In the transition period, GPAD/GPI files can be imported into the database as a means of bootstrapping it.
+SAB's PostgreSQL database is the long-term source of truth for Standard Annotations. Until a group is cut over, that group's GPAD file is the source of truth and SAB replaces the group's annotations from it, as described under Annotation refreshes above. GPAD/GPI export is planned but not yet implemented.
 
-Before cutover, bulk GPAD/GPI import should replace the current imported annotation set in full rather than attempting to merge new source records with existing imported records. This is acceptable during the bootstrap period because SAB-side annotation changes are not treated as long-term authoritative until the chosen cutover date.
+Each GPAD source is configured with its owning group. A refresh replaces all of that group's annotations rather than merging, which is acceptable because SAB-side changes to a `gpad_imported` group are not authoritative. A cutover performs one final, clean replacement and then permanently transfers authority for that group to SAB. Groups cut over independently, with no single global cutover date.
 
-A bootstrap import validates each annotation's `db_object_id` against the active entity catalog. An annotation whose entity is not active is rejected and reported at record level without failing the whole import.
+Staging validates each annotation's `db_object_id` against the active entity catalog. An annotation whose entity is not active is rejected and reported at record level; an ordinary refresh publishes the rest, and a cutover fails.
 
-Only one bootstrap import job may stage or publish at a time. Before staging, the worker should acquire a dedicated PostgreSQL session-level advisory lock for the bootstrap-import process and hold it until the job succeeds or fails; loss of the database session releases the lock. This prevents overlapping jobs from publishing source files out of order without blocking normal annotation reads or writes.
+Per-group locking serializes jobs for one group, while different groups stage concurrently. After fetching the document and finding it changed, the worker takes a PostgreSQL session-level advisory lock for the group (in the kind's `apply` step) and holds it through staging and publication; loss of the database session releases it. A job that finds the lock held is retried later. This prevents overlapping jobs from publishing a group's files out of order without blocking normal annotation reads or writes.
 
-The bootstrap import job should parse the source files, structurally validate each record against the Standard Annotation model, assign backend-generated SAB UUIDs outside the Standard Annotation payload, and load the valid canonical records and their duplicate-signature/reference lookup data into staging tables keyed by the import job ID. It should also prepare each imported annotation's initial immutable version and source provenance. Structurally invalid records should be rejected and reported individually without failing the whole import. Staging is isolated from live annotation state and acquires neither the global annotation-write lock nor per-signature duplicate locks.
+A job parses the source file, structurally validates each record against the Standard Annotation model, assigns backend-generated SAB UUIDs outside the Standard Annotation payload, and loads the valid canonical records and their duplicate-signature/reference lookup data into staging tables keyed by the job ID, along with each annotation's initial immutable version data and source provenance. Structurally invalid records are rejected and reported individually. Staging is isolated from live annotation state and acquires neither the global annotation-write lock nor per-signature duplicate locks.
 
-After staging succeeds, a publication transaction should acquire the global annotation-write lock in exclusive mode and permanently delete every annotation from the preceding bootstrap import together with its duplicate lookup data, immutable annotation versions, comments, targeted change sets, and annotation-specific audit events. The transaction should then insert the staged annotations, their initial immutable versions and duplicate lookup data, record their import-job provenance, and commit. The aggregate job record, job-level audit events, and import report remain as the durable record that the superseded import occurred. This destructive replacement is an explicit bootstrap-only exception to normal annotation soft deletion and history retention because SAB is not yet the authoritative source.
+After staging succeeds, a publication transaction acquires the global annotation-write lock in exclusive mode and permanently deletes the target group's annotations together with their duplicate lookup data, immutable versions, comments, change sets, and annotation-specific audit events. It then inserts the staged annotations, their initial immutable versions and duplicate lookup data, records the job's provenance, and commits. The job record, job-level audit events, and import report remain as the durable record that the replacement occurred. This destructive replacement is an explicit exception to normal annotation soft deletion and history retention because SAB is not yet authoritative for the group.
 
-Publication does not acquire per-signature locks. PostgreSQL readers continue to see the previously committed annotation set while the transaction runs and see the complete replacement after it commits; they never see the intermediate delete-and-insert state. Every ordinary annotation mutation and write to an annotation-specific dependent record acquires the same global annotation-write lock in shared mode, so those writes wait during publication while reads remain available. If publication fails, the transaction rolls back and leaves the previous imported annotation set and all of its associated records intact. The consistent lock order is the global annotation-write lock first and signature locks second when signature locks are required; publication needs only the exclusive global annotation-write lock.
+Publication does not acquire per-signature locks. PostgreSQL readers continue to see the previously committed annotation set while the transaction runs and see the complete replacement after it commits; they never see the intermediate delete-and-insert state. Every ordinary annotation mutation and write to an annotation-specific dependent record acquires the same global annotation-write lock in shared mode, so those writes wait during publication while reads remain available. If publication fails, the transaction rolls back and leaves the group's previous annotations and associated records intact. The consistent lock order is the global annotation-write lock first and signature locks second when signature locks are required; publication needs only the exclusive global annotation-write lock.
 
-Bootstrap staging and publication perform no duplicate checks or duplicate rejection because duplicate pairs may already exist in current source files; the import job should not scan for duplicates even non-blockingly. This import exception does not apply to direct creates, direct updates, or accepted create/update change sets, which use the global pairwise duplicate policy.
+Staging and publication perform no duplicate checks or duplicate rejection because duplicate pairs may already exist in current source files. This import exception does not apply to direct creates, direct updates, or accepted create/update change sets, which use the global pairwise duplicate policy.
 
 Export should derive GPAD/GPI files from current active SAB records. When an export job starts, SAB should determine the latest version number for each annotation included in the export and then generate the output from those immutable rows in `annotation_version`. This gives the job a stable view of the data even if annotations are edited while the export is running. Export jobs should record enough metadata to make outputs explainable: initiating actor, timestamp, export parameters, schema/model version, code version if available, included annotation versions or a manifest that identifies them, counts, and warnings/errors.
 
@@ -606,7 +656,7 @@ Export should derive GPAD/GPI files from current active SAB records. When an exp
 
 Annotation QC reporting and GORULE-style semantic validation should use the asynchronous job model. Initially, these semantic checks are reporting-only and do not block writes. Selection and versioning of the initial ruleset, and the choice of any future rules that should block synchronously, remain deferred pending domain review. Semantic report infrastructure may proceed, but synchronous GORULE enforcement must wait for that decision. Full QC/report generation should be handled as manually triggered or periodic jobs so that large scans do not block normal API requests.
 
-A separate QC process may apply the same pairwise duplicate predicate to bootstrap-imported data; the import job itself performs no duplicate checks or duplicate rejection. QC should report the annotation pairs that satisfy the predicate. Because reference overlap is not necessarily transitive for multi-reference annotations, QC must not claim that connected components of duplicate pairs are equivalence classes. Report jobs should record the applicable rule set or duplicate-policy version, input selection, source import job or included annotation versions, counts, findings, warnings/errors, and links to report artifacts.
+A separate QC process may apply the same pairwise duplicate predicate to imported data; the import job itself performs no duplicate checks or duplicate rejection. QC should report the annotation pairs that satisfy the predicate. Because reference overlap is not necessarily transitive for multi-reference annotations, QC must not claim that connected components of duplicate pairs are equivalence classes. Report jobs should record the applicable rule set or duplicate-policy version, input selection, source import job or included annotation versions, counts, findings, warnings/errors, and links to report artifacts.
 
 ## Deployment and Operations
 
@@ -668,10 +718,10 @@ The target should be boring and supportable: a small Python service stack that G
 | Decision area | Status | Owner or input needed | Implementation impact |
 | --- | --- | --- | --- |
 | SAB annotation identifiers | Settled for the initial implementation | No further input is needed. | The backend generates UUIDs as SAB metadata outside the Standard Annotation payload; UUID helpers and persistence may proceed. |
-| Pre-cutover bulk GPAD/GPI import | Settled for the bootstrap period | Project leadership must eventually identify the cutover date, but no further input is needed for pre-cutover behavior. | A dedicated advisory lock permits only one bootstrap import job at a time. The job loads and validates staging tables keyed by job ID. One publication transaction then takes the global annotation-write lock exclusively, permanently deletes the preceding import and its annotation-specific dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. |
-| Duplicate handling during bootstrap import | Settled for the initial implementation | No further input is needed. | Staging and publication perform no duplicate checks or rejection. Staging takes no duplicate locks; publication takes the global annotation-write lock exclusively but takes no signature locks. A separate QC process may apply the settled pairwise predicate and should report duplicate pairs rather than treating connected components as equivalence classes. |
+| Per-group GPAD replacement and cutover | Settled for the initial implementation | Each group's cutover is a global-admin decision; no further input is needed for the mechanism. | Configured GPAD sources replace a `gpad_imported` group's annotations through staging tables keyed by job ID. A per-group try-lock serializes jobs for one group. One publication transaction takes the global annotation-write lock exclusively, permanently deletes the group's annotations and dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. A cutover does the same with zero rejections allowed and makes the group `sab_managed` permanently. |
+| Duplicate handling during GPAD import | Settled for the initial implementation | No further input is needed. | Staging and publication perform no duplicate checks or rejection. Staging takes no duplicate locks; publication takes the global annotation-write lock exclusively but takes no signature locks. A separate QC process may apply the settled pairwise predicate and should report duplicate pairs rather than treating connected components as equivalence classes. |
 | Initial Protein2GO-aligned pairwise duplicate policy | Settled for the initial implementation | No further input is needed. The accepted non-transitivity risk should be reviewed if multi-reference source data becomes material. | Implementation may proceed with an indexed base signature and per-reference lookup rows. Creates reject any peer; updates reject only newly introduced peers and may preserve legacy pairs; soft deletes remove conflicts. Every ordinary annotation mutation uses `READ COMMITTED`, takes the global annotation-write lock in shared mode before ordered signature locks, then freshly re-reads state and peers. |
-| Annotated-entity metadata for bootstrap imports | Settled for bootstrap; alternatives are deferred | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | Bootstrap GPAD imports validate `db_object_id` against the active entity catalog maintained by entity refreshes. An annotation whose entity is not active is rejected and reported at record level. No alternative source or reconciliation workflow is implied. |
+| Annotated-entity metadata for GPAD imports | Settled for GPAD import; alternatives are deferred | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | GPAD imports validate `db_object_id` against the active entity catalog maintained by entity refreshes. An annotation whose entity is not active is rejected and reported at record level. No alternative source or reconciliation workflow is implied. |
 | Structural validation | Settled for the initial implementation | No further policy input is needed. | Structural schema validation blocks all writes and individual import records. Invalid imported records are isolated and reported instead of failing the whole import. |
 | GORULE-style semantic validation | Settled as initially asynchronous and non-blocking; exact ruleset and future blocking rules are deferred | GO domain reviewers must select and version the initial ruleset and decide whether any future rules should block synchronously. | Semantic reporting infrastructure may proceed. Initially GORULE-style checks do not block writes; synchronous enforcement must wait for the domain decision. |
 

@@ -23,6 +23,7 @@ def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("SAB_AUTHORIZATION_REFRESH_CRON", "0 0 * * *")
     monkeypatch.setenv("SAB_ONTOLOGY_REFRESH_CRON", "0 2 * * 1,3,5")
     monkeypatch.setenv("SAB_ENTITY_REFRESH_CRON", "0 3 * * *")
+    monkeypatch.setenv("SAB_ANNOTATION_REFRESH_CRON", "0 4 * * *")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_SECRET", "test-client-secret")
     monkeypatch.setenv(

@@ -7,10 +7,13 @@ from pydantic import ValidationError
 
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
+    UnknownSourceError,
 )
 from standard_annotation_backend.refresh.sources import (
+    GitHubAnnotationSource,
     GitHubEntitySource,
     GitHubSource,
+    HttpsAnnotationSource,
     HttpsEntitySource,
     HttpsSource,
     RefreshSources,
@@ -45,6 +48,7 @@ def test_shipped_sources_file_is_valid() -> None:
     assert sources.keys(RefreshKindName.AUTHORIZATION) == ("go-site",)
     assert sources.keys(RefreshKindName.ONTOLOGY) == ("go",)
     assert sources.keys(RefreshKindName.ENTITY) == ("caeel", "mouse")
+    assert sources.keys(RefreshKindName.ANNOTATION) == ("mgi", "wormbase")
 
 
 def test_any_kind_may_use_either_source_type() -> None:
@@ -132,3 +136,73 @@ def test_missing_file_is_rejected(tmp_path: Path) -> None:
     """A missing file is rejected with a message that names no path."""
     with pytest.raises(ValueError, match=r"^sources file could not be read$"):
         load_sources_file(tmp_path / "missing.yaml")
+
+
+MGI_GPAD = {"type": "https", "group": "MGI", "url": "https://example.org/mgi.gpad"}
+
+
+def test_annotation_sources_name_their_owning_group() -> None:
+    """An annotation source may use either type and names its annotations' group."""
+    sources = RefreshSources(
+        SourcesFile.model_validate(
+            _file(
+                annotations={
+                    "mgi": MGI_GPAD,
+                    "go-central": {
+                        "type": "github",
+                        "group": "GO_Central",
+                        "repository": "geneontology/example",
+                        "ref": "main",
+                        "path": "annotations/go_central.gpad",
+                    },
+                }
+            )
+        )
+    )
+
+    assert sources.keys(RefreshKindName.ANNOTATION) == ("go-central", "mgi")
+    assert isinstance(
+        sources.source(RefreshKindName.ANNOTATION, "mgi"), HttpsAnnotationSource
+    )
+    assert isinstance(
+        sources.source(RefreshKindName.ANNOTATION, "go-central"), GitHubAnnotationSource
+    )
+    assert sources.annotation_group("go-central") == "GO_Central"
+    mgi = sources.source(RefreshKindName.ANNOTATION, "mgi")
+    assert isinstance(mgi, HttpsAnnotationSource)
+    assert mgi.format == "gpad"
+    with pytest.raises(UnknownSourceError):
+        sources.annotation_group("zfin")
+
+
+def test_null_annotation_section_is_empty() -> None:
+    """An `annotations:` key with no value configures no annotation sources."""
+    sources = RefreshSources(SourcesFile.model_validate(_file(annotations=None)))
+
+    assert sources.keys(RefreshKindName.ANNOTATION) == ()
+
+
+@pytest.mark.parametrize(
+    "annotations",
+    [
+        {"mgi": {"type": "https", "url": "https://example.org/mgi.gpad"}},
+        {"mgi": {**MGI_GPAD, "group": "  "}},
+        {"mgi": {**MGI_GPAD, "format": "gaf"}},
+        {"MGI": MGI_GPAD},
+        {
+            "mgi": MGI_GPAD,
+            "mgi-copy": {**MGI_GPAD, "url": "https://example.org/b.gpad"},
+        },
+    ],
+    ids=[
+        "missing-group",
+        "blank-group",
+        "unsupported-format",
+        "bad-key",
+        "shared-group",
+    ],
+)
+def test_invalid_annotation_sources_are_rejected(annotations: object) -> None:
+    """A source needs a valid key, a nonblank group no other source uses, and GPAD."""
+    with pytest.raises(ValidationError):
+        SourcesFile.model_validate(_file(annotations=annotations))

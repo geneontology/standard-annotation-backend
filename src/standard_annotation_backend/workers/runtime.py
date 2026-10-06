@@ -16,6 +16,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
     create_unit_of_work_factory,
 )
+from standard_annotation_backend.refresh.annotation import AnnotationRefreshKind
 from standard_annotation_backend.refresh.authorization import (
     AuthorizationRefreshKind,
 )
@@ -24,6 +25,9 @@ from standard_annotation_backend.refresh.fetchers import SourceFetcher, SourceFe
 from standard_annotation_backend.refresh.ontology import OntologyRefreshKind
 from standard_annotation_backend.refresh.runner import RefreshRunner
 from standard_annotation_backend.refresh.sources import RefreshSources
+from standard_annotation_backend.services.annotation_refresh_service import (
+    AnnotationRefreshService,
+)
 from standard_annotation_backend.services.authorization_refresh_service import (
     AuthorizationRefreshService,
 )
@@ -80,13 +84,24 @@ def create_refresh_runner(
         jobs=jobs,
         enqueue_prune=enqueue_prune,
     )
+    annotation_service = AnnotationRefreshService(unit_of_work_factory)
+    annotation_kinds = tuple(
+        AnnotationRefreshKind(
+            engine=engine,
+            sources=sources,
+            service=annotation_service,
+            jobs=jobs,
+            cutover=cutover,
+        )
+        for cutover in (False, True)
+    )
     return RefreshComponents(
         ontology=ontology,
         runner=RefreshRunner(
             engine=engine,
             jobs=jobs,
             fetchers=fetchers,
-            kinds=(authorization, entity, ontology),
+            kinds=(authorization, entity, ontology, *annotation_kinds),
             retirer=entity,
         ),
     )

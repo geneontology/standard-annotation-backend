@@ -1,5 +1,6 @@
 """Configuration loaded from SAB-prefixed environment variables."""
 
+from datetime import UTC, datetime
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -58,20 +59,30 @@ class Settings(LoggingSettings):
     authorization_refresh_cron: TrimmedNonBlankString = "0 0 * * *"
     ontology_refresh_cron: TrimmedNonBlankString = "0 2 * * 1,3,5"
     entity_refresh_cron: TrimmedNonBlankString = "0 3 * * *"
+    annotation_refresh_cron: TrimmedNonBlankString = "0 4 * * *"
     sources_file: Path = Path("config/sources.yaml")
     source_connect_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
     source_read_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     _sources_file: SourcesFile = PrivateAttr()
 
     @field_validator(
-        "authorization_refresh_cron", "ontology_refresh_cron", "entity_refresh_cron"
+        "authorization_refresh_cron",
+        "ontology_refresh_cron",
+        "entity_refresh_cron",
+        "annotation_refresh_cron",
     )
     @classmethod
     def validate_cron(cls, value: str) -> str:
-        """Validate a five-field cron expression for Celery Beat."""
+        """Validate a five-field cron expression that Celery Beat can run.
+
+        Celery's parser checks each field separately, so a date that never
+        occurs, such as `0 0 30 2 *` (February 30), parses but has no next run
+        time. Celery Beat would raise `RuntimeError` for such a schedule on every
+        tick, so it is rejected here, when settings are loaded.
+        """
         try:
-            crontab.from_string(value)
-        except ValueError:
+            crontab.from_string(value).remaining_estimate(datetime.now(UTC))
+        except (ValueError, RuntimeError):
             raise ValueError("must be a valid five-field cron schedule") from None
         return value
 

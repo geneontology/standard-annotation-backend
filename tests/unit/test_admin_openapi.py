@@ -8,8 +8,14 @@ REFRESH_PATHS = (
     "/admin/authorization-refreshes",
     "/admin/ontology-refreshes",
     "/admin/entity-refreshes",
+    "/admin/annotation-refreshes",
+    "/admin/annotation-cutovers",
 )
-SOURCE_KEY_PATHS = ("/admin/ontology-refreshes", "/admin/entity-refreshes")
+SOURCE_KEY_PATHS = (
+    "/admin/ontology-refreshes",
+    "/admin/entity-refreshes",
+    "/admin/annotation-refreshes",
+)
 
 
 @pytest.fixture(scope="module")
@@ -107,6 +113,8 @@ def test_job_resource_documents_exact_fields_and_vocabulary(schema: dict) -> Non
     }
     assert set(resource["required"]) == set(resource["properties"])
     assert schema["components"]["schemas"]["JobType"]["enum"] == [
+        "annotation_cutover",
+        "annotation_refresh",
         "authorization_refresh",
         "entity_refresh",
         "entity_retirement",
@@ -159,6 +167,8 @@ def test_refresh_operations_are_bearer_protected_with_typed_errors(
     expected = {"202", "401", "403", "503"}
     if path in SOURCE_KEY_PATHS:
         expected.add("422")
+    if path.startswith("/admin/annotation-"):
+        expected |= {"409", "422"}
 
     assert operation["security"] == [{"Bearer": []}]
     assert set(operation["responses"]) == expected
@@ -166,3 +176,45 @@ def test_refresh_operations_are_bearer_protected_with_typed_errors(
         assert operation["responses"][code]["content"]["application/json"][
             "schema"
         ] == {"$ref": "#/components/schemas/ApiErrorResponse"}
+
+
+def test_cutover_requires_a_source_key_and_documents_conflict(schema: dict) -> None:
+    """The cutover route takes a required source key and documents 409."""
+    operation = schema["paths"]["/admin/annotation-cutovers"]["post"]
+    body = schema["components"]["schemas"]["AnnotationCutoverRequest"]
+
+    assert operation["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/AnnotationCutoverRequest"
+    }
+    assert body["required"] == ["source_key"]
+    assert body["additionalProperties"] is False
+    assert "group_sab_managed" in operation["responses"]["409"]["description"]
+    refresh = schema["paths"]["/admin/annotation-refreshes"]["post"]
+    assert "group_sab_managed" in refresh["responses"]["409"]["description"]
+
+
+def test_refresh_requests_include_realistic_examples(schema: dict) -> None:
+    """Each source-keyed refresh route has single-source and all-sources examples."""
+    paths = schema["paths"]
+
+    ontology_examples = paths["/admin/ontology-refreshes"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["examples"]
+    entity_examples = paths["/admin/entity-refreshes"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["examples"]
+    annotation_examples = paths["/admin/annotation-refreshes"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["examples"]
+
+    assert set(ontology_examples) == {"single-source", "all-sources"}
+    assert ontology_examples["single-source"]["value"] == {"source_key": "go"}
+    assert ontology_examples["all-sources"]["value"] == {}
+
+    assert set(entity_examples) == {"single-source", "all-sources"}
+    assert entity_examples["single-source"]["value"] == {"source_key": "caeel"}
+    assert entity_examples["all-sources"]["value"] == {}
+
+    assert set(annotation_examples) == {"single-source", "all-sources"}
+    assert annotation_examples["single-source"]["value"] == {"source_key": "mgi"}
+    assert annotation_examples["all-sources"]["value"] == {}
