@@ -176,7 +176,6 @@ class AnnotationService:
         )
         annotation = _validated_annotation(payload)
         with self._unit_of_work_factory() as unit_of_work:
-            unit_of_work.entities.require_active(annotation.db_object_id)
             record = unit_of_work.annotations.create_direct(
                 annotation=annotation,
                 actor_id=context.actor_id,
@@ -276,7 +275,6 @@ class AnnotationService:
             merged = current.annotation_data.copy()
             merged.update(changes)
             annotation = _validated_annotation(merged)
-            unit_of_work.entities.require_active(annotation.db_object_id)
             updated = unit_of_work.annotations.update_direct(
                 annotation_id,
                 annotation,

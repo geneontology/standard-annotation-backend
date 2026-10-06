@@ -613,8 +613,6 @@ def _accept_proposal(
     before, validation = _candidate(unit_of_work.annotations, record)
     if validation.annotation is None:
         raise InvalidChangeSetError(validation.errors)
-    if record.operation != ChangeSetOperation.DELETE:
-        unit_of_work.entities.require_active(validation.annotation.db_object_id)
     if record.operation == ChangeSetOperation.CREATE:
         changed = unit_of_work.annotations.create_direct(
             annotation=validation.annotation,

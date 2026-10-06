@@ -28,6 +28,9 @@ from standard_annotation_backend.persistence.models import (
     OntologyClosureRecord,
     OntologyMetadataRecord,
 )
+from standard_annotation_backend.persistence.repositories.entities import (
+    EntityRepository,
+)
 from standard_annotation_backend.persistence.repositories.pagination import (
     Page,
     load_page,
@@ -154,7 +157,8 @@ class AnnotationRepository:
     Mutation methods such as `create`, `update`, and `soft_delete` support workflows
     whose callers supply their own workflow details. Their `_direct` counterparts
     handle changes submitted through the public API and enforce that workflow's
-    additional rules, including duplicate prevention and expected-version checks.
+    additional rules, including an active entity catalog subject, duplicate
+    prevention, and expected-version checks.
     Both variants use shared private helpers for the underlying database writes so
     annotations and their version histories remain consistent.
 
@@ -164,6 +168,7 @@ class AnnotationRepository:
 
     def __init__(self, session: Session) -> None:
         self.session = session
+        self._entities = EntityRepository(session)
 
     def get(
         self,
@@ -504,9 +509,14 @@ class AnnotationRepository:
             The newly stored annotation at version 1.
 
         Raises:
+            UnknownDbObjectIdError: If `db_object_id` is not in the active entity
+                catalog.
             DuplicateAnnotationError: If an equivalent active annotation exists.
             TypeError: If `annotation` is not a validated `Annotation`.
         """
+        # Lock the subject's catalog membership before the annotation locks, the
+        # order every annotation write uses, so catalog removal waits for us.
+        self._entities.require_active(annotation.db_object_id)
         persistence_data = prepare_annotation_for_persistence(annotation)
         acquire_global_annotation_write_lock(self.session)
         acquire_signature_locks(
@@ -661,12 +671,16 @@ class AnnotationRepository:
             The updated annotation with a newly saved version.
 
         Raises:
+            UnknownDbObjectIdError: If the replacement `db_object_id` is not in the
+                active entity catalog.
             AnnotationNotFoundError: If the annotation does not exist.
             AnnotationDeletedError: If the annotation has already been deleted.
             DuplicateAnnotationError: If the change creates a new duplicate.
             StaleAnnotationVersionError: If `expected_version` is not current.
             TypeError: If `annotation` is not a validated `Annotation`.
         """
+        # Same lock order as `create_direct`: catalog membership first.
+        self._entities.require_active(annotation.db_object_id)
         candidate = prepare_annotation_for_persistence(annotation)
         acquire_global_annotation_write_lock(self.session)
         current = self._get_annotation_for_change(annotation_id)

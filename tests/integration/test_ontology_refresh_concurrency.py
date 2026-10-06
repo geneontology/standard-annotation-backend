@@ -1,6 +1,7 @@
 """Verify ontology refreshes coordinate safely across PostgreSQL connections."""
 
 import os
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,6 +66,17 @@ from standard_annotation_backend.workers.tasks import (
 OBO = (
     Path(__file__).parents[1] / "fixtures" / "ontology" / "minimal-go.obo"
 ).read_bytes()
+
+
+@pytest.fixture(autouse=True)
+def _active_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Make the subjects these tests write active in the entity catalog.
+
+    Direct annotation writes require an active subject.
+    """
+    seed_active_subjects("UniProtKB:P12345", "UniProtKB:Q12345")
+
+
 OLD_JOB_ID = UUID("00000000-0000-0000-0000-000000000071")
 OLD_TERM = "GO:0000001"
 NEW_TERM = "GO:0000002"

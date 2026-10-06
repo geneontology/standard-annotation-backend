@@ -30,6 +30,21 @@ from standard_annotation_backend.persistence.unit_of_work import (
 )
 from standard_annotation_backend.services.annotation_service import AnnotationService
 
+
+@pytest.fixture(autouse=True)
+def _active_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Make the subjects these tests write active in the entity catalog.
+
+    Direct annotation writes require an active subject.
+    """
+    seed_active_subjects(
+        "UniProtKB:P12345",
+        "UniProtKB:FIRST",
+        "UniProtKB:SECOND",
+        "UniProtKB:UNRELATED",
+    )
+
+
 GUARD_SECONDS = 5
 OBSERVATION_SECONDS = 2
 Mutation = Callable[[Session], None]

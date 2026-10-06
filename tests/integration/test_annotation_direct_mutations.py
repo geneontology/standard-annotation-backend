@@ -13,6 +13,15 @@ from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitO
 UnitOfWorkFactory = Callable[[], SqlAlchemyUnitOfWork]
 
 
+@pytest.fixture(autouse=True)
+def _active_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Make the subjects these tests write active in the entity catalog.
+
+    Direct annotation writes require an active subject.
+    """
+    seed_active_subjects("UniProtKB:P12345", "UniProtKB:DISTINCT")
+
+
 def _changed(annotation: Annotation, **changes: object) -> Annotation:
     annotation_data = annotation.model_dump(mode="json")
     annotation_data.update(changes)
@@ -25,6 +34,7 @@ def _create_existing(
     *,
     annotation_id: UUID | None = None,
 ) -> UUID:
+
     with unit_of_work_factory() as unit_of_work:
         record = unit_of_work.annotations.create(
             annotation=annotation,

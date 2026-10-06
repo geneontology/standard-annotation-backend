@@ -3,8 +3,10 @@
 Also verify that catalog replacement waits for in-progress annotation writes.
 """
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from uuid import UUID
 
 import pytest
 from fastapi import status
@@ -48,6 +50,38 @@ UNKNOWN_ERROR = {
         ],
     }
 }
+
+
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_repository_writes_reject_an_unknown_subject_without_writes(
+    operation: str,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    seed_annotation: Callable[[str], UUID],
+    seed_active_subjects: Callable[..., None],
+    validated_annotation: Annotation,
+) -> None:
+    """Direct repository writes enforce the active-subject rule themselves.
+
+    No caller can skip the check, so a create or update whose subject is not in
+    the active entity catalog changes nothing.
+    """
+    seed_active_subjects("UniProtKB:P12345")
+    existing = seed_annotation("UniProtKB:P12345")
+    unknown = validated_annotation.model_copy(update={"db_object_id": UNKNOWN_ID})
+    before = _counts(session_factory)
+
+    with unit_of_work_factory() as uow, pytest.raises(UnknownDbObjectIdError):
+        if operation == "create":
+            uow.annotations.create_direct(
+                annotation=unknown, actor_id="curator", owning_group_id="MGI"
+            )
+        else:
+            uow.annotations.update_direct(
+                existing, unknown, expected_version=1, actor_id="curator"
+            )
+
+    assert _counts(session_factory) == before
 
 
 def _counts(session_factory: sessionmaker[Session]) -> tuple[int, ...]:
