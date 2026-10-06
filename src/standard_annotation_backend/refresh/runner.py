@@ -25,7 +25,10 @@ from standard_annotation_backend.domain.refresh import (
     job_source_key,
     refresh_failure_message,
 )
-from standard_annotation_backend.persistence.locks import job_execution_lock
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    try_advisory_lock,
+)
 from standard_annotation_backend.refresh.fetchers import SourceError, SourceFetcher
 from standard_annotation_backend.refresh.kinds import (
     RefreshKind,
@@ -82,8 +85,12 @@ class RefreshRunner:
         # The job execution lock is a PostgreSQL try-lock held on a dedicated
         # connection for this whole run. If another process already runs this
         # job (for example after a duplicate delivery), return immediately. If
-        # this process dies, PostgreSQL releases the lock with the connection.
-        with job_execution_lock(self._engine, job_id) as acquired:
+        # this process dies, PostgreSQL releases the lock with the connection,
+        # and Celery redelivers the unacknowledged task message (see
+        # `task_acks_late` and `task_reject_on_worker_lost` at
+        # https://docs.celeryq.dev/en/stable/userguide/configuration.html), so
+        # a later run resumes the same `running` job.
+        with try_advisory_lock(self._engine, LockNamespace.JOB, job_id) as acquired:
             if not acquired:
                 return
             # `start` moves a queued job to running and adds an audit entry. For a
@@ -114,7 +121,7 @@ class RefreshRunner:
             Exception: Any unexpected error, so the caller can retry.
         """
         # Same lock and redelivery handling as `run`.
-        with job_execution_lock(self._engine, job_id) as acquired:
+        with try_advisory_lock(self._engine, LockNamespace.JOB, job_id) as acquired:
             if not acquired:
                 return
             job = self._jobs.start(job_id)

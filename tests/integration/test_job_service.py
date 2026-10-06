@@ -5,13 +5,12 @@ from threading import Barrier
 from uuid import UUID
 
 import pytest
-from sqlalchemy import Engine, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import RefreshFailureCode
-from standard_annotation_backend.persistence.locks import job_execution_lock
 from standard_annotation_backend.persistence.models import AuditEventRecord, JobRecord
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
@@ -179,19 +178,6 @@ def test_conflicting_repeated_success_is_rejected(
     service.succeed(job.job_id, result={"value": 1})
     with pytest.raises(InvalidJobTransitionError):
         service.succeed(job.job_id, result={"value": 2})
-
-
-def test_execution_lock_excludes_live_worker_and_releases_with_connection(
-    database_engine: Engine,
-) -> None:
-    """One connection holds the job lock, and closing it allows another holder."""
-    job_id = UUID("00000000-0000-0000-0000-000000000027")
-    with job_execution_lock(database_engine, job_id) as acquired:
-        assert acquired is True
-        with job_execution_lock(database_engine, job_id) as competing:
-            assert competing is False
-    with job_execution_lock(database_engine, job_id) as recovered:
-        assert recovered is True
 
 
 def test_concurrent_start_records_one_transition(

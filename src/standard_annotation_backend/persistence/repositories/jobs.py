@@ -8,7 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.persistence.locks import acquire_refresh_start_lock
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    acquire_transaction_lock,
+)
 from standard_annotation_backend.persistence.models import JobRecord
 
 
@@ -58,11 +61,18 @@ class JobRepository:
         return record
 
     def lock_refresh_starts(self) -> None:
-        """Hold the refresh start lock until the transaction ends.
+        """Make refresh job creation run one request at a time, for every kind.
 
-        See `acquire_refresh_start_lock`.
+        Starting a refresh first looks for a queued or running job for each
+        source and creates one only when none exists. Without this lock, two
+        requests running at once could both find no job and both create one.
+        The lock is held until the transaction ends.
+
+        One lock covers every kind. Starts are short and rare, so serializing
+        them costs nothing noticeable, and a single key cannot deadlock with
+        itself.
         """
-        acquire_refresh_start_lock(self.session)
+        acquire_transaction_lock(self.session, LockNamespace.REFRESH_START)
 
     def find_active(self, *, job_type: JobType, source_key: str) -> JobRecord | None:
         """Return the oldest queued or running job of a type for one source."""

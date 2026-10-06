@@ -22,7 +22,10 @@ from standard_annotation_backend.domain.entities import (
     EntityRemovalImpact,
     UnknownDbObjectIdError,
 )
-from standard_annotation_backend.persistence.locks import acquire_entity_catalog_lock
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    acquire_transaction_lock,
+)
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationStatus,
@@ -94,7 +97,7 @@ class EntityRepository:
             The result and whether this call changed any state.
         """
         self.lock_job(job_id)
-        acquire_entity_catalog_lock(self.session, source_key)
+        acquire_transaction_lock(self.session, LockNamespace.ENTITY_CATALOG, source_key)
         recorded = self.session.scalar(
             select(EntityCatalogSnapshotRecord).where(
                 EntityCatalogSnapshotRecord.retired_by_job_id == job_id
@@ -255,7 +258,9 @@ class EntityRepository:
         candidate = self._candidate(job_id)
         if candidate is None:
             raise EntityCandidateConflictError
-        acquire_entity_catalog_lock(self.session, candidate.source_key)
+        acquire_transaction_lock(
+            self.session, LockNamespace.ENTITY_CATALOG, candidate.source_key
+        )
         if candidate.publication_result is not None:
             return EntityRefreshResult.from_job_result(candidate.publication_result)
         if candidate.active or job.status not in {"queued", "running"}:

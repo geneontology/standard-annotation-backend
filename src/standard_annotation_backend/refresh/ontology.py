@@ -31,7 +31,10 @@ from standard_annotation_backend.domain.refresh import (
 )
 from standard_annotation_backend.ontology.definitions import ontology_definition
 from standard_annotation_backend.ontology.obo_parser import parse_obo
-from standard_annotation_backend.persistence.locks import ontology_refresh_lock
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    try_advisory_lock,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh.fetchers import SourceDocument
 from standard_annotation_backend.refresh.kinds import (
@@ -150,7 +153,9 @@ class OntologyRefreshKind:
         ontology_document = _ontology_document(key, document)
         # Stage and activate under the per-ontology lock, so two jobs cannot
         # activate snapshots out of order and pruning cannot delete a candidate.
-        with ontology_refresh_lock(self._engine, key) as acquired:
+        with try_advisory_lock(
+            self._engine, LockNamespace.ONTOLOGY, key.value
+        ) as acquired:
             if not acquired:
                 # The job stays running; Celery retries the whole task later.
                 raise OntologyRefreshBusyError
@@ -230,7 +235,9 @@ class OntologyRefreshKind:
         key = _ontology_key(source_key)
         if key is None:
             return True
-        with ontology_refresh_lock(self._engine, key) as acquired:
+        with try_advisory_lock(
+            self._engine, LockNamespace.ONTOLOGY, key.value
+        ) as acquired:
             if not acquired:
                 return False
             self._services[key].prune(pruned_at=datetime.now(UTC))

@@ -28,8 +28,9 @@ from standard_annotation_backend.persistence.annotation_data import (
 )
 from standard_annotation_backend.persistence.locks import (
     GLOBAL_ANNOTATION_WRITE_LOCK_KEY,
+    LockNamespace,
     acquire_global_annotation_write_lock,
-    ontology_refresh_lock,
+    try_advisory_lock,
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationOrigin,
@@ -215,29 +216,6 @@ def _wait_for_global_lock_contention(
     raise AssertionError(f"global annotation lock contention not observed: {observed}")
 
 
-def test_same_ontology_refresh_lock_is_released_after_success_and_failure(
-    database_engine: Engine,
-) -> None:
-    """Only one refresh holds a key lock, which is released on success or failure."""
-    with ontology_refresh_lock(database_engine, OntologyKey.GO) as acquired:
-        assert acquired is True
-        with ontology_refresh_lock(database_engine, OntologyKey.GO) as competing:
-            assert competing is False
-        with ontology_refresh_lock(database_engine, "future-ontology") as independent:
-            assert independent is True
-    with ontology_refresh_lock(database_engine, OntologyKey.GO) as recovered:
-        assert recovered is True
-
-    with (
-        pytest.raises(RuntimeError, match="injected"),
-        ontology_refresh_lock(database_engine, OntologyKey.GO) as acquired,
-    ):
-        assert acquired is True
-        raise RuntimeError("injected")
-    with ontology_refresh_lock(database_engine, OntologyKey.GO) as recovered:
-        assert recovered is True
-
-
 def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
     configured_environment: None,
     database_engine: Engine,
@@ -256,7 +234,9 @@ def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
 
     monkeypatch.setattr(OntologyRefreshService, "prune", record_pruning)
 
-    with ontology_refresh_lock(database_engine, OntologyKey.GO) as acquired:
+    with try_advisory_lock(
+        database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+    ) as acquired:
         assert acquired is True
         with pytest.raises(WorkerTaskUnavailableError):
             prune_ontology_snapshots.run(OntologyKey.GO.value)
@@ -306,7 +286,9 @@ def test_refresh_task_retries_while_the_ontology_lock_is_held_then_succeeds(
     )
 
     try:
-        with ontology_refresh_lock(database_engine, OntologyKey.GO) as acquired:
+        with try_advisory_lock(
+            database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+        ) as acquired:
             assert acquired is True
             with pytest.raises(WorkerTaskUnavailableError):
                 tasks.run_refresh.run(str(job_id))

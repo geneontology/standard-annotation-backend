@@ -14,7 +14,10 @@ from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.ontology import OntologyKey
 from standard_annotation_backend.domain.refresh import RefreshFailureCode
-from standard_annotation_backend.persistence.locks import ontology_refresh_lock
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    try_advisory_lock,
+)
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     JobRecord,
@@ -379,7 +382,9 @@ def test_ontology_refresh_waits_for_the_ontology_lock_by_retrying(
     )
     job_id = _job(unit_of_work_factory, CASES["ontology"])
 
-    with ontology_refresh_lock(database_engine, OntologyKey.GO) as acquired:
+    with try_advisory_lock(
+        database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+    ) as acquired:
         assert acquired
         with pytest.raises(OntologyRefreshBusyError):
             runner.run(job_id)
@@ -534,7 +539,9 @@ def test_in_process_pruning_is_skipped_while_the_ontology_lock_is_held(
         enqueue_prune=None,
     )
 
-    with ontology_refresh_lock(database_engine, OntologyKey.GO) as acquired:
+    with try_advisory_lock(
+        database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+    ) as acquired:
         assert acquired
         components.ontology.after_terminal("go")
 

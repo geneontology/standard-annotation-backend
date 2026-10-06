@@ -17,7 +17,8 @@ from standard_annotation_backend.domain.auth import (
 from standard_annotation_backend.domain.refresh import SourceProvenance
 from standard_annotation_backend.domain.tokens import TokenMetadata
 from standard_annotation_backend.persistence.locks import (
-    acquire_authorization_refresh_lock,
+    LockNamespace,
+    acquire_transaction_lock,
 )
 from standard_annotation_backend.persistence.models import (
     ApiTokenRecord,
@@ -155,7 +156,9 @@ class AuthRepository:
         Returns:
             Stored refresh record and whether this call applied it.
         """
-        acquire_authorization_refresh_lock(self.session)
+        # Hold the lock from the duplicate-source check through the replacement,
+        # so a concurrent refresh waits for this transaction to finish.
+        acquire_transaction_lock(self.session, LockNamespace.AUTHORIZATION_REFRESH)
         latest = self.latest_refresh()
         if latest is not None and same_refresh_source(latest, provenance):
             return AuthorizationReplacement(latest, False)

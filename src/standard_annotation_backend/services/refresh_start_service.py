@@ -133,9 +133,9 @@ class RefreshStartService:
         started: list[_StartedJob] = []
         with self._unit_of_work_factory() as uow:
             # Serialize job creation across every request, scheduler run, and
-            # CLI invocation; see `acquire_refresh_start_lock`. The lock is held
-            # until this transaction commits, so the "find, else create" below
-            # cannot interleave with another start.
+            # CLI invocation; see `JobRepository.lock_refresh_starts`. The lock
+            # is held until this transaction commits, so the "find, else create"
+            # below cannot interleave with another start.
             uow.jobs.lock_refresh_starts()
             for job_type, key in self._targets(uow, kind, source_key, cutover=cutover):
                 # Reuse a queued or running job for the same source instead of

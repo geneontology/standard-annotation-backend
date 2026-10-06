@@ -4,37 +4,145 @@ import hashlib
 import string
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from enum import Enum
 from uuid import UUID
 
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
-from standard_annotation_backend.domain.ontology import OntologyKey
-
 GLOBAL_ANNOTATION_WRITE_LOCK_KEY = -(2**63)
-_AUTHORIZATION_REFRESH_LOCK_KEY = 0x53414241555448
 _MAX_SIGNATURE_LOCK_KEY = (1 << 63) - 1
 _HEXADECIMAL_CHARACTERS = frozenset(string.hexdigits)
-_REFRESH_START_LOCK_KEY = 0x5341425253545254  # "SABRSTRT"
-_JOB_LOCK_PERSON = b"SABJOB"
-_ONTOLOGY_LOCK_PERSON = b"SABONTO"
-_ENTITY_LOCK_PERSON = b"SABENT"
-_ANNOTATION_GROUP_LOCK_PERSON = b"SABGPAD"
 
 
-def acquire_authorization_refresh_lock(session: Session) -> None:
-    """Prevent concurrent authorization replacements.
+class LockNamespace(Enum):
+    """Name a family of advisory locks that serialize one kind of operation.
 
-    The transaction holds the `SABAUTH` advisory lock from the duplicate-source
-    check through the replacement. A second refresh waits until the
-    first transaction commits or rolls back.
+    Each member's value is the BLAKE2b `person` parameter used to derive its lock
+    keys, so equal values in different namespaces get unrelated keys. The values
+    must not change: workers from different releases exclude each other only if
+    they derive the same keys.
+
+    Attributes:
+        JOB: One job's execution, keyed by job ID.
+        ONTOLOGY: Staging, activation, and pruning of one ontology, keyed by
+            ontology key.
+        ENTITY_CATALOG: Publication and retirement of one entity source's
+            catalog, keyed by source key.
+        ANNOTATION_GROUP: GPAD staging and publication for one group, keyed by
+            group key.
+        AUTHORIZATION_REFRESH: Replacement of users and grants. Used without a
+            value.
+        REFRESH_START: Creation of refresh jobs of every kind. Used without a
+            value.
+    """
+
+    JOB = b"SABJOB"
+    ONTOLOGY = b"SABONTO"
+    ENTITY_CATALOG = b"SABENT"
+    ANNOTATION_GROUP = b"SABGPAD"
+    AUTHORIZATION_REFRESH = b"SABAUTH"
+    REFRESH_START = b"SABRSTRT"
+
+
+def lock_key(namespace: LockNamespace, value: str | UUID | None = None) -> int:
+    """Return the PostgreSQL advisory-lock key for one value in a namespace.
+
+    PostgreSQL's one-argument advisory-lock functions take a signed 64-bit
+    integer. The key is an 8-byte BLAKE2b digest of the value, personalized with
+    the namespace, which gives a stable, well-distributed mapping in every
+    process. The hash is used for key generation, not for security. A collision
+    is unlikely and would only make two unrelated operations run one after the
+    other.
+
+    Args:
+        namespace: Family of locks the key belongs to.
+        value: What to lock within the namespace. `None` locks the whole
+            namespace.
+
+    Returns:
+        A stable signed 64-bit advisory-lock key.
+
+    Raises:
+        ValueError: If `value` is a blank string.
+    """
+    if value is None:
+        data = b""
+    elif isinstance(value, UUID):
+        data = value.bytes
+    elif not value.strip():
+        raise ValueError("lock value must not be blank")
+    else:
+        data = value.encode("utf-8")
+    digest = hashlib.blake2b(data, digest_size=8, person=namespace.value).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+@contextmanager
+def try_advisory_lock(
+    engine: Engine, namespace: LockNamespace, value: str | UUID | None = None
+) -> Iterator[bool]:
+    """Try to take an advisory lock and hold it until the context exits.
+
+    The lock is not waited for. If another connection holds it, the context
+    yields `False` at once and the caller decides whether to retry later. A
+    dedicated connection owns the lock for the whole context, so it can span
+    several transactions. If that connection is lost, for example because the
+    worker process dies, PostgreSQL releases the lock.
+
+    Args:
+        engine: Database engine used to open the dedicated lock connection.
+        namespace: Family of locks the lock belongs to.
+        value: What to lock within the namespace. `None` locks the whole
+            namespace.
+
+    Yields:
+        `True` when this connection owns the lock, otherwise `False`.
+
+    Raises:
+        ValueError: If `value` is a blank string.
+        RuntimeError: If PostgreSQL reports that an owned lock was not released.
+    """
+    key = lock_key(namespace, value)
+    with engine.connect() as connection:
+        acquired = bool(
+            connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_key)"), {"lock_key": key}
+            )
+        )
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                released = connection.scalar(
+                    text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": key}
+                )
+                if released is not True:
+                    raise RuntimeError(
+                        f"{namespace.name.lower()} advisory lock was not released"
+                    )
+
+
+def acquire_transaction_lock(
+    session: Session, namespace: LockNamespace, value: str | UUID | None = None
+) -> None:
+    """Wait for an advisory lock and hold it until the session's transaction ends.
+
+    PostgreSQL releases the lock when the transaction commits or rolls back, so
+    it cannot outlive the work it protects.
 
     Args:
         session: Session whose transaction owns the lock.
+        namespace: Family of locks the lock belongs to.
+        value: What to lock within the namespace. `None` locks the whole
+            namespace.
+
+    Raises:
+        ValueError: If `value` is a blank string.
     """
     session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": _AUTHORIZATION_REFRESH_LOCK_KEY},
+        {"lock_key": lock_key(namespace, value)},
     )
 
 
@@ -110,231 +218,3 @@ def acquire_signature_locks(session: Session, signatures: Iterable[str]) -> None
     statement = text("SELECT pg_advisory_xact_lock(:lock_key)")
     for lock_key in ordered_signature_lock_keys(signatures):
         session.execute(statement, {"lock_key": lock_key})
-
-
-def job_lock_key(job_id: UUID) -> int:
-    """Convert a job UUID to a PostgreSQL advisory-lock key.
-
-    PostgreSQL's one-argument advisory-lock functions accept a signed 64-bit
-    integer, while a UUID contains 128 bits. BLAKE2b provides a deterministic,
-    well-distributed 64-bit mapping that is stable across application processes.
-    Its `SABJOB` parameter keeps this mapping separate from other BLAKE2b uses.
-    This function uses the hash for stable key generation, not for security.
-
-    Hashing cannot guarantee uniqueness. A collision is unlikely at the expected
-    job volume and would only make two unrelated jobs run one after the other.
-
-    Args:
-        job_id: Durable job identifier to map into PostgreSQL's lock-key space.
-
-    Returns:
-        A stable signed 64-bit advisory-lock key.
-    """
-    digest = hashlib.blake2b(
-        job_id.bytes,
-        digest_size=8,
-        person=_JOB_LOCK_PERSON,
-    ).digest()
-    return int.from_bytes(digest, byteorder="big", signed=True)
-
-
-def ontology_lock_key(key: str) -> int:
-    """Return a stable PostgreSQL advisory-lock key for an ontology key."""
-    digest = hashlib.blake2b(
-        key.encode("utf-8"), digest_size=8, person=_ONTOLOGY_LOCK_PERSON
-    ).digest()
-    return int.from_bytes(digest, byteorder="big", signed=True)
-
-
-def entity_catalog_lock_key(source_key: str) -> int:
-    """Return the PostgreSQL advisory lock key for one entity source.
-
-    The key is a 64-bit hash of the source key. A BLAKE2 `person` value that only
-    this function uses keeps the keys apart from job and ontology lock keys. If
-    two sources ever hash to the same key, their publications only wait for each
-    other.
-
-    Raises:
-        ValueError: If the source key is blank.
-    """
-    if not source_key.strip():
-        raise ValueError("source key must not be blank")
-    digest = hashlib.blake2b(
-        source_key.encode("utf-8"), digest_size=8, person=_ENTITY_LOCK_PERSON
-    ).digest()
-    return int.from_bytes(digest, byteorder="big", signed=True)
-
-
-def acquire_entity_catalog_lock(session: Session, source_key: str) -> None:
-    """Make catalog publications and retirements for one entity source run in turn.
-
-    The transaction holds the lock until it commits or rolls back, so only one
-    transaction at a time can replace or retire a source's active catalog.
-    Fetching, parsing, staging, and work for other sources are not blocked.
-
-    Args:
-        session: Session whose transaction owns the lock.
-        source_key: Entity source whose catalog changes must not overlap.
-
-    Raises:
-        ValueError: If the source key is blank.
-    """
-    session.execute(
-        text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": entity_catalog_lock_key(source_key)},
-    )
-
-
-@contextmanager
-def ontology_refresh_lock(engine: Engine, key: OntologyKey | str) -> Iterator[bool]:
-    """Try to lock ontology refreshing for one key until the context exits.
-
-    The lock is not waited for. If another connection holds it, the context
-    yields `False` at once, and the caller decides whether to retry later.
-
-    Args:
-        engine: Database engine used to own the dedicated lock connection.
-        key: Ontology whose refreshes must not overlap.
-
-    Yields:
-        `True` when this connection owns the lock, otherwise `False`.
-
-    Raises:
-        RuntimeError: If PostgreSQL reports that an owned lock was not released.
-    """
-    key_value = key.value if isinstance(key, OntologyKey) else key
-    lock_key = ontology_lock_key(key_value)
-    with engine.connect() as connection:
-        acquired = bool(
-            connection.scalar(
-                text("SELECT pg_try_advisory_lock(:lock_key)"),
-                {"lock_key": lock_key},
-            )
-        )
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                released = connection.scalar(
-                    text("SELECT pg_advisory_unlock(:lock_key)"),
-                    {"lock_key": lock_key},
-                )
-                if released is not True:
-                    raise RuntimeError("ontology refresh lock was not released")
-
-
-def annotation_group_lock_key(group_key: str) -> int:
-    """Return the PostgreSQL advisory-lock key for one group's GPAD imports.
-
-    The key is a 64-bit BLAKE2b hash of the group key. The hash is computed with
-    `SABGPAD` as its `person` value, which no other SAB lock uses, so these keys
-    do not match the keys of other SAB locks.
-
-    Raises:
-        ValueError: If the group key is blank.
-    """
-    if not group_key.strip():
-        raise ValueError("group key must not be blank")
-    digest = hashlib.blake2b(
-        group_key.encode("utf-8"), digest_size=8, person=_ANNOTATION_GROUP_LOCK_PERSON
-    ).digest()
-    return int.from_bytes(digest, byteorder="big", signed=True)
-
-
-@contextmanager
-def annotation_group_lock(engine: Engine, group_key: str) -> Iterator[bool]:
-    """Try to lock one group's GPAD imports until the context exits.
-
-    Only one GPAD job per group stages and publishes at a time; jobs for other
-    groups are not blocked. The lock is not waited for: if another connection
-    holds it, the context yields `False` at once, and the caller decides whether
-    to retry later. PostgreSQL releases the lock if the connection is lost.
-
-    Yields:
-        `True` when this connection owns the lock, otherwise `False`.
-
-    Raises:
-        RuntimeError: If PostgreSQL reports that an owned lock was not released.
-    """
-    lock_key = annotation_group_lock_key(group_key)
-    with engine.connect() as connection:
-        acquired = bool(
-            connection.scalar(
-                text("SELECT pg_try_advisory_lock(:lock_key)"), {"lock_key": lock_key}
-            )
-        )
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                released = connection.scalar(
-                    text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": lock_key}
-                )
-                if released is not True:
-                    raise RuntimeError("annotation group lock was not released")
-
-
-@contextmanager
-def job_execution_lock(engine: Engine, job_id: UUID) -> Iterator[bool]:
-    """Try to lock one job for the duration of a worker operation.
-
-    The context keeps a dedicated database connection open while it holds the
-    PostgreSQL session-level advisory lock. If the worker loses that connection,
-    PostgreSQL releases the lock. Celery can then redeliver the unacknowledged
-    task message and resume the same `running` job. Redelivery sends the original
-    task message again; it is different from an explicit Celery task retry.
-
-    Celery documents task acknowledgement and redelivery at
-    https://docs.celeryq.dev/en/stable/userguide/tasks.html and the relevant
-    `task_acks_late` and `task_reject_on_worker_lost` settings at
-    https://docs.celeryq.dev/en/stable/userguide/configuration.html.
-
-    Args:
-        engine: Database engine used to own the dedicated lock connection.
-        job_id: Durable job whose execution must not overlap.
-
-    Yields:
-        `True` when this connection owns the lock, otherwise `False`.
-
-    Raises:
-        RuntimeError: If PostgreSQL reports that an owned lock was not released.
-    """
-    lock_key = job_lock_key(job_id)
-    with engine.connect() as connection:
-        acquired = bool(
-            connection.scalar(
-                text("SELECT pg_try_advisory_lock(:lock_key)"),
-                {"lock_key": lock_key},
-            )
-        )
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                released = connection.scalar(
-                    text("SELECT pg_advisory_unlock(:lock_key)"),
-                    {"lock_key": lock_key},
-                )
-                if released is not True:
-                    raise RuntimeError("job execution lock was not released")
-
-
-def acquire_refresh_start_lock(session: Session) -> None:
-    """Make refresh job creation run one request at a time, for every kind.
-
-    Starting a refresh first looks for a queued or running job for each source
-    and creates one only when none exists. Without this lock, two requests
-    running at once could both find no job and both create one.
-
-    One lock covers every kind. Starts are short and rare, so serializing them
-    costs nothing noticeable, and a single key cannot deadlock with itself.
-
-    Args:
-        session: Session whose transaction owns the lock.
-    """
-    # A transaction-level lock: PostgreSQL releases it when the caller's
-    # transaction commits or rolls back, so it cannot outlive the job creation.
-    session.execute(
-        text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": _REFRESH_START_LOCK_KEY},
-    )

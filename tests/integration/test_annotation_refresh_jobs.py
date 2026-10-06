@@ -17,7 +17,10 @@ from standard_annotation_backend.domain.annotation_management import (
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
-from standard_annotation_backend.persistence.locks import annotation_group_lock
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    try_advisory_lock,
+)
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationStagingRecord,
@@ -296,7 +299,9 @@ def test_busy_group_lock_leaves_the_job_running_for_a_retry(
         parameters={"source_key": "rgd-gpad"},
     ).job_id
 
-    with annotation_group_lock(database_engine, "MGI") as acquired:
+    with try_advisory_lock(
+        database_engine, LockNamespace.ANNOTATION_GROUP, "MGI"
+    ) as acquired:
         assert acquired
         with pytest.raises(AnnotationRefreshBusyError):
             runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)

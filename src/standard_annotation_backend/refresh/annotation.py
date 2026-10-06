@@ -25,7 +25,10 @@ from standard_annotation_backend.domain.refresh import (
     refresh_failure_message,
 )
 from standard_annotation_backend.gpad.parser import GpadHeaderError
-from standard_annotation_backend.persistence.locks import annotation_group_lock
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    try_advisory_lock,
+)
 from standard_annotation_backend.refresh.decoding import decode_source_text
 from standard_annotation_backend.refresh.fetchers import SourceDocument
 from standard_annotation_backend.refresh.kinds import (
@@ -157,7 +160,9 @@ class AnnotationRefreshKind:
                 `cutover_rejected`.
         """
         group_key = self._sources.annotation_group(document.source_key)
-        with annotation_group_lock(self._engine, group_key) as acquired:
+        with try_advisory_lock(
+            self._engine, LockNamespace.ANNOTATION_GROUP, group_key
+        ) as acquired:
             if not acquired:
                 raise AnnotationRefreshBusyError
             if (
