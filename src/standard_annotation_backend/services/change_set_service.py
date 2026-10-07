@@ -602,7 +602,12 @@ def _accept_proposal(
     context: RequestContext,
     review_reason: str | None,
 ) -> AcceptedChangeSet:
-    """Apply the repository's write policy and record acceptance without committing."""
+    """Apply the repository's write policy and record acceptance without committing.
+
+    The resulting annotation version is attributed to the proposer for every
+    operation. The reviewer is recorded on the change set and its acceptance
+    audit event.
+    """
     if record.annotation_id is not None:
         current = _current_target(unit_of_work.annotations, record.annotation_id)
         assert record.base_version is not None
@@ -627,14 +632,14 @@ def _accept_proposal(
                 record.annotation_id,
                 validation.annotation,
                 expected_version=record.base_version,
-                actor_id=context.actor_id,
+                actor_id=record.proposed_by,
                 change_source="change_set",
             )
         else:
             changed = unit_of_work.annotations.soft_delete_direct(
                 record.annotation_id,
                 expected_version=record.base_version,
-                actor_id=context.actor_id,
+                actor_id=record.proposed_by,
                 change_source="change_set",
             )
     preview = ChangeSetPreview(

@@ -254,7 +254,11 @@ def test_update_preview_and_acceptance_use_base_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    """An update previews whole-field replacements and changes only on acceptance."""
+    """An update previews whole-field replacements and changes only on acceptance.
+
+    The saved version is attributed to the proposer, as for creates; the reviewer
+    is recorded on the change set.
+    """
     annotations = AnnotationService(unit_of_work_factory)
     target = annotations.create(
         payload=validated_annotation.model_dump(mode="json"),
@@ -288,7 +292,8 @@ def test_update_preview_and_acceptance_use_base_snapshot(
         version = unit_of_work.annotations.get_version(target.annotation_id, 2)
         assert version is not None
         assert version.change_source == "change_set"
-        assert version.actor_id == "reviewer"
+        assert version.actor_id == "proposer"
+    assert accepted.change_set.reviewed_by == "reviewer"
 
 
 def test_false_boolean_number_test_does_not_persist_proposal_or_audit(
@@ -537,7 +542,11 @@ def test_delete_preview_and_acceptance_preserve_history(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    """Deletion previews its target, then saves a deleted version upon acceptance."""
+    """Deletion previews its target, then saves a deleted version upon acceptance.
+
+    The deleted version is attributed to the proposer; the reviewer is recorded on
+    the change set.
+    """
     annotations = AnnotationService(unit_of_work_factory)
     target = annotations.create(
         payload=validated_annotation.model_dump(mode="json"),
@@ -567,6 +576,8 @@ def test_delete_preview_and_acceptance_preserve_history(
         assert version is not None
         assert version.is_deleted
         assert version.change_source == "change_set"
+        assert version.actor_id == "proposer"
+    assert accepted.change_set.reviewed_by == "reviewer"
 
 
 def test_rejection_records_explanation_reviewer_and_audit(
