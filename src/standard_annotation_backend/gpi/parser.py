@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
 from io import StringIO
 from typing import Literal
 
@@ -15,29 +14,17 @@ from standard_annotation_backend.domain.entities import (
     EntityRecord,
 )
 from standard_annotation_backend.domain.refresh import SourceProvenance
+from standard_annotation_backend.domain.validation import field_path
+from standard_annotation_backend.exchange_files import (
+    NUL_REASON,
+    NulHeaderLineError,
+    header_metadata,
+    nul_data_lines,
+)
 
 GPI_SOURCE_FORMAT = "gpi-2.0"
 MAX_REPORTED_ROW_ISSUES = 100
 MAX_REPORTED_TEXT_LENGTH = 200
-
-
-@dataclass(frozen=True, slots=True)
-class GpiMetadata:
-    """Contain validated GPI header metadata in source order."""
-
-    version: str
-    generated_by: str
-    date_generated: date | datetime
-    entries: tuple[tuple[str, str], ...]
-
-    def to_source_metadata(self) -> dict[str, object]:
-        """Return the header as a JSON-compatible dict stored with the catalog."""
-        return {
-            "version": self.version,
-            "generated_by": self.generated_by,
-            "date_generated": self.date_generated.isoformat(),
-            "entries": [list(entry) for entry in self.entries],
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,29 +145,16 @@ def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
             a NUL character, which PostgreSQL cannot store, are invalid. The error
             describes each problem, including the rejected field values.
     """
-    nul_lines: set[int] = set()
-    for line_number, line in enumerate(StringIO(text), start=1):
-        if "\x00" not in line:
-            continue
-        if line.startswith("!"):
-            raise GpiParseError(
-                "header", message=f"line {line_number} contains a NUL character"
-            )
-        nul_lines.add(line_number)
+    try:
+        nul_lines = nul_data_lines(text)
+    except NulHeaderLineError as error:
+        raise GpiParseError("header", message=error.message) from None
     reader_issues: list[RowIssue] = []
     try:
         with GpiReader(
             StringIO(text), errors="skip", on_error=reader_issues.append
         ) as reader:
-            reader_metadata = reader.metadata
-            metadata = GpiMetadata(
-                version=reader_metadata.version,
-                generated_by=reader_metadata.generated_by,
-                date_generated=reader_metadata.date_generated,
-                entries=tuple(
-                    (entry.key, entry.value) for entry in reader_metadata.entries
-                ),
-            )
+            source_metadata = header_metadata(reader.metadata)
             records = tuple(
                 EntityRecord(line_number=record.line_number, entity=record.item)
                 for record in reader.records()
@@ -189,8 +163,7 @@ def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
         raise GpiParseError("header", message=_truncate(str(error))) from None
 
     issues = [
-        GpiRowIssue(line_number, "syntax", "contains a NUL character", ())
-        for line_number in nul_lines
+        GpiRowIssue(line_number, "syntax", NUL_REASON, ()) for line_number in nul_lines
     ] + [
         _row_issue(issue)
         for issue in reader_issues
@@ -205,7 +178,7 @@ def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
     return EntityCatalog(
         source=source,
         source_format=GPI_SOURCE_FORMAT,
-        source_metadata=metadata.to_source_metadata(),
+        source_metadata=source_metadata,
         records=records,
         warnings=(),
     )
@@ -221,7 +194,7 @@ def _row_issue(issue: RowIssue) -> GpiRowIssue:
             message=None,
             fields=tuple(
                 GpiFieldIssue(
-                    field=".".join(str(part) for part in error["loc"]) or "row",
+                    field=field_path(error["loc"]),
                     message=_truncate(error["msg"]),
                     value=_reported_value(error.get("input")),
                 )

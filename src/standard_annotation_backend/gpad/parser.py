@@ -21,8 +21,13 @@ from standard_annotation_backend.domain.annotation_management import (
     AnnotationRejection,
 )
 from standard_annotation_backend.domain.annotations import Annotation
-
-_NUL_REASON = "contains a NUL character"
+from standard_annotation_backend.domain.validation import field_path
+from standard_annotation_backend.exchange_files import (
+    NUL_REASON,
+    NulHeaderLineError,
+    header_metadata,
+    nul_data_lines,
+)
 
 
 class GpadHeaderError(ValueError):
@@ -85,14 +90,10 @@ class GpadDocument:
         Raises:
             GpadHeaderError: If the header is invalid or contains a NUL character.
         """
-        nul_lines: set[int] = set()
-        for line_number, line in enumerate(StringIO(self._text), start=1):
-            if "\x00" not in line:
-                continue
-            if line.startswith("!"):
-                raise GpadHeaderError(f"line {line_number} contains a NUL character")
-            nul_lines.add(line_number)
-        self._nul_lines = frozenset(nul_lines)
+        try:
+            self._nul_lines = nul_data_lines(self._text)
+        except NulHeaderLineError as error:
+            raise GpadHeaderError(error.message) from None
         reader = GpadReader(
             StringIO(self._text), errors="skip", on_error=self._issues.append
         )
@@ -101,13 +102,7 @@ class GpadDocument:
         except HeaderError as error:
             raise GpadHeaderError(str(error)) from None
         self._reader = reader
-        metadata = reader.metadata
-        self.metadata = {
-            "version": metadata.version,
-            "generated_by": metadata.generated_by,
-            "date_generated": metadata.date_generated.isoformat(),
-            "entries": [[entry.key, entry.value] for entry in metadata.entries],
-        }
+        self.metadata = header_metadata(reader.metadata)
         return self
 
     def __exit__(
@@ -159,7 +154,7 @@ class GpadDocument:
     ) -> Iterator[AnnotationRejection]:
         if line_number not in reported_nul:
             reported_nul.add(line_number)
-            yield AnnotationRejection(line_number, "syntax", _NUL_REASON)
+            yield AnnotationRejection(line_number, "syntax", NUL_REASON)
 
 
 def _rejection(issue: RowIssue) -> AnnotationRejection:
@@ -170,7 +165,7 @@ def _rejection(issue: RowIssue) -> AnnotationRejection:
     """
     if isinstance(issue.cause, ValidationError):
         reason = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc']) or 'row'}: {error['msg']}"
+            f"{field_path(error['loc'])}: {error['msg']}"
             for error in issue.cause.errors()
         )
     else:

@@ -397,11 +397,8 @@ class AnnotationService:
                 limit=limit,
                 offset=offset,
             )
-            result = ResultPage(
-                items=tuple(_current_annotation(record) for record in page.items),
-                total=page.total,
-                limit=limit,
-                offset=offset,
+            result = ResultPage.from_page(
+                page, _current_annotation, limit=limit, offset=offset
             )
         return result
 
@@ -446,11 +443,8 @@ class AnnotationService:
                 limit=limit,
                 offset=offset,
             )
-            result = ResultPage(
-                items=tuple(_annotation_version(record) for record in page.items),
-                total=page.total,
-                limit=limit,
-                offset=offset,
+            result = ResultPage.from_page(
+                page, _annotation_version, limit=limit, offset=offset
             )
         return result
 

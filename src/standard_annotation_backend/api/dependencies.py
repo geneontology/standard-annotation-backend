@@ -3,7 +3,7 @@
 import re
 from typing import Annotated
 
-from fastapi import Depends, Request, status
+from fastapi import Depends, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from standard_annotation_backend.api.errors import ApiError
@@ -19,6 +19,12 @@ from standard_annotation_backend.services.authentication_service import (
 from standard_annotation_backend.services.change_set_service import ChangeSetService
 from standard_annotation_backend.services.comment_service import CommentService
 from standard_annotation_backend.services.job_service import JobService
+
+PageLimit = Annotated[int, Query(ge=1, le=200)]
+"""Query parameter for the maximum number of results in one page."""
+
+PageOffset = Annotated[int, Query(ge=0)]
+"""Query parameter for the number of matching results to skip before a page."""
 
 _IF_MATCH_PATTERN = re.compile(r'^"([1-9][0-9]*)"$')
 

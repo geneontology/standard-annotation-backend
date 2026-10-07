@@ -8,6 +8,8 @@ from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 
 from standard_annotation_backend.api.dependencies import (
     IF_MATCH_OPENAPI,
+    PageLimit,
+    PageOffset,
     get_annotation_service,
     get_authenticated_context,
     require_expected_version,
@@ -139,8 +141,8 @@ def list_annotations(
     interacting_taxon_id: Annotated[list[str] | None, Query()] = None,
     annotation_date: Annotated[date | None, Query()] = None,
     assigned_by: Annotated[str | None, Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: PageLimit = 50,
+    offset: PageOffset = 0,
 ) -> AnnotationPageResponse:
     """Return active annotations that match every supplied filter.
 

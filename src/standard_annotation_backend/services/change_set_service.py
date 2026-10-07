@@ -34,6 +34,7 @@ from standard_annotation_backend.domain.validation import (
     AnnotationValidationResult,
     ValidationIssue,
     validate_annotation,
+    validation_issues,
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
@@ -799,14 +800,7 @@ def _validate_input[T: BaseModel](model: type[T], payload: object) -> T:
     try:
         return model.model_validate(payload)
     except ValidationError as error:
-        raise InvalidChangeSetError(
-            tuple(
-                ValidationIssue(
-                    location=issue["loc"], message=issue["msg"], type=issue["type"]
-                )
-                for issue in error.errors(include_url=False, include_context=False)
-            )
-        ) from None
+        raise InvalidChangeSetError(validation_issues(error)) from None
 
 
 def _lock_proposal(

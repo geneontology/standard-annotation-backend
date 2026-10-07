@@ -7,6 +7,7 @@ Page constructors convert each item through its resource constructor for the sam
 reason.
 """
 
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import Annotated, Literal, Self
 from uuid import UUID
@@ -357,13 +358,48 @@ class AnnotationCommentResource(BaseModel):
         )
 
 
-class AnnotationCommentPageResponse(BaseModel):
-    """Represent one requested page of visible annotation comments."""
+class PageResource[T](BaseModel):
+    """Represent one requested page of API resources.
 
-    items: list[AnnotationCommentResource]
+    Each paginated endpoint declares its own subclass with a concrete item type, so
+    every page keeps its own name and description in the OpenAPI document.
+
+    Attributes:
+        items: Resources included in this page.
+        total: Number of matching resources across all pages.
+        limit: Maximum number of resources requested for this page.
+        offset: Number of matching resources skipped before this page.
+    """
+
+    items: list[T]
     total: int
     limit: int
     offset: int
+
+    @classmethod
+    def from_result_page[S](
+        cls, result: ResultPage[S], convert: Callable[[S], T]
+    ) -> Self:
+        """Build a response page by converting each service result.
+
+        Args:
+            result: Page returned by an application service.
+            convert: Resource constructor applied to each result in order.
+
+        Returns:
+            A validated page with the converted items and the service's pagination
+            values.
+        """
+        return cls(
+            items=[convert(item) for item in result.items],
+            total=result.total,
+            limit=result.limit,
+            offset=result.offset,
+        )
+
+
+class AnnotationCommentPageResponse(PageResource[AnnotationCommentResource]):
+    """Represent one requested page of visible annotation comments."""
 
     @classmethod
     def from_service(cls, result: ResultPage[AnnotationComment]) -> Self:
@@ -375,14 +411,7 @@ class AnnotationCommentPageResponse(BaseModel):
         Returns:
             Serialized public comment page.
         """
-        return cls(
-            items=[
-                AnnotationCommentResource.from_service(item) for item in result.items
-            ],
-            total=result.total,
-            limit=result.limit,
-            offset=result.offset,
-        )
+        return cls.from_result_page(result, AnnotationCommentResource.from_service)
 
 
 class AnnotationVersionResource(BaseModel):
@@ -417,13 +446,8 @@ class AnnotationVersionResource(BaseModel):
         )
 
 
-class AnnotationPageResponse(BaseModel):
+class AnnotationPageResponse(PageResource[AnnotationResource]):
     """Represent one requested page of active annotations."""
-
-    items: list[AnnotationResource]
-    total: int
-    limit: int
-    offset: int
 
     @classmethod
     def from_service(cls, result: ResultPage[CurrentAnnotation]) -> Self:
@@ -435,21 +459,11 @@ class AnnotationPageResponse(BaseModel):
         Returns:
             A validated page suitable for an API response.
         """
-        return cls(
-            items=[AnnotationResource.from_service(item) for item in result.items],
-            total=result.total,
-            limit=result.limit,
-            offset=result.offset,
-        )
+        return cls.from_result_page(result, AnnotationResource.from_service)
 
 
-class AnnotationVersionPageResponse(BaseModel):
+class AnnotationVersionPageResponse(PageResource[AnnotationVersionResource]):
     """Represent one requested page of saved annotation versions."""
-
-    items: list[AnnotationVersionResource]
-    total: int
-    limit: int
-    offset: int
 
     @classmethod
     def from_service(cls, result: ResultPage[AnnotationVersion]) -> Self:
@@ -461,14 +475,7 @@ class AnnotationVersionPageResponse(BaseModel):
         Returns:
             A validated page suitable for an API response.
         """
-        return cls(
-            items=[
-                AnnotationVersionResource.from_service(item) for item in result.items
-            ],
-            total=result.total,
-            limit=result.limit,
-            offset=result.offset,
-        )
+        return cls.from_result_page(result, AnnotationVersionResource.from_service)
 
 
 class ApiValidationIssue(BaseModel):

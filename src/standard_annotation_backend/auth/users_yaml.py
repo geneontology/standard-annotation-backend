@@ -20,7 +20,10 @@ from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
 )
-from standard_annotation_backend.domain.validation import ValidationIssue
+from standard_annotation_backend.domain.validation import (
+    ValidationIssue,
+    validation_issues,
+)
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 
@@ -213,13 +216,4 @@ def parse_users_yaml(yaml_text: str) -> UsersDocument:
     try:
         return UsersDocument.model_validate(payload)
     except ValidationError as error:
-        raise InvalidUsersDocumentError(
-            tuple(
-                ValidationIssue(
-                    location=detail["loc"], message=detail["msg"], type=detail["type"]
-                )
-                for detail in error.errors(
-                    include_url=False, include_context=False, include_input=False
-                )
-            )
-        ) from None
+        raise InvalidUsersDocumentError(validation_issues(error)) from None

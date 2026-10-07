@@ -141,11 +141,8 @@ class CommentService:
                 limit=limit,
                 offset=offset,
             )
-            return ResultPage(
-                items=tuple(_annotation_comment(comment) for comment in page.items),
-                total=page.total,
-                limit=limit,
-                offset=offset,
+            return ResultPage.from_page(
+                page, _annotation_comment, limit=limit, offset=offset
             )
 
     def edit(

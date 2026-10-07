@@ -17,7 +17,6 @@ from standard_annotation_backend.auth.users_yaml import (
     InvalidUsersDocumentError,
     parse_users_yaml,
 )
-from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import (
     ProgressReporter,
@@ -40,6 +39,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
 )
 from standard_annotation_backend.refresh.fetchers import SourceError
+from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
 
 MAX_REPORTED_ISSUES = 100
@@ -233,10 +233,8 @@ class AuthorizationRefreshService:
                 stored_summary = _stored_summary(record)
             result = _result(record, stored_summary)
             if replacement.applied:
-                unit_of_work.audit.record(
-                    action=AuditAction.AUTHORIZATION_REFRESHED,
+                AuditService(unit_of_work.audit).record_authorization_refreshed(
                     actor_id=actor_id,
-                    result=AuditResult.SUCCESS,
                     job_id=job_id,
                     details={**result.to_job_result(), **summary},
                 )

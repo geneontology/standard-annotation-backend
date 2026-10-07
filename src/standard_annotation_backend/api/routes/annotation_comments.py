@@ -3,9 +3,11 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, Query, Response, status
+from fastapi import APIRouter, Body, Depends, Response, status
 
 from standard_annotation_backend.api.dependencies import (
+    PageLimit,
+    PageOffset,
     get_authenticated_context,
     get_comment_service,
 )
@@ -40,8 +42,8 @@ def list_annotation_comments(
     annotation_id: UUID,
     service: Annotated[CommentService, Depends(get_comment_service)],
     context: Annotated[RequestContext, Depends(get_authenticated_context)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: PageLimit = 50,
+    offset: PageOffset = 0,
 ) -> AnnotationCommentPageResponse:
     """Return visible comments for an accessible annotation.
 

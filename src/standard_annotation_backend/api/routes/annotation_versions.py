@@ -3,9 +3,11 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, Query, status
+from fastapi import APIRouter, Depends, Path, status
 
 from standard_annotation_backend.api.dependencies import (
+    PageLimit,
+    PageOffset,
     get_annotation_service,
     get_authenticated_context,
 )
@@ -38,8 +40,8 @@ def list_annotation_versions(
     annotation_id: UUID,
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
     context: Annotated[RequestContext, Depends(get_authenticated_context)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: PageLimit = 50,
+    offset: PageOffset = 0,
 ) -> AnnotationVersionPageResponse:
     """Return saved annotation versions from oldest to newest.
 

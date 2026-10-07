@@ -1,5 +1,6 @@
 """Validate annotation payloads with the schema-generated model."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TypedDict
 
@@ -58,14 +59,43 @@ def validate_annotation(payload: object) -> AnnotationValidationResult:
     try:
         annotation = Annotation.model_validate(payload)
     except ValidationError as error:
-        issues: list[ValidationIssue] = []
-        for detail in error.errors(include_url=False, include_context=False):
-            issue = ValidationIssue(
-                location=detail["loc"],
-                message=detail["msg"],
-                type=detail["type"],
-            )
-            issues.append(issue)
-        return AnnotationValidationResult(annotation=None, errors=tuple(issues))
+        return AnnotationValidationResult(
+            annotation=None, errors=validation_issues(error)
+        )
 
     return AnnotationValidationResult(annotation=annotation, errors=())
+
+
+def validation_issues(error: ValidationError) -> tuple[ValidationIssue, ...]:
+    """Convert a Pydantic validation error into serializable issues.
+
+    Only each failure's location, message, and type are kept. The rejected input
+    value and any error context are left out, so issues never echo submitted data.
+
+    Args:
+        error: Validation error raised by a Pydantic model.
+
+    Returns:
+        One issue per validation failure, in the order Pydantic reported them.
+    """
+    return tuple(
+        ValidationIssue(
+            location=detail["loc"], message=detail["msg"], type=detail["type"]
+        )
+        for detail in error.errors(
+            include_url=False, include_context=False, include_input=False
+        )
+    )
+
+
+def field_path(location: Sequence[str | int]) -> str:
+    """Return a validation location as a dotted field path.
+
+    Args:
+        location: Path to an invalid value, such as `("extensions", 0, "term")`.
+
+    Returns:
+        The joined path, such as `extensions.0.term`, or `row` when the location
+        is empty because the problem concerns the whole row.
+    """
+    return ".".join(str(part) for part in location) or "row"

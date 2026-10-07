@@ -21,7 +21,6 @@ from standard_annotation_backend.auth.secrets import (
     generate_secret,
     secret_matches,
 )
-from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
@@ -36,6 +35,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
     credential_unit_of_work,
 )
+from standard_annotation_backend.services.audit_service import AuditService
 
 
 class OAuthStateError(Exception):
@@ -300,15 +300,11 @@ class TokenService:
                 else assignment.group.group_key,
                 assignment_is_active=True,
             )
-            uow.audit.record(
-                action=AuditAction.TOKEN_CREATED,
-                actor_id=str(user_id),
-                result=AuditResult.SUCCESS,
-                details={
-                    "token_id": str(record.token_id),
-                    "assignment_id": str(assignment.assignment_id),
-                    "expires_at": expires_at.isoformat(),
-                },
+            AuditService(uow.audit).record_token_created(
+                user_id=user_id,
+                token_id=record.token_id,
+                assignment_id=assignment.assignment_id,
+                expires_at=expires_at,
             )
             uow.commit()
             return CreatedToken(raw, metadata)
@@ -347,10 +343,7 @@ class TokenService:
             user_id = self._user_id(uow, raw_session, now)
             if not uow.auth.revoke_token(user_id, token_id, revoked_at=now):
                 raise TokenNotFoundError
-            uow.audit.record(
-                action=AuditAction.TOKEN_REVOKED,
-                actor_id=str(user_id),
-                result=AuditResult.SUCCESS,
-                details={"token_id": str(token_id)},
+            AuditService(uow.audit).record_token_revoked(
+                user_id=user_id, token_id=token_id
             )
             uow.commit()
