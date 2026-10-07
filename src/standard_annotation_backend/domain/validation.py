@@ -39,15 +39,6 @@ class AnnotationValidationResult:
     annotation: Annotation | None
     errors: tuple[ValidationIssue, ...]
 
-    @property
-    def is_valid(self) -> bool:
-        """Return whether validation produced an annotation.
-
-        Returns:
-            True when annotation is populated; otherwise, False.
-        """
-        return self.annotation is not None
-
 
 def validate_annotation(payload: object) -> AnnotationValidationResult:
     """Validate an annotation payload and normalize any validation errors.

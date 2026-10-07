@@ -22,7 +22,6 @@ from standard_annotation_backend.domain.annotation_management import (
 )
 from standard_annotation_backend.domain.annotations import Annotation
 
-GPAD_SOURCE_FORMAT = "gpad-2.0"
 _NUL_REASON = "contains a NUL character"
 
 

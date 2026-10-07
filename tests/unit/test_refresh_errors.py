@@ -110,6 +110,12 @@ def test_source_error_keeps_its_code_attribute_and_message() -> None:
     assert str(error) == "Source retrieval failed: http_status"
 
 
+def test_source_error_rejects_a_code_that_is_not_a_retrieval_failure() -> None:
+    """Only retrieval and decoding codes describe a source failure."""
+    with pytest.raises(ValueError, match="retrieval"):
+        SourceError(RefreshFailureCode.HEADER)
+
+
 @pytest.mark.parametrize(
     "error", [OntologyRefreshBusyError(), AnnotationRefreshBusyError()]
 )

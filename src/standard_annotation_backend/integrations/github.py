@@ -63,7 +63,7 @@ class GitHubClient:
         try:
             response = self.client.get(
                 f"{_API_URL}/repos/{repository}/commits/{ref}",
-                headers=self._api_headers("application/vnd.github+json"),
+                headers=self._api_headers(),
                 timeout=self.timeout,
                 follow_redirects=False,
             )
@@ -99,10 +99,10 @@ class GitHubClient:
             raise GitHubIntegrationError(_SAFE_ERROR) from None
 
     @staticmethod
-    def _api_headers(accept: str) -> dict[str, str]:
+    def _api_headers() -> dict[str, str]:
         """Build headers shared by versioned GitHub API requests."""
         return {
-            "Accept": accept,
+            "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": _API_VERSION,
         }
 

@@ -7,6 +7,7 @@ from hashlib import sha256
 from typing import Literal, Protocol, cast
 
 import pytest
+from seeding import create_job
 from sqlalchemy import Engine
 
 from standard_annotation_backend.domain.jobs import JobType
@@ -226,13 +227,13 @@ def start_job(
     requested_by: str = "curator",
 ) -> Job:
     """Create and start a refresh job, as the runner would before `apply`."""
-    jobs = JobService(factory)
-    created = jobs.create(
+    created = create_job(
+        factory,
         job_type=job_type,
         requested_by=requested_by,
         parameters={"source_key": source_key},
     )
-    return jobs.start(created.job_id)
+    return JobService(factory).start(created.job_id)
 
 
 def users_document(yaml_text: str, provenance: SourceProvenance) -> SourceDocument:

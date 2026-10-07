@@ -24,7 +24,6 @@ References:
 import logging
 import sys
 from collections.abc import Mapping
-from typing import TextIO
 
 import structlog
 from structlog.types import EventDict, Processor
@@ -306,8 +305,6 @@ def create_formatter(
 def configure_logging(
     log_format: LogFormat | str,
     log_level: int | str = logging.INFO,
-    *,
-    stream: TextIO | None = None,
 ) -> None:
     """Install one SAB-formatted stdout handler for the current process.
 
@@ -315,19 +312,17 @@ def configure_logging(
     any SAB-owned process bootstrap. Existing root handlers are replaced to
     avoid duplicate output, and Uvicorn loggers are made to propagate through
     the root handler instead of retaining server-specific handlers. Repeated
-    calls therefore leave one active SAB handler. `stream` is available for
-    callers that need an explicit destination; production callers use stdout.
+    calls therefore leave one active SAB handler.
 
     Args:
         log_format: Renderer to install for the process.
         log_level: Numeric or named standard-library logging level.
-        stream: Optional output stream. Defaults to stdout.
 
     References:
         * Python's handler API:
           https://docs.python.org/3/library/logging.html#logging.Handler
     """
-    handler = logging.StreamHandler(stream or sys.stdout)
+    handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(create_formatter(log_format))
 
     root_logger = logging.getLogger()

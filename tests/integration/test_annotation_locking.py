@@ -6,6 +6,8 @@ from time import monotonic
 from typing import Any
 from uuid import UUID
 
+import pytest
+from seeding import insert_annotation
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -128,7 +130,8 @@ def _create_annotation(
     annotation: Annotation,
 ) -> UUID:
     with session_factory() as session:
-        record = AnnotationRepository(session).create(
+        record = insert_annotation(
+            session,
             annotation=annotation,
             actor_id="creator",
             change_source="api",
@@ -165,6 +168,7 @@ def test_signature_lock_is_released_when_its_transaction_commits(
     assert acquired_after_commit is True
 
 
+@pytest.mark.usefixtures("active_annotation_subjects")
 def test_waiter_reads_committed_update_after_acquiring_signature_lock(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
@@ -185,9 +189,10 @@ def test_waiter_reads_committed_update_after_acquiring_signature_lock(
     waiter_acquired_lock = Event()
 
     def update_then_commit(session: Session) -> None:
-        updated = AnnotationRepository(session).update(
+        updated = AnnotationRepository(session).update_direct(
             annotation_id,
             changed,
+            expected_version=1,
             actor_id="editor-a",
             change_source="api",
         )

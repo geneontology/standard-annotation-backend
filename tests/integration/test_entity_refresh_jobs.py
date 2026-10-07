@@ -25,6 +25,7 @@ from refresh_helpers import (
     stage_without_publishing,
     start_job,
 )
+from seeding import create_job
 from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -86,7 +87,7 @@ def _fetchers(content: bytes | Exception = SOURCE_BYTES) -> FakeFetchers:
 
 
 def _create_job(
-    jobs: JobService,
+    factory: UnitOfWorkFactory,
     *,
     source: str = "mgi",
     parameters: dict[str, object] | None = None,
@@ -95,7 +96,8 @@ def _create_job(
 
     The job requests `source`, unless `parameters` is given to replace its parameters.
     """
-    job = jobs.create(
+    job = create_job(
+        factory,
         job_type=JobType.ENTITY_REFRESH,
         requested_by="curator",
         parameters=parameters or {"source_key": source},
@@ -191,6 +193,7 @@ def runner_for(
 
 
 def test_entity_refresh_job_records_progress_and_result(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     integration_api_client: TestClient,
@@ -199,7 +202,7 @@ def test_entity_refresh_job_records_progress_and_result(
 
     The job status endpoint returns the same result.
     """
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
     fetchers = _fetchers()
 
     runner_for(fetchers).run(job_id)
@@ -234,11 +237,12 @@ def test_entity_refresh_job_records_progress_and_result(
 
 
 def test_gzip_compressed_source_publishes_the_same_catalog(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
 ) -> None:
     """A gzip-compressed GPI file is expanded and published like a plain one."""
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
 
     runner_for(_fetchers(gzip.compress(SOURCE_BYTES))).run(job_id)
 
@@ -259,6 +263,7 @@ def test_gzip_compressed_source_publishes_the_same_catalog(
     ],
 )
 def test_entity_refresh_domain_failure_is_terminal_and_cleans_staging(
+    unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
@@ -279,7 +284,7 @@ def test_entity_refresh_domain_failure_is_terminal_and_cleans_staging(
     if failure_code == "catalog_collision":
         seed_active_subjects("MGI:1")
     else:
-        runner_for(_fetchers()).run(_create_job(jobs))
+        runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
     memberships_before = _memberships(session_factory)
     content = SOURCE_BYTES
     fetched: bytes | Exception = content
@@ -289,7 +294,7 @@ def test_entity_refresh_domain_failure_is_terminal_and_cleans_staging(
         fetched = content = b""
     elif failure_code == "row_validation":
         fetched = content = SOURCE_TEXT.replace("Protein", "Pro\x00tein").encode()
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
 
     runner_for(_fetchers(fetched)).run(job_id)
 
@@ -318,6 +323,7 @@ def test_entity_refresh_domain_failure_is_terminal_and_cleans_staging(
 
 
 def test_invalid_rows_are_reported_on_the_failed_job(
+    unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
@@ -331,13 +337,13 @@ def test_invalid_rows_are_reported_on_the_failed_job(
     without their rejected values, and the previous catalog stays active.
     """
     log_records = _record_error_logs(monkeypatch)
-    runner_for(_fetchers()).run(_create_job(jobs))
+    runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
     memberships_before = _memberships(session_factory)
     bad_rows = (
         "MGI:99\tA raw rejected symbol\tProtein\t\tSO:0001217\tNCBITaxon:9606\t\t"
         "MGI:99\t\t\t\n"
     ) + "".join(f"MGI:{index}\tshort\n" for index in range(100, 111))
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
 
     runner_for(_fetchers((SOURCE_TEXT + bad_rows).encode())).run(job_id)
 
@@ -384,13 +390,14 @@ def test_invalid_rows_are_reported_on_the_failed_job(
     ],
 )
 def test_undecodable_download_fails_with_its_code(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     content: bytes,
     code: str,
 ) -> None:
     """Broken gzip or invalid UTF-8 fails the job without staging anything."""
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
 
     runner_for(_fetchers(content)).run(job_id)
 
@@ -401,6 +408,7 @@ def test_undecodable_download_fails_with_its_code(
 
 
 def test_entity_refresh_cleanup_failure_rolls_back_terminal_state_until_redelivery(
+    unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
@@ -415,7 +423,7 @@ def test_entity_refresh_cleanup_failure_rolls_back_terminal_state_until_redelive
     contact the source.
     """
     seed_active_subjects("MGI:1")
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
     fetchers = _fetchers()
     runner = runner_for(fetchers)
     original_cleanup = EntityRepository.cleanup_terminal_staging
@@ -457,6 +465,7 @@ def test_entity_refresh_cleanup_failure_rolls_back_terminal_state_until_redelive
 
 
 def test_entity_refresh_job_redelivery_recovers_published_result(
+    unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
@@ -467,7 +476,7 @@ def test_entity_refresh_job_redelivery_recovers_published_result(
     The job succeeds with the stored publication result, without fetching the
     source or publishing again.
     """
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
     fetchers = _fetchers()
     runner = runner_for(fetchers)
     original_succeed = JobService.succeed
@@ -508,6 +517,7 @@ def test_entity_refresh_job_redelivery_recovers_published_result(
 
 
 def test_entity_refresh_redelivery_publishes_committed_staging_without_source_access(
+    unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
@@ -518,7 +528,7 @@ def test_entity_refresh_redelivery_publishes_committed_staging_without_source_ac
     The interrupted job stays running with its staged data, and the rerun does not
     contact the source again.
     """
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
     fetchers = _fetchers()
     runner = runner_for(fetchers)
 
@@ -558,6 +568,7 @@ def test_entity_refresh_redelivery_publishes_committed_staging_without_source_ac
 
 @pytest.mark.parametrize("changed", ["source_key", "missing_row", "entity"])
 def test_entity_refresh_redelivery_rejects_incompatible_or_incomplete_staging_before_fetch(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     entity_service: EntityRefreshService,
     runner_for: Callable[..., RefreshRunner],
@@ -571,9 +582,9 @@ def test_entity_refresh_redelivery_rejects_incompatible_or_incomplete_staging_be
     a missing row, and an altered row.
     """
     fetchers = _fetchers()
-    previous = _create_job(jobs)
+    previous = _create_job(unit_of_work_factory)
     runner_for(fetchers).run(previous)
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
     # Different content, so the refresh is not recognized as unchanged.
     document = _fetchers(SOURCE_TEXT.replace("Gene1", "Gene2").encode()).fetch(
         "mgi", TEST_SOURCES.source(RefreshKindName.ENTITY, "mgi")
@@ -624,6 +635,7 @@ def test_entity_refresh_redelivery_rejects_incompatible_or_incomplete_staging_be
 
 
 def test_unchanged_source_succeeds_without_staging_or_publication(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
@@ -634,11 +646,11 @@ def test_unchanged_source_succeeds_without_staging_or_publication(
     publication audit event is created.
     """
     runner = runner_for(_fetchers())
-    first = _create_job(jobs)
+    first = _create_job(unit_of_work_factory)
     runner.run(first)
     first_result = _read_job(jobs, first).result
     assert first_result is not None
-    second = _create_job(jobs)
+    second = _create_job(unit_of_work_factory)
 
     runner.run(second)
 
@@ -663,6 +675,7 @@ def test_unchanged_source_succeeds_without_staging_or_publication(
 
 @pytest.mark.parametrize("changed", ["url", "content"])
 def test_changed_url_or_content_publishes_new_snapshot(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
@@ -673,13 +686,13 @@ def test_changed_url_or_content_publishes_new_snapshot(
     Moving a source to a new URL publishes even when the content is identical, and
     new content at the same URL is never reported as unchanged.
     """
-    runner_for(_fetchers()).run(_create_job(jobs))
+    runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
     if changed == "url":
         expected_url, text = "https://example.org/moved/entities.gpi", SOURCE_TEXT
     else:
         expected_url, text = SOURCE_URL, SOURCE_TEXT.replace("Gene1", "Gene1b")
     sources = sources_with_entities({"mgi": {"type": "https", "url": expected_url}})
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
 
     runner_for(_fetchers(text.encode()), sources=sources).run(job_id)
 
@@ -726,7 +739,7 @@ def test_matching_catalog_of_another_source_does_not_make_refresh_unchanged(
         ),
         ignore_progress,
     )
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
 
     runner_for(_fetchers()).run(job_id)
 
@@ -739,6 +752,7 @@ def test_matching_catalog_of_another_source_does_not_make_refresh_unchanged(
 
 
 def test_source_removed_before_execution_fails_and_keeps_catalog(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
@@ -747,9 +761,9 @@ def test_source_removed_before_execution_fails_and_keeps_catalog(
 
     The source is not fetched and the existing catalog is kept.
     """
-    runner_for(_fetchers()).run(_create_job(jobs))
+    runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
     fetchers = _fetchers()
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
 
     runner_for(fetchers, sources=sources_with_entities({})).run(job_id)
 
@@ -762,11 +776,12 @@ def test_source_removed_before_execution_fails_and_keeps_catalog(
 
 
 def test_orphaned_running_job_without_staging_completes_when_redelivered(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
 ) -> None:
     """A job left running with no staging refreshes and succeeds when run again."""
-    job_id = _create_job(jobs)
+    job_id = _create_job(unit_of_work_factory)
     assert jobs.start(job_id).status is JobStatus.RUNNING
     fetchers = _fetchers()
 

@@ -10,6 +10,7 @@ from refresh_helpers import (
     build_runner,
     sources_with_entities,
 )
+from seeding import create_job
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_entity_refresh_service import publish_catalog
@@ -71,8 +72,9 @@ def _publish(
     publish_catalog(imports, unit_of_work_factory, *identifiers, source=source)
 
 
-def _retirement_job(jobs: JobService, source: str) -> UUID:
-    return jobs.create(
+def _retirement_job(factory: UnitOfWorkFactory, source: str) -> UUID:
+    return create_job(
+        factory,
         job_type=JobType.ENTITY_RETIREMENT,
         requested_by="scheduler",
         parameters={"source_key": source},
@@ -125,7 +127,7 @@ def test_retirement_removes_membership_and_reports_impacts(
     _publish(imports, unit_of_work_factory, "mgi", "MGI:1", "MGI:2")
     _publish(imports, unit_of_work_factory, "rgd", "RGD:1")
     annotation_id = seed_annotation("MGI:1")  # active annotation on a retired entity
-    job_id = _retirement_job(jobs, "mgi")
+    job_id = _retirement_job(unit_of_work_factory, "mgi")
 
     _runner(database_engine, unit_of_work_factory, ONLY_RGD).run_retirement(job_id)
 
@@ -191,7 +193,7 @@ def test_redelivered_retirement_recovers_result_without_second_audit(
     jobs, imports = services
     _publish(imports, unit_of_work_factory, "mgi", "MGI:1")
     runner = _runner(database_engine, unit_of_work_factory, NO_ENTITIES)
-    job_id = _retirement_job(jobs, "mgi")
+    job_id = _retirement_job(unit_of_work_factory, "mgi")
     original_succeed = JobService.succeed
     failures = 1
 
@@ -250,7 +252,7 @@ def test_retirement_without_active_catalog_or_of_configured_source_is_a_no_op(
     else:
         sources = NO_ENTITIES
     active_before = _active_ids(session_factory)
-    job_id = _retirement_job(jobs, "mgi")
+    job_id = _retirement_job(unit_of_work_factory, "mgi")
 
     _runner(database_engine, unit_of_work_factory, sources).run_retirement(job_id)
 
@@ -300,7 +302,8 @@ def test_invalid_entity_job_parameters_fail_terminally(
     monkeypatch.setattr(refresh_runner.logger, "error", record_log)
     jobs, _imports = services
     runner = _runner(database_engine, unit_of_work_factory, ONLY_MGI)
-    job_id = jobs.create(
+    job_id = create_job(
+        unit_of_work_factory,
         job_type=job_type,
         requested_by="scheduler",
         parameters=parameters,

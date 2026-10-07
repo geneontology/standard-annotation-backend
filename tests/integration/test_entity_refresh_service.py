@@ -10,6 +10,7 @@ from refresh_helpers import (
     stage_without_publishing,
     start_job,
 )
+from seeding import insert_annotation
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -198,7 +199,8 @@ def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
                     "assigned_by": "MGI",
                 }
             )
-            uow.annotations.create(
+            insert_annotation(
+                uow.annotations.session,
                 annotation=annotation,
                 actor_id="curator",
                 change_source="test",
@@ -206,8 +208,8 @@ def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
                 record_origin=AnnotationOrigin.DIRECT,
                 annotation_id=annotation_id,
             )
-        deleted = uow.annotations.soft_delete(
-            UUID(int=4), actor_id="curator", change_source="test"
+        deleted = uow.annotations.soft_delete_direct(
+            UUID(int=4), expected_version=1, actor_id="curator", change_source="test"
         )
         assert deleted.status == "deleted"
         assert deleted.current_version == 2

@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 from refresh_helpers import OboTerm, go_document, ignore_progress, obo, start_job
+from seeding import insert_annotation
 from sqlalchemy import Engine
 
 from standard_annotation_backend.domain.annotations import Annotation
@@ -78,7 +79,8 @@ def _prepare(
         )
         uow.ontologies.activate(old.version_id)
         for annotation_id, annotation in annotations:
-            uow.annotations.create(
+            insert_annotation(
+                uow.annotations.session,
                 annotation=annotation,
                 actor_id="creator",
                 change_source="test",
@@ -151,6 +153,11 @@ def test_duplicate_rejections_repeat_to_a_fixed_point(
             assert record is not None
             assert record.ontology_class_id == expected_term
         assert all(
-            len(uow.annotations.list_versions(annotation_id)) == 1
+            len(
+                uow.annotations.list_versions_page(
+                    annotation_id, limit=100, offset=0
+                ).items
+            )
+            == 1
             for annotation_id in (first_id, second_id, third_id)
         )

@@ -244,19 +244,6 @@ class FakeAnnotationRepository:
         self.last_offset = offset
         return self.active_page
 
-    def annotation_exists(
-        self,
-        annotation_id: UUID,
-        *,
-        include_deleted: bool = True,
-    ) -> bool:
-        self.last_include_deleted = include_deleted
-        return (
-            self.annotation_is_known
-            and annotation_id == FIXED_ID
-            and (include_deleted or self.current_record is not None)
-        )
-
     def list_versions_page(
         self,
         annotation_id: UUID,

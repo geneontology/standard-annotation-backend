@@ -12,6 +12,7 @@ from refresh_helpers import (
     obo,
     start_job,
 )
+from seeding import insert_annotation
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -105,7 +106,8 @@ def _prepare(
         )
         uow.ontologies.activate(old.version_id)
         for annotation_id, annotation in annotations:
-            uow.annotations.create(
+            insert_annotation(
+                uow.annotations.session,
                 annotation=annotation,
                 actor_id="creator",
                 change_source="test",
@@ -162,7 +164,9 @@ def test_activation_replaces_all_occurrences_once_and_records_audits(
         assert updated.annotation_extensions is not None
         assert updated.annotation_extensions[0].extension_term == NEW_TERM
         assert updated.annotation_extensions[1].extension_term == "CL:0000000"
-        versions = uow.annotations.list_versions(annotation_id)
+        versions = uow.annotations.list_versions_page(
+            annotation_id, limit=100, offset=0
+        ).items
         assert len(versions) == 2
         assert versions[-1].change_source == "ontology_refresh"
     with session_factory() as session:

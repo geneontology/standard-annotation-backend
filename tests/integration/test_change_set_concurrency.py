@@ -411,7 +411,11 @@ def test_direct_update_makes_waiting_acceptance_stale_without_overwriting(
         assert current.status == "active"
         assert current.current_version == 2
         assert current.assigned_by == "Direct"
-        versions = AnnotationRepository(session).list_versions(created.annotation_id)
+        versions = (
+            AnnotationRepository(session)
+            .list_versions_page(created.annotation_id, limit=100, offset=0)
+            .items
+        )
         assert [version.version for version in versions] == [1, 2]
         assert versions[-1].annotation_data["assigned_by"] == "Direct"
         assert not versions[-1].is_deleted

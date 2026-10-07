@@ -293,11 +293,6 @@ class OntologyRepository:
         self.session.flush(candidates)
         return version_ids
 
-    def closure_supported(self, key: OntologyKey, predicate_id: str) -> bool:
-        """Return whether the active snapshot loaded closure for a predicate."""
-        active = self.get_active(key)
-        return active is not None and predicate_id in active.loaded_predicates
-
     def list_terms(self, version_id: UUID) -> list[OntologyTermRecord]:
         """Return snapshot terms in stable identifier order."""
         self._require_complete(version_id)
@@ -306,21 +301,6 @@ class OntologyRepository:
                 select(OntologyTermRecord)
                 .where(OntologyTermRecord.version_id == version_id)
                 .order_by(OntologyTermRecord.term_id)
-            )
-        )
-
-    def list_closure(self, version_id: UUID) -> list[OntologyClosureRecord]:
-        """Return snapshot closure in stable subject, predicate, and object order."""
-        self._require_complete(version_id)
-        return list(
-            self.session.scalars(
-                select(OntologyClosureRecord)
-                .where(OntologyClosureRecord.version_id == version_id)
-                .order_by(
-                    OntologyClosureRecord.subject_term_id,
-                    OntologyClosureRecord.predicate_id,
-                    OntologyClosureRecord.object_term_id,
-                )
             )
         )
 

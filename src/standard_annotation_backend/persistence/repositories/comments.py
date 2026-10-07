@@ -45,66 +45,42 @@ class AnnotationCommentRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def get(
-        self,
-        comment_id: UUID,
-        *,
-        include_deleted: bool = False,
-    ) -> AnnotationCommentRecord | None:
-        """Get a comment by identifier.
-
-        Args:
-            comment_id: Identifier of the comment to find.
-            include_deleted: Whether a deleted comment may be returned.
-
-        Returns:
-            The comment, or `None` when no visible comment exists.
-        """
-        statement = select(AnnotationCommentRecord).where(
-            AnnotationCommentRecord.comment_id == comment_id
-        )
-        if not include_deleted:
-            statement = statement.where(AnnotationCommentRecord.deleted_at.is_(None))
-        return self.session.scalar(statement)
-
     def get_for_annotation(
         self,
         annotation_id: UUID,
         comment_id: UUID,
-        *,
-        include_deleted: bool = False,
     ) -> AnnotationCommentRecord | None:
         """Get a comment only when it belongs to the specified annotation.
+
+        Deleted comments are never returned.
 
         Args:
             annotation_id: Identifier of the expected parent annotation.
             comment_id: Identifier of the comment to find.
-            include_deleted: Whether a deleted comment may be returned.
 
         Returns:
-            The matching comment, or `None` when no visible match exists.
+            The matching comment, or `None` when no active match exists.
         """
         statement = select(AnnotationCommentRecord).where(
             AnnotationCommentRecord.annotation_id == annotation_id,
             AnnotationCommentRecord.comment_id == comment_id,
+            AnnotationCommentRecord.deleted_at.is_(None),
         )
-        if not include_deleted:
-            statement = statement.where(AnnotationCommentRecord.deleted_at.is_(None))
         return self.session.scalar(statement)
 
     def list(
         self,
         annotation_id: UUID,
         *,
-        include_deleted: bool = False,
         limit: int,
         offset: int,
     ) -> Page[AnnotationCommentRecord]:
-        """List one page of comments attached to an annotation.
+        """List one page of active comments attached to an annotation.
+
+        Deleted comments are excluded.
 
         Args:
             annotation_id: Identifier of the annotation to list comments for.
-            include_deleted: Whether deleted comments should be included.
             limit: Maximum number of comments to return.
             offset: Number of matching comments to skip.
 
@@ -117,10 +93,9 @@ class AnnotationCommentRepository:
         """
         self._lock_active_annotation_for_comment(annotation_id)
         statement = select(AnnotationCommentRecord).where(
-            AnnotationCommentRecord.annotation_id == annotation_id
+            AnnotationCommentRecord.annotation_id == annotation_id,
+            AnnotationCommentRecord.deleted_at.is_(None),
         )
-        if not include_deleted:
-            statement = statement.where(AnnotationCommentRecord.deleted_at.is_(None))
         return load_page(
             self.session,
             statement,
@@ -139,7 +114,6 @@ class AnnotationCommentRepository:
         *,
         body: str,
         created_by: str,
-        comment_id: UUID | None = None,
     ) -> AnnotationCommentRecord:
         """Create a comment on an annotation's current version.
 
@@ -147,7 +121,6 @@ class AnnotationCommentRepository:
             annotation_id: Identifier of the annotation being discussed.
             body: Nonblank comment text.
             created_by: Identifier for the comment author.
-            comment_id: Identifier to use instead of generating one.
 
         Returns:
             The new comment record.
@@ -163,7 +136,7 @@ class AnnotationCommentRepository:
 
         now = datetime.now(UTC)
         comment = AnnotationCommentRecord(
-            comment_id=comment_id or uuid4(),
+            comment_id=uuid4(),
             annotation_id=annotation_id,
             annotation_version=annotation.current_version,
             body=body,

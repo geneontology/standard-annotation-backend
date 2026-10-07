@@ -7,6 +7,7 @@ from uuid import UUID
 
 import httpx2
 import pytest
+from seeding import create_job, insert_annotation
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -56,15 +57,12 @@ def suppress_pruning_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _create_job(factory: UnitOfWorkFactory) -> UUID:
-    return (
-        JobService(factory)
-        .create(
-            job_type=JobType.ONTOLOGY_REFRESH,
-            requested_by="ontology-worker",
-            parameters={"source_key": "go"},
-        )
-        .job_id
-    )
+    return create_job(
+        factory,
+        job_type=JobType.ONTOLOGY_REFRESH,
+        requested_by="ontology-worker",
+        parameters={"source_key": "go"},
+    ).job_id
 
 
 def _load_job(factory: UnitOfWorkFactory, job_id: UUID) -> JobRecord:
@@ -353,7 +351,8 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
         }
     )
     with unit_of_work_factory() as uow:
-        uow.annotations.create(
+        insert_annotation(
+            uow.annotations.session,
             annotation=annotation,
             actor_id="creator",
             change_source="test",

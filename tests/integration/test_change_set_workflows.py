@@ -5,6 +5,7 @@ from types import TracebackType
 from uuid import UUID, uuid4
 
 import pytest
+from seeding import insert_annotation
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -406,29 +407,29 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
     """Preview and acceptance allow existing duplicates but reject new conflicts."""
     payload = validated_annotation.model_dump(mode="json")
     with unit_of_work_factory() as unit_of_work:
-        target = unit_of_work.annotations.create(
+        target = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=validated_annotation,
             owning_group_id="group",
             actor_id="importer",
             change_source="import",
-            record_origin="direct",
         )
         target_id = target.annotation_id
-        legacy = unit_of_work.annotations.create(
+        legacy = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=validated_annotation,
             owning_group_id="other",
             actor_id="importer",
             change_source="import",
-            record_origin="direct",
         )
-        new_peer = unit_of_work.annotations.create(
+        new_peer = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=Annotation.model_validate(
                 {**payload, "references": ["PMID:99"]}
             ),
             owning_group_id="other",
             actor_id="importer",
             change_source="import",
-            record_origin="direct",
         )
         legacy_id, new_peer_id = legacy.annotation_id, new_peer.annotation_id
         unit_of_work.commit()

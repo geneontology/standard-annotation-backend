@@ -107,7 +107,7 @@ def test_pruned_snapshot_cannot_be_read_as_complete(
         with pytest.raises(OntologySnapshotPrunedError):
             unit_of_work.ontologies.list_terms(version_id)
         with pytest.raises(OntologySnapshotPrunedError):
-            unit_of_work.ontologies.list_closure(version_id)
+            unit_of_work.ontologies.closure_count(version_id)
 
 
 def test_pruned_snapshot_cannot_be_activated(
@@ -260,7 +260,7 @@ def test_pruning_keeps_required_snapshots_and_preserves_provenance(
             with pytest.raises(OntologySnapshotPrunedError):
                 unit_of_work.ontologies.list_terms(version_id)
             with pytest.raises(OntologySnapshotPrunedError):
-                unit_of_work.ontologies.list_closure(version_id)
+                unit_of_work.ontologies.closure_count(version_id)
         for name in (
             "previous_success",
             "active_success",
@@ -269,7 +269,7 @@ def test_pruning_keeps_required_snapshots_and_preserves_provenance(
         ):
             version_id = version_ids[name]
             assert len(unit_of_work.ontologies.list_terms(version_id)) == 2
-            assert len(unit_of_work.ontologies.list_closure(version_id)) == 1
+            assert unit_of_work.ontologies.closure_count(version_id) == 1
     with session_factory() as session:
         metadata = {
             record.version_id: record

@@ -312,7 +312,10 @@ def test_same_record_update_race_rejects_the_stale_version(
         assert current.current_version == 2
         assert current.assigned_by == "First"
         assert [
-            version.version for version in repository.list_versions(annotation_id)
+            version.version
+            for version in repository.list_versions_page(
+                annotation_id, limit=100, offset=0
+            ).items
         ] == [
             1,
             2,
@@ -380,7 +383,9 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
         assert current is not None
         current_version = current.current_version
         assigned_by = current.assigned_by
-        versions = tuple(repository.list_versions(annotation_id))
+        versions = tuple(
+            repository.list_versions_page(annotation_id, limit=100, offset=0).items
+        )
     assert current_version == 2
     assert assigned_by == "Concurrent"
     assert [version.version for version in versions] == [1, 2]

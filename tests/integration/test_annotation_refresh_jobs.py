@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 from annotation_refresh_helpers import gpad_bytes, gpad_row, seed_group_import
 from refresh_helpers import TEST_SOURCES, FakeFetchers, build_runner, ignore_progress
+from seeding import create_job
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -63,9 +64,14 @@ def subjects(seed_active_subjects: Callable[..., None]) -> None:
     seed_active_subjects("UniProtKB:P12345")
 
 
-def _job(jobs: JobService, job_type: JobType = JobType.ANNOTATION_REFRESH) -> UUID:
-    return jobs.create(
-        job_type=job_type, requested_by="curator", parameters={"source_key": SOURCE}
+def _job(
+    factory: UnitOfWorkFactory, job_type: JobType = JobType.ANNOTATION_REFRESH
+) -> UUID:
+    return create_job(
+        factory,
+        job_type=job_type,
+        requested_by="curator",
+        parameters={"source_key": SOURCE},
     ).job_id
 
 
@@ -82,12 +88,13 @@ def _group_annotations(session_factory: sessionmaker[Session]) -> int:
 
 
 def test_refresh_job_publishes_and_records_counts(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
 ) -> None:
     """A GPAD refresh job publishes the file and records its counts and result."""
-    job_id = _job(jobs)
+    job_id = _job(unit_of_work_factory)
 
     runner_for(FakeFetchers({SOURCE: gzip.compress(GOOD)})).run(job_id)
 
@@ -106,6 +113,7 @@ def test_refresh_job_publishes_and_records_counts(
 
 
 def test_unchanged_file_is_skipped_and_cutover_never_skips(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
@@ -115,12 +123,12 @@ def test_unchanged_file_is_skipped_and_cutover_never_skips(
     A cutover imports the same file anyway.
     """
     fetchers = FakeFetchers({SOURCE: GOOD})
-    first = _job(jobs)
+    first = _job(unit_of_work_factory)
     runner_for(fetchers).run(first)
 
-    second = _job(jobs)
+    second = _job(unit_of_work_factory)
     runner_for(fetchers).run(second)
-    cutover = _job(jobs, JobType.ANNOTATION_CUTOVER)
+    cutover = _job(unit_of_work_factory, JobType.ANNOTATION_CUTOVER)
     runner_for(fetchers).run(cutover)
 
     first_result = jobs.find(first).result
@@ -190,8 +198,8 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
     The group stays `gpad_imported`, and no staged annotations are left behind.
     """
     existing = gpad_bytes(gpad_row("UniProtKB:P12345", reference="PMID:7"))
-    runner_for(FakeFetchers({SOURCE: existing})).run(_job(jobs))
-    job_id = _job(jobs, job_type)
+    runner_for(FakeFetchers({SOURCE: existing})).run(_job(unit_of_work_factory))
+    job_id = _job(unit_of_work_factory, job_type)
 
     runner_for(FakeFetchers({SOURCE: content})).run(job_id)
 
@@ -217,6 +225,7 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
 
 
 def test_job_for_a_sab_managed_group_fails_with_group_sab_managed(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
@@ -228,7 +237,7 @@ def test_job_for_a_sab_managed_group_fails_with_group_sab_managed(
         source_key=SOURCE,
         mode=AnnotationManagementMode.SAB_MANAGED,
     )
-    job_id = _job(jobs)
+    job_id = _job(unit_of_work_factory)
 
     runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)
 
@@ -247,7 +256,7 @@ def test_redelivery_after_publication_recovers_without_fetching(
     It reports the published result, and delivering the finished job again
     changes nothing. The publication is audited once.
     """
-    job_id = _job(jobs)
+    job_id = _job(unit_of_work_factory)
     job = jobs.start(job_id)
     service = AnnotationRefreshService(
         unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
@@ -288,6 +297,7 @@ def test_redelivery_after_publication_recovers_without_fetching(
 
 
 def test_busy_group_lock_leaves_the_job_running_for_a_retry(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     database_engine: Engine,
@@ -297,8 +307,9 @@ def test_busy_group_lock_leaves_the_job_running_for_a_retry(
     The run raises a retryable error and leaves the job running, while a job for
     another group runs to completion. A later run of the waiting job succeeds.
     """
-    job_id = _job(jobs)
-    other_group = jobs.create(
+    job_id = _job(unit_of_work_factory)
+    other_group = create_job(
+        unit_of_work_factory,
         job_type=JobType.ANNOTATION_REFRESH,
         requested_by="curator",
         parameters={"source_key": "rgd-gpad"},

@@ -9,6 +9,7 @@ import httpx2
 import pytest
 from celery.exceptions import Retry
 from refresh_helpers import apply_users_yaml
+from seeding import create_job
 from source_provenance import github_provenance
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -49,15 +50,12 @@ def worker_environment(
 
 
 def _create_job(factory: UnitOfWorkFactory) -> UUID:
-    return (
-        JobService(factory)
-        .create(
-            job_type=JobType.AUTHORIZATION_REFRESH,
-            requested_by="scheduler",
-            parameters={"source_key": "go-site"},
-        )
-        .job_id
-    )
+    return create_job(
+        factory,
+        job_type=JobType.AUTHORIZATION_REFRESH,
+        requested_by="scheduler",
+        parameters={"source_key": "go-site"},
+    ).job_id
 
 
 def _load_job(factory: UnitOfWorkFactory, job_id: UUID) -> JobRecord:

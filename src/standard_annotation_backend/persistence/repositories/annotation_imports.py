@@ -150,40 +150,12 @@ class AnnotationImportRepository:
         for parsed in annotations:
             annotation_id = new_annotation_id()
             data = prepare_annotation_for_persistence(parsed.annotation)
+            keys = {"job_id": job_id, "annotation_id": annotation_id}
             staged.append(
-                {
-                    "job_id": job_id,
-                    "annotation_id": annotation_id,
-                    "line_number": parsed.line_number,
-                    "annotation_data": data.annotation_data,
-                    "duplicate_base_signature": data.duplicate_base_signature,
-                    "db_object_id": data.db_object_id,
-                    "negation": data.negation,
-                    "relation": data.relation,
-                    "ontology_class_id": data.ontology_class_id,
-                    "evidence_type": data.evidence_type,
-                    "annotation_date": data.annotation_date,
-                    "assigned_by": data.assigned_by,
-                }
+                {**keys, "line_number": parsed.line_number, **data.column_values()}
             )
-            multivalued.extend(
-                {
-                    "job_id": job_id,
-                    "annotation_id": annotation_id,
-                    "field_name": value.field_name,
-                    "field_value": value.field_value,
-                }
-                for value in data.multivalued_field_values
-            )
-            references.extend(
-                {
-                    "job_id": job_id,
-                    "annotation_id": annotation_id,
-                    "canonical_reference": reference,
-                    "duplicate_base_signature": data.duplicate_base_signature,
-                }
-                for reference in data.canonical_references
-            )
+            multivalued.extend({**keys, **row} for row in data.multivalued_rows())
+            references.extend({**keys, **row} for row in data.reference_rows())
         for model, rows in (
             (AnnotationStagingRecord, staged),
             (AnnotationStagingMultivaluedValueRecord, multivalued),

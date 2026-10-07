@@ -5,6 +5,7 @@ from datetime import UTC
 from uuid import UUID, uuid4
 
 import pytest
+from seeding import insert_annotation
 from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
@@ -44,7 +45,8 @@ def _create_annotation(
     annotation: Annotation,
 ) -> UUID:
     with unit_of_work_factory() as unit_of_work:
-        record = unit_of_work.annotations.create(
+        record = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=annotation,
             actor_id="creator",
             change_source="api",
@@ -145,16 +147,14 @@ def test_comment_page_total_and_items_share_one_database_snapshot(
 ) -> None:
     """A concurrent insert cannot make a comment page contradict its total."""
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
-    first_id = UUID("00000000-0000-0000-0000-000000000101")
-    concurrent_id = UUID("00000000-0000-0000-0000-000000000102")
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.comments.create(
+        first = unit_of_work.comments.create(
             annotation_id,
             body="First comment",
             created_by="reviewer",
-            comment_id=first_id,
         )
         unit_of_work.commit()
+        first_id = first.comment_id
 
     writer_calls = 0
     with unit_of_work_factory() as reader:
@@ -174,7 +174,6 @@ def test_comment_page_total_and_items_share_one_database_snapshot(
                     annotation_id,
                     body="Concurrent comment",
                     created_by="other-reviewer",
-                    comment_id=concurrent_id,
                 )
                 writer.commit()
 
@@ -200,6 +199,7 @@ def test_comment_page_total_and_items_share_one_database_snapshot(
     assert stored_count == 2
 
 
+@pytest.mark.usefixtures("active_annotation_subjects")
 def test_create_pins_actual_current_version_and_remains_pinned(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
@@ -208,9 +208,10 @@ def test_create_pins_actual_current_version_and_remains_pinned(
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     version_two = _changed_annotation(validated_annotation, assigned_by="Version_Two")
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.update(
+        unit_of_work.annotations.update_direct(
             annotation_id,
             version_two,
+            expected_version=1,
             actor_id="editor",
             change_source="api",
         )
@@ -232,17 +233,19 @@ def test_create_pins_actual_current_version_and_remains_pinned(
         validated_annotation, assigned_by="Version_Three"
     )
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.update(
+        unit_of_work.annotations.update_direct(
             annotation_id,
             version_three,
+            expected_version=2,
             actor_id="editor",
             change_source="api",
         )
         unit_of_work.commit()
 
-    with unit_of_work_factory() as unit_of_work:
-        retained = unit_of_work.comments.get(comment_id)
+    with session_factory() as session:
+        retained = session.get(AnnotationCommentRecord, comment_id)
         assert retained is not None
+        assert retained.deleted_at is None
         retained_version = retained.annotation_version
 
     assert retained_version == 2
@@ -307,28 +310,30 @@ def test_soft_delete_hides_comment_without_changing_annotation_versions(
         assert deleted.updated_at == deleted.deleted_at
 
     with unit_of_work_factory() as unit_of_work:
-        assert unit_of_work.comments.get(comment_id) is None
+        assert (
+            unit_of_work.comments.get_for_annotation(annotation_id, comment_id) is None
+        )
         visible_page = unit_of_work.comments.list(
             annotation_id,
             limit=50,
             offset=0,
         )
-        retained = unit_of_work.comments.get(comment_id, include_deleted=True)
-        deleted_page = unit_of_work.comments.list(
-            annotation_id,
-            include_deleted=True,
-            limit=50,
-            offset=0,
-        )
+
+    with session_factory() as session:
+        retained = session.get(AnnotationCommentRecord, comment_id)
         assert retained is not None
-        retained_comment_id = retained.comment_id
-        listed_comment_ids = [comment.comment_id for comment in deleted_page.items]
+        assert retained.deleted_at is not None
+        stored_comment_ids = list(
+            session.scalars(
+                select(AnnotationCommentRecord.comment_id).where(
+                    AnnotationCommentRecord.annotation_id == annotation_id
+                )
+            )
+        )
 
     assert visible_page.items == ()
     assert visible_page.total == 0
-    assert retained_comment_id == comment_id
-    assert listed_comment_ids == [comment_id]
-    assert deleted_page.total == 1
+    assert stored_comment_ids == [comment_id]
     assert _annotation_version_state(session_factory, annotation_id) == before_versions
 
 
@@ -347,6 +352,7 @@ def test_blank_create_body_raises_before_database_work(
 
 def test_blank_edit_body_is_rejected_without_changing_comment(
     unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
@@ -362,9 +368,10 @@ def test_blank_edit_body_is_rejected_without_changing_comment(
     with unit_of_work_factory() as unit_of_work, pytest.raises(InvalidCommentError):
         unit_of_work.comments.edit(annotation_id, comment_id, body=" \n ")
 
-    with unit_of_work_factory() as unit_of_work:
-        retained = unit_of_work.comments.get(comment_id)
+    with session_factory() as session:
+        retained = session.get(AnnotationCommentRecord, comment_id)
         assert retained is not None
+        assert retained.deleted_at is None
         retained_body = retained.body
     assert retained_body == "Retained body"
 
@@ -382,8 +389,9 @@ def test_create_rejects_missing_and_deleted_annotations(
 
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete(
+        unit_of_work.annotations.soft_delete_direct(
             annotation_id,
+            expected_version=1,
             actor_id="deleter",
             change_source="api",
         )
@@ -523,8 +531,9 @@ def test_comment_access_waits_for_an_in_progress_parent_deletion(
         comment_id = comment.comment_id
 
     with session_factory() as holder, session_factory() as contender:
-        AnnotationRepository(holder).soft_delete(
+        AnnotationRepository(holder).soft_delete_direct(
             annotation_id,
+            expected_version=1,
             actor_id="deleter",
             change_source="api",
         )
@@ -582,8 +591,9 @@ def test_comment_access_refreshes_a_parent_deleted_after_an_earlier_read(
         preloaded_parent = contender.get(AnnotationRecord, annotation_id)
         assert preloaded_parent is not None
 
-        AnnotationRepository(holder).soft_delete(
+        AnnotationRepository(holder).soft_delete_direct(
             annotation_id,
+            expected_version=1,
             actor_id="deleter",
             change_source="api",
         )
@@ -603,8 +613,8 @@ def test_comment_access_refreshes_a_parent_deleted_after_an_earlier_read(
                 repository.soft_delete(annotation_id, comment_id)
         contender.rollback()
 
-    with unit_of_work_factory() as unit_of_work:
-        retained = unit_of_work.comments.get(comment_id, include_deleted=True)
+    with session_factory() as session:
+        retained = session.get(AnnotationCommentRecord, comment_id)
         assert retained is not None
         assert retained.body == "Original body"
         assert retained.deleted_at is None
@@ -616,15 +626,14 @@ def test_unit_of_work_rolls_back_uncommitted_comment_changes(
     validated_annotation: Annotation,
 ) -> None:
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
-    comment_id = uuid4()
 
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.comments.create(
+        uncommitted = unit_of_work.comments.create(
             annotation_id,
             body="Never committed",
             created_by="reviewer",
-            comment_id=comment_id,
         )
+        comment_id = uncommitted.comment_id
 
     with session_factory() as session:
         assert session.get(AnnotationCommentRecord, comment_id) is None
@@ -645,17 +654,18 @@ def test_unit_of_work_rolls_back_uncommitted_comment_changes(
             body="Rolled-back edit",
         )
 
-    with unit_of_work_factory() as unit_of_work:
-        retained = unit_of_work.comments.get(retained_id)
+    with session_factory() as session:
+        retained = session.get(AnnotationCommentRecord, retained_id)
         assert retained is not None
+        assert retained.deleted_at is None
         retained_body = retained.body
     assert retained_body == "Committed body"
 
     with unit_of_work_factory() as unit_of_work:
         unit_of_work.comments.soft_delete(annotation_id, retained_id)
 
-    with unit_of_work_factory() as unit_of_work:
-        retained = unit_of_work.comments.get(retained_id)
+    with session_factory() as session:
+        retained = session.get(AnnotationCommentRecord, retained_id)
         assert retained is not None
         retained_deleted_at = retained.deleted_at
     assert retained_deleted_at is None

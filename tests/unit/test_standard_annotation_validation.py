@@ -25,7 +25,7 @@ def valid_annotation_payload() -> dict[str, object]:
 def test_valid_payload_returns_schema_annotation() -> None:
     result = validate_annotation(valid_annotation_payload())
 
-    assert result.is_valid
+    assert result.annotation is not None
     assert result.errors == ()
     assert result.annotation is not None
     assert result.annotation.db_object_id == "UniProtKB:P12345"
@@ -38,7 +38,7 @@ def test_invalid_payload_returns_structured_errors() -> None:
 
     result = validate_annotation(payload)
 
-    assert not result.is_valid
+    assert result.annotation is None
     assert result.annotation is None
     assert result.errors == (
         {
@@ -63,7 +63,7 @@ def test_schema_constraints_reject_invalid_values(field: str, value: object) -> 
 
     result = validate_annotation(payload)
 
-    assert not result.is_valid
+    assert result.annotation is None
     assert result.errors[0]["location"][0] == field
 
 
@@ -73,7 +73,7 @@ def test_extra_sab_identifier_is_rejected_by_core_schema() -> None:
 
     result = validate_annotation(payload)
 
-    assert not result.is_valid
+    assert result.annotation is None
     assert result.annotation is None
     assert result.errors[0]["location"] == ("annotation_id",)
     assert result.errors[0]["type"] == "extra_forbidden"

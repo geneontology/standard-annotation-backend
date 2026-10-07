@@ -2,9 +2,10 @@
 
 from collections.abc import Callable
 from datetime import UTC, date, datetime
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
+from seeding import insert_annotation
 from sqlalchemy import event
 
 from standard_annotation_backend.domain.annotations import Annotation
@@ -28,7 +29,8 @@ def _create(
     annotation_id: UUID,
     created_at: datetime,
 ) -> None:
-    record = unit_of_work.annotations.create(
+    record = insert_annotation(
+        unit_of_work.annotations.session,
         annotation=annotation,
         actor_id="creator",
         change_source="test",
@@ -228,8 +230,9 @@ def test_scalar_search_excludes_soft_deleted_rows_from_items_and_total(
             )
         unit_of_work.commit()
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete(
+        unit_of_work.annotations.soft_delete_direct(
             deleted_id,
+            expected_version=1,
             actor_id="deleter",
             change_source="test",
         )
@@ -390,6 +393,7 @@ def test_multivalued_search_combines_with_scalar_filters(
         assert [record.annotation_id for record in page.items] == [matching_id]
 
 
+@pytest.mark.usefixtures("active_annotation_subjects")
 def test_version_queries_include_deleted_annotation_and_paginate_oldest_first(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
@@ -404,44 +408,24 @@ def test_version_queries_include_deleted_annotation_and_paginate_oldest_first(
         )
         unit_of_work.commit()
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.update(
+        unit_of_work.annotations.update_direct(
             annotation_id,
             _changed(validated_annotation, assigned_by="MGI"),
+            expected_version=1,
             actor_id="editor",
             change_source="test",
         )
         unit_of_work.commit()
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete(
+        unit_of_work.annotations.soft_delete_direct(
             annotation_id,
+            expected_version=2,
             actor_id="deleter",
             change_source="test",
         )
         unit_of_work.commit()
 
     with unit_of_work_factory() as unit_of_work:
-        assert (
-            unit_of_work.annotations.annotation_exists(
-                annotation_id,
-                include_deleted=True,
-            )
-            is True
-        )
-        assert (
-            unit_of_work.annotations.annotation_exists(
-                annotation_id,
-                include_deleted=False,
-            )
-            is False
-        )
-        assert (
-            unit_of_work.annotations.annotation_exists(
-                uuid4(),
-                include_deleted=True,
-            )
-            is False
-        )
-
         page = unit_of_work.annotations.list_versions_page(
             annotation_id,
             limit=2,
@@ -467,6 +451,7 @@ def test_version_queries_include_deleted_annotation_and_paginate_oldest_first(
         assert unit_of_work.annotations.get_version(annotation_id, 4) is None
 
 
+@pytest.mark.usefixtures("active_annotation_subjects")
 def test_version_page_total_and_items_share_one_database_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
@@ -488,9 +473,10 @@ def test_version_page_total_and_items_share_one_database_snapshot(
             nonlocal writer_calls
             writer_calls += 1
             with unit_of_work_factory() as writer:
-                writer.annotations.update(
+                writer.annotations.update_direct(
                     annotation_id,
                     _changed(validated_annotation, assigned_by="MGI"),
+                    expected_version=1,
                     actor_id="concurrent-editor",
                     change_source="test",
                 )

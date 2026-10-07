@@ -400,7 +400,9 @@ def test_delete_commits_an_empty_response_and_hides_the_current_resource(
     assert current.status_code == status.HTTP_404_NOT_FOUND
     assert current.json()["error"]["code"] == "annotation_not_found"
     with unit_of_work_factory() as unit_of_work:
-        versions = unit_of_work.annotations.list_versions(annotation_id)
+        versions = unit_of_work.annotations.list_versions_page(
+            annotation_id, limit=100, offset=0
+        ).items
         version_history = [
             (version.version, version.is_deleted, version.actor_id)
             for version in versions

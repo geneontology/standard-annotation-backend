@@ -41,17 +41,16 @@ class SourceError(TerminalRefreshError):
 
     Attributes:
         code: One of `source_error`, `http_status`, `timeout`, `invalid_gzip`, or
-            `invalid_utf8`. Any other value is recorded as `source_error`.
+            `invalid_utf8`.
+
+    Raises:
+        ValueError: If `code` is not one of those retrieval codes.
     """
 
-    def __init__(self, code: RefreshFailureCode | str) -> None:
-        try:
-            parsed = RefreshFailureCode(code)
-        except ValueError:
-            parsed = RefreshFailureCode.SOURCE_ERROR
-        self.code = (
-            parsed if parsed in _RETRIEVAL_CODES else RefreshFailureCode.SOURCE_ERROR
-        )
+    def __init__(self, code: RefreshFailureCode) -> None:
+        if code not in _RETRIEVAL_CODES:
+            raise ValueError("source errors require a retrieval failure code")
+        self.code = code
         super().__init__(
             f"Source retrieval failed: {self.code.value}", failure_code=self.code
         )

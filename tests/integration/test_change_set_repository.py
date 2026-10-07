@@ -4,6 +4,7 @@ from datetime import UTC
 from uuid import UUID, uuid4
 
 import pytest
+from seeding import insert_annotation
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -19,7 +20,8 @@ from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFacto
 
 def _create_target(factory: UnitOfWorkFactory, annotation: Annotation) -> UUID:
     with factory() as unit_of_work:
-        record = unit_of_work.annotations.create(
+        record = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=annotation,
             actor_id="creator",
             change_source="api",

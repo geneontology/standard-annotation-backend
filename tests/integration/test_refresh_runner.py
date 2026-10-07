@@ -15,6 +15,7 @@ from refresh_helpers import (
     ignore_progress,
     start_job,
 )
+from seeding import create_job
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -135,15 +136,12 @@ def case(request: pytest.FixtureRequest) -> KindCase:
 
 
 def _job(factory: UnitOfWorkFactory, case: KindCase, **parameters: object) -> UUID:
-    return (
-        JobService(factory)
-        .create(
-            job_type=case.job_type,
-            requested_by="curator",
-            parameters=parameters or {"source_key": case.source_key},
-        )
-        .job_id
-    )
+    return create_job(
+        factory,
+        job_type=case.job_type,
+        requested_by="curator",
+        parameters=parameters or {"source_key": case.source_key},
+    ).job_id
 
 
 def _read(factory: UnitOfWorkFactory, job_id: UUID) -> JobRecord:
@@ -307,11 +305,12 @@ def test_invalid_parameters_fail_without_fetching(
     """Parameters other than exactly one valid `source_key` fail the job."""
     fetchers = FakeFetchers({})
     runner = build_runner(database_engine, unit_of_work_factory, fetchers)
-    job_id = (
-        JobService(unit_of_work_factory)
-        .create(job_type=case.job_type, requested_by="curator", parameters=parameters)
-        .job_id
-    )
+    job_id = create_job(
+        unit_of_work_factory,
+        job_type=case.job_type,
+        requested_by="curator",
+        parameters=parameters,
+    ).job_id
 
     runner.run(job_id)
 
@@ -389,15 +388,12 @@ def test_ontology_job_for_a_non_ontology_key_fails_as_unknown_source(
     """A key that matches the pattern but is not an ontology fails; it never retries."""
     fetchers = FakeFetchers({})
     runner = build_runner(database_engine, unit_of_work_factory, fetchers)
-    job_id = (
-        JobService(unit_of_work_factory)
-        .create(
-            job_type=JobType.ONTOLOGY_REFRESH,
-            requested_by="curator",
-            parameters={"source_key": "chebi"},
-        )
-        .job_id
-    )
+    job_id = create_job(
+        unit_of_work_factory,
+        job_type=JobType.ONTOLOGY_REFRESH,
+        requested_by="curator",
+        parameters={"source_key": "chebi"},
+    ).job_id
 
     runner.run(job_id)
 
@@ -642,15 +638,12 @@ def test_job_type_no_kind_claims_fails_generically_without_fetching(
     """A retirement job delivered to the refresh task fails once, generically."""
     fetchers = FakeFetchers({})
     runner = build_runner(database_engine, unit_of_work_factory, fetchers)
-    job_id = (
-        JobService(unit_of_work_factory)
-        .create(
-            job_type=JobType.ENTITY_RETIREMENT,
-            requested_by="curator",
-            parameters={"source_key": "mgi"},
-        )
-        .job_id
-    )
+    job_id = create_job(
+        unit_of_work_factory,
+        job_type=JobType.ENTITY_RETIREMENT,
+        requested_by="curator",
+        parameters={"source_key": "mgi"},
+    ).job_id
 
     runner.run(job_id)
 

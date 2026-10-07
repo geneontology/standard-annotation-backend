@@ -115,10 +115,6 @@ class StaleAnnotationVersionError(RuntimeError):
         super().__init__(f"annotation {annotation_id} is at version {current_version}")
 
 
-class InvalidAnnotationProvenanceError(ValueError):
-    """Raised when annotation provenance is unsupported or inconsistent."""
-
-
 def _ownership_conditions(
     owning_group_id: str | None, created_by: str | None
 ) -> tuple[ColumnElement[bool], ...]:
@@ -154,13 +150,13 @@ class AnnotationRepository:
     The repository flushes changes so database errors are raised promptly, but
     the caller remains responsible for committing or rolling back the session.
 
-    Mutation methods such as `create`, `update`, and `soft_delete` support workflows
-    whose callers supply their own workflow details. Their `_direct` counterparts
-    handle changes submitted through the public API and enforce that workflow's
-    additional rules, including an active entity catalog subject, duplicate
-    prevention, and expected-version checks.
-    Both variants use shared private helpers for the underlying database writes so
-    annotations and their version histories remain consistent.
+    The `_direct` mutation methods serve both direct API writes and change-set
+    acceptance. They enforce an active entity catalog subject, duplicate
+    prevention, and expected-version checks. `apply_system_update` serves
+    system-wide updates such as ontology refresh, whose caller holds the exclusive
+    annotation lock and checks duplicates for the whole batch. All of them use
+    shared private helpers for the underlying database writes so annotations and
+    their version histories remain consistent.
 
     Args:
         session: Session used for every query and write.
@@ -193,49 +189,6 @@ class AnnotationRepository:
                 AnnotationRecord.status == AnnotationStatus.ACTIVE.value
             )
         return self.session.scalar(statement)
-
-    def list_versions(
-        self,
-        annotation_id: UUID,
-    ) -> tuple[AnnotationVersionRecord, ...]:
-        """List the saved versions of an annotation.
-
-        Args:
-            annotation_id: Identifier of the annotation whose history is needed.
-
-        Returns:
-            Saved versions ordered from oldest to newest.
-        """
-        statement = (
-            select(AnnotationVersionRecord)
-            .where(AnnotationVersionRecord.annotation_id == annotation_id)
-            .order_by(AnnotationVersionRecord.version)
-        )
-        return tuple(self.session.scalars(statement))
-
-    def annotation_exists(
-        self,
-        annotation_id: UUID,
-        *,
-        include_deleted: bool = True,
-    ) -> bool:
-        """Return whether an annotation with the exact identifier exists.
-
-        Args:
-            annotation_id: Identifier to look up.
-            include_deleted: Whether a deleted annotation counts as existing.
-
-        Returns:
-            `True` when a matching visible record exists; otherwise `False`.
-        """
-        statement = select(AnnotationRecord.annotation_id).where(
-            AnnotationRecord.annotation_id == annotation_id
-        )
-        if not include_deleted:
-            statement = statement.where(
-                AnnotationRecord.status == AnnotationStatus.ACTIVE.value
-            )
-        return self.session.scalar(statement) is not None
 
     def list_versions_page(
         self,
@@ -433,62 +386,6 @@ class AnnotationRepository:
             )
         return tuple(self.session.scalars(statement))
 
-    def create(
-        self,
-        *,
-        annotation: Annotation,
-        actor_id: str,
-        change_source: str,
-        owning_group_id: str,
-        record_origin: str | AnnotationOrigin,
-        source_import_job_id: UUID | None = None,
-        annotation_id: UUID | None = None,
-    ) -> AnnotationRecord:
-        """Store a new annotation and its first version.
-
-        Args:
-            annotation: Validated annotation to store.
-            actor_id: Identifier for the person or process making the change.
-            change_source: Name of the workflow that made the change.
-            owning_group_id: Group responsible for the annotation.
-            record_origin: Whether the annotation was created directly or
-                imported.
-            source_import_job_id: Import job that supplied the annotation.
-            annotation_id: Identifier to use instead of generating one.
-
-        Returns:
-            The new current annotation record.
-
-        Raises:
-            InvalidAnnotationProvenanceError: If the origin and import job do not
-                describe a valid direct or imported record.
-            TypeError: If `annotation` is not a validated `Annotation`.
-        """
-        origin = (
-            record_origin.value
-            if isinstance(record_origin, AnnotationOrigin)
-            else record_origin
-        )
-        self._validate_provenance(origin, source_import_job_id)
-        persistence_data = prepare_annotation_for_persistence(annotation)
-
-        acquire_global_annotation_write_lock(self.session)
-        acquire_signature_locks(
-            self.session,
-            [persistence_data.duplicate_base_signature],
-        )
-
-        return self._insert_annotation(
-            annotation=annotation,
-            persistence_data=persistence_data,
-            actor_id=actor_id,
-            change_source=change_source,
-            owning_group_id=owning_group_id,
-            record_origin=origin,
-            source_import_job_id=source_import_job_id,
-            annotation_id=annotation_id or new_annotation_id(),
-        )
-
     def create_direct(
         self,
         *,
@@ -529,65 +426,16 @@ class AnnotationRepository:
         )
         if peers:
             raise DuplicateAnnotationError(peers)
-        return self._insert_annotation(
-            annotation=annotation,
-            persistence_data=persistence_data,
-            actor_id=actor_id,
-            change_source=change_source,
-            owning_group_id=owning_group_id,
-            record_origin=AnnotationOrigin.DIRECT.value,
-            source_import_job_id=None,
-            annotation_id=new_annotation_id(),
-        )
-
-    def _insert_annotation(
-        self,
-        *,
-        annotation: Annotation,
-        persistence_data: AnnotationPersistenceData,
-        actor_id: str,
-        change_source: str,
-        owning_group_id: str,
-        record_origin: str,
-        source_import_job_id: UUID | None,
-        annotation_id: UUID,
-    ) -> AnnotationRecord:
-        """Store a new annotation and its records used for history and search.
-
-        The caller must prepare the annotation data, obtain the necessary database
-        locks, and perform the policy checks required by its workflow. API creation,
-        for example, checks for duplicates; import workflows may allow them.
-
-        Args:
-            annotation: Validated annotation to store.
-            persistence_data: Annotation data prepared for database storage.
-            actor_id: Identifier for the person or process creating the annotation.
-            change_source: Workflow through which the annotation was created.
-            owning_group_id: Identifier of the responsible group.
-            record_origin: How the annotation entered the system.
-            source_import_job_id: Import job that created the annotation, if any.
-            annotation_id: Unique identifier assigned to the annotation.
-
-        Returns:
-            The newly stored annotation at version 1.
-        """
+        annotation_id = new_annotation_id()
         record = AnnotationRecord(
             annotation_id=annotation_id,
-            annotation_data=persistence_data.annotation_data,
             current_version=1,
             status=AnnotationStatus.ACTIVE.value,
             deleted_at=None,
             owning_group_id=owning_group_id,
-            record_origin=record_origin,
-            source_import_job_id=source_import_job_id,
-            duplicate_base_signature=persistence_data.duplicate_base_signature,
-            db_object_id=persistence_data.db_object_id,
-            negation=persistence_data.negation,
-            relation=persistence_data.relation,
-            ontology_class_id=persistence_data.ontology_class_id,
-            evidence_type=persistence_data.evidence_type,
-            annotation_date=persistence_data.annotation_date,
-            assigned_by=persistence_data.assigned_by,
+            record_origin=AnnotationOrigin.DIRECT.value,
+            source_import_job_id=None,
+            **persistence_data.column_values(),
         )
         self.session.add(record)
         self.session.flush([record])
@@ -604,50 +452,6 @@ class AnnotationRepository:
         self._add_derived_values(annotation_id, persistence_data)
         self.session.flush()
         return record
-
-    def update(
-        self,
-        annotation_id: UUID,
-        annotation: Annotation,
-        *,
-        actor_id: str,
-        change_source: str,
-    ) -> AnnotationRecord:
-        """Replace an annotation's current data and add a saved version.
-
-        Args:
-            annotation_id: Identifier of the annotation to update.
-            annotation: Validated replacement annotation.
-            actor_id: Identifier for the person or process making the change.
-            change_source: Name of the workflow that made the change.
-
-        Returns:
-            The updated current annotation record.
-
-        Raises:
-            AnnotationNotFoundError: If the annotation does not exist.
-            AnnotationDeletedError: If the annotation has already been deleted.
-            TypeError: If `annotation` is not a validated `Annotation`.
-        """
-        persistence_data = prepare_annotation_for_persistence(annotation)
-        acquire_global_annotation_write_lock(self.session)
-        record = self._get_annotation_for_change(annotation_id)
-        self._raise_if_deleted(record)
-
-        acquire_signature_locks(
-            self.session,
-            [
-                record.duplicate_base_signature,
-                persistence_data.duplicate_base_signature,
-            ],
-        )
-
-        return self._apply_update(
-            record,
-            persistence_data,
-            actor_id=actor_id,
-            change_source=change_source,
-        )
 
     def update_direct(
         self,
@@ -689,18 +493,13 @@ class AnnotationRepository:
             Annotation.model_validate(current.annotation_data)
         )
 
+        # The row lock taken above keeps `current` unchanged until this
+        # transaction ends, so its signature is the one to lock and compare.
         acquire_signature_locks(
             self.session,
             [before.duplicate_base_signature, candidate.duplicate_base_signature],
         )
 
-        current = self._get_annotation_for_change(annotation_id)
-        self._raise_if_deleted(current)
-        refreshed_before = prepare_annotation_for_persistence(
-            Annotation.model_validate(current.annotation_data)
-        )
-        if refreshed_before != before:
-            before = refreshed_before
         if current.current_version != expected_version:
             raise StaleAnnotationVersionError(
                 annotation_id,
@@ -798,39 +597,6 @@ class AnnotationRepository:
             change_source=change_source,
         )
 
-    def soft_delete(
-        self,
-        annotation_id: UUID,
-        *,
-        actor_id: str,
-        change_source: str,
-    ) -> AnnotationRecord:
-        """Mark an annotation as deleted and save that change as a new version.
-
-        Args:
-            annotation_id: Identifier of the annotation to delete.
-            actor_id: Identifier for the person or process making the change.
-            change_source: Name of the workflow that made the change.
-
-        Returns:
-            The annotation record in its deleted state.
-
-        Raises:
-            AnnotationNotFoundError: If the annotation does not exist.
-            AnnotationDeletedError: If the annotation has already been deleted.
-        """
-        acquire_global_annotation_write_lock(self.session)
-        record = self._get_annotation_for_change(annotation_id)
-        self._raise_if_deleted(record)
-
-        acquire_signature_locks(self.session, [record.duplicate_base_signature])
-
-        return self._apply_soft_delete(
-            record,
-            actor_id=actor_id,
-            change_source=change_source,
-        )
-
     def soft_delete_direct(
         self,
         annotation_id: UUID,
@@ -863,8 +629,6 @@ class AnnotationRepository:
         self._raise_if_deleted(record)
         acquire_signature_locks(self.session, [record.duplicate_base_signature])
 
-        record = self._get_annotation_for_change(annotation_id)
-        self._raise_if_deleted(record)
         if record.current_version != expected_version:
             raise StaleAnnotationVersionError(
                 annotation_id,
@@ -920,33 +684,6 @@ class AnnotationRepository:
         self.session.flush()
         return record
 
-    @staticmethod
-    def _validate_provenance(
-        record_origin: str,
-        source_import_job_id: UUID | None,
-    ) -> None:
-        try:
-            AnnotationOrigin(record_origin)
-        except ValueError:
-            raise InvalidAnnotationProvenanceError(
-                f"{record_origin!r} is not a supported annotation record origin"
-            ) from None
-
-        if (
-            record_origin == AnnotationOrigin.DIRECT.value
-            and source_import_job_id is not None
-        ):
-            raise InvalidAnnotationProvenanceError(
-                "direct annotations cannot have a source import job"
-            )
-        if (
-            record_origin == AnnotationOrigin.IMPORT.value
-            and source_import_job_id is None
-        ):
-            raise InvalidAnnotationProvenanceError(
-                "imported annotations require a source import job"
-            )
-
     def _get_annotation_for_change(self, annotation_id: UUID) -> AnnotationRecord:
         """Get the current annotation and prevent concurrent changes to it.
 
@@ -982,15 +719,8 @@ class AnnotationRepository:
         record: AnnotationRecord,
         persistence_data: AnnotationPersistenceData,
     ) -> None:
-        record.annotation_data = persistence_data.annotation_data
-        record.duplicate_base_signature = persistence_data.duplicate_base_signature
-        record.db_object_id = persistence_data.db_object_id
-        record.negation = persistence_data.negation
-        record.relation = persistence_data.relation
-        record.ontology_class_id = persistence_data.ontology_class_id
-        record.evidence_type = persistence_data.evidence_type
-        record.annotation_date = persistence_data.annotation_date
-        record.assigned_by = persistence_data.assigned_by
+        for column, value in persistence_data.column_values().items():
+            setattr(record, column, value)
 
     def _delete_derived_values(self, annotation_id: UUID) -> None:
         self.session.execute(
@@ -1010,18 +740,10 @@ class AnnotationRepository:
         persistence_data: AnnotationPersistenceData,
     ) -> None:
         self.session.add_all(
-            AnnotationMultivaluedFieldValueRecord(
-                annotation_id=annotation_id,
-                field_name=value.field_name,
-                field_value=value.field_value,
-            )
-            for value in persistence_data.multivalued_field_values
+            AnnotationMultivaluedFieldValueRecord(annotation_id=annotation_id, **row)
+            for row in persistence_data.multivalued_rows()
         )
         self.session.add_all(
-            AnnotationDuplicateReferenceRecord(
-                annotation_id=annotation_id,
-                canonical_reference=reference,
-                duplicate_base_signature=persistence_data.duplicate_base_signature,
-            )
-            for reference in persistence_data.canonical_references
+            AnnotationDuplicateReferenceRecord(annotation_id=annotation_id, **row)
+            for row in persistence_data.reference_rows()
         )

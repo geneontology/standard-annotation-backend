@@ -9,7 +9,6 @@ from standard_annotation_backend.persistence.repositories.annotations import (
     AnnotationRepository,
     AnnotationSearchFilters,
     DuplicateAnnotationError,
-    InvalidAnnotationProvenanceError,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.repositories.audit import AuditRepository
@@ -35,7 +34,6 @@ from standard_annotation_backend.persistence.repositories.jobs import (
 from standard_annotation_backend.persistence.repositories.ontologies import (
     OntologyRepository,
     OntologySnapshotPrunedError,
-    OntologyVersionNotFoundError,
 )
 from standard_annotation_backend.persistence.repositories.pagination import Page
 
@@ -53,7 +51,6 @@ __all__ = [
     "CommentNotFoundError",
     "DuplicateAnnotationError",
     "EntityRepository",
-    "InvalidAnnotationProvenanceError",
     "InvalidChangeSetStateError",
     "InvalidCommentError",
     "InvalidJobTransitionError",
@@ -61,7 +58,6 @@ __all__ = [
     "JobRepository",
     "OntologyRepository",
     "OntologySnapshotPrunedError",
-    "OntologyVersionNotFoundError",
     "Page",
     "StaleAnnotationVersionError",
 ]

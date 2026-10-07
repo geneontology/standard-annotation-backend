@@ -19,6 +19,7 @@ from refresh_helpers import (
     obo,
     start_job,
 )
+from seeding import create_job, insert_annotation
 from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -53,7 +54,7 @@ from standard_annotation_backend.persistence.repositories import (
     OntologyRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.job_service import Job, JobService
+from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
 )
@@ -156,7 +157,8 @@ def _prepare_load(
             closure_rows=(),
         )
         unit_of_work.ontologies.activate(old_record.version_id)
-        unit_of_work.annotations.create(
+        insert_annotation(
+            unit_of_work.annotations.session,
             annotation=_annotation(OLD_TERM, object_id="UniProtKB:P12345"),
             actor_id="creator",
             change_source="test",
@@ -164,7 +166,8 @@ def _prepare_load(
             record_origin=AnnotationOrigin.DIRECT,
             annotation_id=REPLACED_ANNOTATION_ID,
         )
-        unit_of_work.annotations.create(
+        insert_annotation(
+            unit_of_work.annotations.session,
             annotation=_annotation(OTHER_TERM, object_id="UniProtKB:Q12345"),
             actor_id="creator",
             change_source="test",
@@ -300,15 +303,12 @@ def test_refresh_task_retries_while_the_ontology_lock_is_held_then_succeeds(
         )
 
     monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", handle_request)
-    job_id = (
-        JobService(unit_of_work_factory)
-        .create(
-            job_type=JobType.ONTOLOGY_REFRESH,
-            requested_by="test",
-            parameters={"source_key": "go"},
-        )
-        .job_id
-    )
+    job_id = create_job(
+        unit_of_work_factory,
+        job_type=JobType.ONTOLOGY_REFRESH,
+        requested_by="test",
+        parameters={"source_key": "go"},
+    ).job_id
 
     try:
         with try_advisory_lock(

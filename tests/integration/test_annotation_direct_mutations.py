@@ -4,6 +4,7 @@ from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import pytest
+from seeding import insert_annotation
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.persistence import repositories
@@ -36,7 +37,8 @@ def _create_existing(
 ) -> UUID:
 
     with unit_of_work_factory() as unit_of_work:
-        record = unit_of_work.annotations.create(
+        record = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=annotation,
             actor_id="creator",
             change_source="api",
@@ -64,7 +66,8 @@ def _create_legacy_annotations(
         unit_of_work.annotations.session.add(source_job)
         unit_of_work.annotations.session.flush([source_job])
         for annotation_id, annotation in annotations:
-            unit_of_work.annotations.create(
+            insert_annotation(
+                unit_of_work.annotations.session,
                 annotation=annotation,
                 actor_id="importer",
                 change_source="legacy-import",
@@ -193,7 +196,9 @@ def test_update_direct_rejects_expansion_of_a_legacy_peer_set(
     assert raised.value.peer_ids == (new_peer_id,)
     with unit_of_work_factory() as unit_of_work:
         retained = unit_of_work.annotations.get(first_id)
-        versions = unit_of_work.annotations.list_versions(first_id)
+        versions = unit_of_work.annotations.list_versions_page(
+            first_id, limit=100, offset=0
+        ).items
         assert retained is not None
         assert retained.current_version == 1
         assert retained.annotation_data["references"] == ["PMID:1"]
@@ -235,7 +240,9 @@ def test_soft_delete_direct_appends_the_deleted_version(
 
     assert deleted.current_version == 2
     with unit_of_work_factory() as unit_of_work:
-        versions = unit_of_work.annotations.list_versions(annotation_id)
+        versions = unit_of_work.annotations.list_versions_page(
+            annotation_id, limit=100, offset=0
+        ).items
         version_states = tuple(
             (version.version, version.is_deleted) for version in versions
         )

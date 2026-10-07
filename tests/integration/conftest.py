@@ -11,6 +11,7 @@ import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from psycopg import sql
+from seeding import insert_annotation
 from sqlalchemy import Engine, select
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
@@ -334,7 +335,8 @@ def seed_annotation(
             }
         )
         with unit_of_work_factory() as uow:
-            uow.annotations.create(
+            insert_annotation(
+                uow.annotations.session,
                 annotation=annotation,
                 actor_id="curator",
                 change_source="test",

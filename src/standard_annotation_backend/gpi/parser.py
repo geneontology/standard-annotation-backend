@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from io import StringIO
+from typing import Literal
 
 from go_standard_annotation_schema.io import GpiReader, HeaderError, RowIssue
 from pydantic import ValidationError
@@ -98,7 +99,7 @@ class GpiParseError(ValueError):
 
     def __init__(
         self,
-        code: str,
+        code: Literal["header", "row_validation"],
         *,
         message: str | None = None,
         issues: tuple[GpiRowIssue, ...] = (),
@@ -106,12 +107,11 @@ class GpiParseError(ValueError):
         """Store the failure code and its description.
 
         Args:
-            code: `header` or `row_validation`. Any other value is stored as
-                `row_validation`.
+            code: `header` or `row_validation`.
             message: Description of a header problem.
             issues: Every invalid data row.
         """
-        self.code = code if code in {"header", "row_validation"} else "row_validation"
+        self.code = code
         self.message = message
         self.issues = issues
         super().__init__(f"GPI parsing failed: {self.code}")

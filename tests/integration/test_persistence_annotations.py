@@ -4,6 +4,7 @@ from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import pytest
+from seeding import insert_annotation
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
@@ -26,7 +27,6 @@ from standard_annotation_backend.persistence.repositories import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
     AnnotationRepository,
-    InvalidAnnotationProvenanceError,
 )
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -39,20 +39,23 @@ def _changed_annotation(annotation: Annotation, **changes: object) -> Annotation
     return Annotation.model_validate(annotation_data)
 
 
+@pytest.fixture(autouse=True)
+def active_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Make the subjects these tests create and update active entities."""
+    seed_active_subjects(
+        "UniProtKB:P12345", "UniProtKB:INTERVENING", "UniProtKB:CANDIDATE"
+    )
+
+
 def _create_direct(
     unit_of_work_factory: UnitOfWorkFactory,
     annotation: Annotation,
-    *,
-    annotation_id: UUID | None = None,
 ) -> UUID:
     with unit_of_work_factory() as unit_of_work:
-        record = unit_of_work.annotations.create(
+        record = unit_of_work.annotations.create_direct(
             annotation=annotation,
             actor_id="creator",
-            change_source="api",
             owning_group_id="group-1",
-            record_origin=AnnotationOrigin.DIRECT,
-            annotation_id=annotation_id,
         )
         unit_of_work.commit()
         return record.annotation_id
@@ -156,7 +159,8 @@ def test_imported_duplicate_peers_coexist_and_find_each_other(
 
     for annotation_id in (first_id, second_id):
         with unit_of_work_factory() as unit_of_work:
-            unit_of_work.annotations.create(
+            insert_annotation(
+                unit_of_work.annotations.session,
                 annotation=validated_annotation,
                 actor_id="importer",
                 change_source="legacy-import",
@@ -180,40 +184,6 @@ def test_imported_duplicate_peers_coexist_and_find_each_other(
         ) == (first_id,)
 
 
-@pytest.mark.parametrize(
-    ("record_origin", "has_import_job"),
-    [
-        (AnnotationOrigin.DIRECT, True),
-        (AnnotationOrigin.IMPORT, False),
-        ("unsupported", False),
-    ],
-)
-def test_invalid_provenance_raises_before_flush(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
-    record_origin: str | AnnotationOrigin,
-    has_import_job: bool,
-) -> None:
-    job_id = _create_source_job(session_factory) if has_import_job else None
-
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(InvalidAnnotationProvenanceError),
-    ):
-        unit_of_work.annotations.create(
-            annotation=validated_annotation,
-            actor_id="actor",
-            change_source="test",
-            owning_group_id="group-1",
-            record_origin=record_origin,
-            source_import_job_id=job_id,
-        )
-
-    with session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(AnnotationRecord)) == 0
-
-
 def test_update_appends_version_and_replaces_current_derived_values(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
@@ -230,9 +200,10 @@ def test_update_appends_version_and_replaces_current_derived_values(
     changed_persistence_data = prepare_annotation_for_persistence(changed)
 
     with unit_of_work_factory() as unit_of_work:
-        record = unit_of_work.annotations.update(
+        record = unit_of_work.annotations.update_direct(
             annotation_id,
             changed,
+            expected_version=1,
             actor_id="editor",
             change_source="api",
         )
@@ -241,7 +212,9 @@ def test_update_appends_version_and_replaces_current_derived_values(
 
     with unit_of_work_factory() as unit_of_work:
         current = unit_of_work.annotations.get(annotation_id)
-        versions = unit_of_work.annotations.list_versions(annotation_id)
+        versions = unit_of_work.annotations.list_versions_page(
+            annotation_id, limit=100, offset=0
+        ).items
         assert current is not None
         assert current.annotation_data == changed_persistence_data.annotation_data
         assert current.current_version == 2
@@ -307,9 +280,10 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
         assert retained.duplicate_base_signature == original_signature
 
         with unit_of_work_factory() as unit_of_work:
-            unit_of_work.annotations.update(
+            unit_of_work.annotations.update_direct(
                 annotation_id,
                 intervening,
+                expected_version=1,
                 actor_id="intervening-editor",
                 change_source="api",
             )
@@ -321,9 +295,10 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
             acquire_signature_locks(blocker_session, [intervening_signature])
 
             with pytest.raises(DBAPIError, match="lock timeout"):
-                AnnotationRepository(retained_session).update(
+                AnnotationRepository(retained_session).update_direct(
                     annotation_id,
                     candidate,
+                    expected_version=2,
                     actor_id="final-editor",
                     change_source="api",
                 )
@@ -352,9 +327,10 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
         assert retained.duplicate_base_signature == original_signature
 
         with unit_of_work_factory() as unit_of_work:
-            unit_of_work.annotations.update(
+            unit_of_work.annotations.update_direct(
                 annotation_id,
                 intervening,
+                expected_version=1,
                 actor_id="intervening-editor",
                 change_source="api",
             )
@@ -366,8 +342,9 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
             acquire_signature_locks(blocker_session, [intervening_signature])
 
             with pytest.raises(DBAPIError, match="lock timeout"):
-                AnnotationRepository(retained_session).soft_delete(
+                AnnotationRepository(retained_session).soft_delete_direct(
                     annotation_id,
+                    expected_version=2,
                     actor_id="deleter",
                     change_source="api",
                 )
@@ -381,8 +358,9 @@ def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
     annotation_id = _create_direct(unit_of_work_factory, validated_annotation)
 
     with unit_of_work_factory() as unit_of_work:
-        deleted = unit_of_work.annotations.soft_delete(
+        deleted = unit_of_work.annotations.soft_delete_direct(
             annotation_id,
+            expected_version=1,
             actor_id="deleter",
             change_source="api",
         )
@@ -394,7 +372,9 @@ def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
     with unit_of_work_factory() as unit_of_work:
         assert unit_of_work.annotations.get(annotation_id) is None
         retained = unit_of_work.annotations.get(annotation_id, include_deleted=True)
-        versions = unit_of_work.annotations.list_versions(annotation_id)
+        versions = unit_of_work.annotations.list_versions_page(
+            annotation_id, limit=100, offset=0
+        ).items
         assert retained is not None
         assert retained.status == AnnotationStatus.DELETED
         version_snapshots = tuple(
@@ -428,8 +408,9 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
 ) -> None:
     annotation_id = _create_direct(unit_of_work_factory, validated_annotation)
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete(
+        unit_of_work.annotations.soft_delete_direct(
             annotation_id,
+            expected_version=1,
             actor_id="deleter",
             change_source="api",
         )
@@ -437,15 +418,17 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
 
     with unit_of_work_factory() as unit_of_work:
         with pytest.raises(AnnotationDeletedError):
-            unit_of_work.annotations.update(
+            unit_of_work.annotations.update_direct(
                 annotation_id,
                 validated_annotation,
+                expected_version=2,
                 actor_id="editor",
                 change_source="api",
             )
         with pytest.raises(AnnotationDeletedError):
-            unit_of_work.annotations.soft_delete(
+            unit_of_work.annotations.soft_delete_direct(
                 annotation_id,
+                expected_version=2,
                 actor_id="deleter",
                 change_source="api",
             )
@@ -453,15 +436,17 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
     missing_id = uuid4()
     with unit_of_work_factory() as unit_of_work:
         with pytest.raises(AnnotationNotFoundError):
-            unit_of_work.annotations.update(
+            unit_of_work.annotations.update_direct(
                 missing_id,
                 validated_annotation,
+                expected_version=1,
                 actor_id="editor",
                 change_source="api",
             )
         with pytest.raises(AnnotationNotFoundError):
-            unit_of_work.annotations.soft_delete(
+            unit_of_work.annotations.soft_delete_direct(
                 missing_id,
+                expected_version=1,
                 actor_id="deleter",
                 change_source="api",
             )
@@ -472,17 +457,12 @@ def test_unit_of_work_rolls_back_without_explicit_commit(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    annotation_id = uuid4()
-
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.create(
+        annotation_id = unit_of_work.annotations.create_direct(
             annotation=validated_annotation,
             actor_id="creator",
-            change_source="api",
             owning_group_id="group-1",
-            record_origin=AnnotationOrigin.DIRECT,
-            annotation_id=annotation_id,
-        )
+        ).annotation_id
 
     with session_factory() as session:
         assert session.get(AnnotationRecord, annotation_id) is None

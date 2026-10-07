@@ -23,14 +23,11 @@ class AuditAction(StrEnum):
     CHANGE_SET_ACCEPTED = "change_set.accepted"
     CHANGE_SET_REJECTED = "change_set.rejected"
     CHANGE_SET_MARKED_STALE = "change_set.marked_stale"
-    IMPORT_COMPLETED = "import.completed"
-    EXPORT_COMPLETED = "export.completed"
     ONTOLOGY_REFRESHED = "ontology.refreshed"
     ENTITY_REFRESHED = "entity.refreshed"
     ENTITY_RETIRED = "entity.retired"
     ANNOTATION_REFRESH_PUBLISHED = "annotation_refresh.published"
     ANNOTATION_CUTOVER_PUBLISHED = "annotation_cutover.published"
-    ADMINISTRATIVE_CHANGE = "administrative.change"
 
 
 class AuditResult(StrEnum):

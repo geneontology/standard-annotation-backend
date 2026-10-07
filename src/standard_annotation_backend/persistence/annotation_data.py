@@ -54,6 +54,61 @@ class AnnotationPersistenceData:
     multivalued_field_values: tuple[MultivaluedFieldValue, ...]
     canonical_references: tuple[str, ...]
 
+    def column_values(self) -> dict[str, object]:
+        """Return the stored annotation data and its searchable column values.
+
+        The keys are the column names shared by the current annotation table and
+        the import staging table. Callers add the identifying columns, such as
+        `annotation_id` and `job_id`.
+
+        Returns:
+            Column names mapped to the values to store.
+        """
+        return {
+            "annotation_data": self.annotation_data,
+            "duplicate_base_signature": self.duplicate_base_signature,
+            "db_object_id": self.db_object_id,
+            "negation": self.negation,
+            "relation": self.relation,
+            "ontology_class_id": self.ontology_class_id,
+            "evidence_type": self.evidence_type,
+            "annotation_date": self.annotation_date,
+            "assigned_by": self.assigned_by,
+        }
+
+    def multivalued_rows(self) -> list[dict[str, object]]:
+        """Return one row of column values per stored multivalued field value.
+
+        Callers add the identifying columns, such as `annotation_id` and `job_id`.
+
+        Returns:
+            Rows with `field_name` and `field_value` keys, in the order of
+            `multivalued_field_values`.
+        """
+        return [
+            {"field_name": value.field_name, "field_value": value.field_value}
+            for value in self.multivalued_field_values
+        ]
+
+    def reference_rows(self) -> list[dict[str, object]]:
+        """Return one row of column values per canonical reference.
+
+        These rows let the database find possible duplicates by signature and
+        reference. Callers add the identifying columns, such as `annotation_id`
+        and `job_id`.
+
+        Returns:
+            Rows with `canonical_reference` and `duplicate_base_signature` keys, in
+            the order of `canonical_references`.
+        """
+        return [
+            {
+                "canonical_reference": reference,
+                "duplicate_base_signature": self.duplicate_base_signature,
+            }
+            for reference in self.canonical_references
+        ]
+
 
 def prepare_annotation_for_persistence(
     annotation: Annotation,
