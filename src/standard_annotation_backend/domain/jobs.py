@@ -1,6 +1,9 @@
-"""Define supported asynchronous job types and lifecycle states."""
+"""Define supported asynchronous job types, lifecycle states, and job errors."""
 
 from enum import StrEnum
+from uuid import UUID
+
+from standard_annotation_backend.domain.errors import NotFoundError
 
 
 class JobType(StrEnum):
@@ -28,3 +31,18 @@ ACTIVE_JOB_STATUSES = frozenset({JobStatus.QUEUED, JobStatus.RUNNING})
 
 TERMINAL_JOB_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED})
 """States of a finished job, which never changes state again."""
+
+
+class JobNotFoundError(NotFoundError):
+    """Report an operation that targets an unknown job.
+
+    Attributes:
+        job_id: Identifier of the job that was not found.
+    """
+
+    code = "job_not_found"
+    message = "Job was not found"
+
+    def __init__(self, job_id: UUID) -> None:
+        self.job_id = job_id
+        super().__init__()

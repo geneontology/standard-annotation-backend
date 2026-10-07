@@ -16,6 +16,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Protocol
 
+from standard_annotation_backend.domain.errors import InvalidInputError
 from standard_annotation_backend.domain.jobs import JobType
 
 SOURCE_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
@@ -148,18 +149,33 @@ class TerminalRefreshError(Exception):
         super().__init__(message or f"Refresh failed: {self.failure_code.value}")
 
 
-class UnknownSourceError(TerminalRefreshError):
+class UnknownSourceError(InvalidInputError, TerminalRefreshError):
     """Report a source key that is not configured for a refresh kind.
 
-    The message does not repeat the key, so it can be logged safely.
+    A refresh job fails with `failure_code`, and a request to start a refresh is
+    rejected with one validation issue at `source_key`. Neither message repeats
+    the key, so both can be logged safely.
+
+    Attributes:
+        kind: Refresh kind the key was looked up for.
+        source_key: The unconfigured key.
     """
 
     failure_code = RefreshFailureCode.UNKNOWN_SOURCE
+    code = "unknown_source"
+    message = "Source is not configured"
 
     def __init__(self, kind: RefreshKindName, source_key: str) -> None:
         self.kind = kind
         self.source_key = source_key
-        super().__init__("source is not configured")
+        # Only `TerminalRefreshError` initializes the exception. It comes after
+        # the SAB category in the bases, so its `super()` call reaches
+        # `Exception` and the text the refresh runner sees is unchanged.
+        TerminalRefreshError.__init__(self, "source is not configured")
+
+    def issue_location(self) -> tuple[str | int, ...]:
+        """Return the request field that names the source."""
+        return ("source_key",)
 
 
 class RetryableRefreshError(Exception):

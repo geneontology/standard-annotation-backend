@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.jobs import (
     ACTIVE_JOB_STATUSES,
+    JobNotFoundError,
     JobStatus,
     JobType,
 )
@@ -39,10 +40,6 @@ def lock_job_record(session: Session, job_id: UUID) -> JobRecord | None:
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-
-
-class JobNotFoundError(LookupError):
-    """Report an operation that targets an unknown job."""
 
 
 class InvalidJobTransitionError(RuntimeError):

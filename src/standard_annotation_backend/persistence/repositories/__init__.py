@@ -20,7 +20,6 @@ from standard_annotation_backend.persistence.repositories.entities import (
 )
 from standard_annotation_backend.persistence.repositories.jobs import (
     InvalidJobTransitionError,
-    JobNotFoundError,
     JobRepository,
 )
 from standard_annotation_backend.persistence.repositories.ontologies import (
@@ -39,7 +38,6 @@ __all__ = [
     "ChangeSetRepository",
     "EntityRepository",
     "InvalidJobTransitionError",
-    "JobNotFoundError",
     "JobRepository",
     "OntologyRepository",
     "OntologySnapshotPrunedError",

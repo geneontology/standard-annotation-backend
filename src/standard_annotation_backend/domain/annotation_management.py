@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+from standard_annotation_backend.domain.errors import ConflictError
 from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     SourceProvenance,
@@ -279,21 +280,30 @@ class AnnotationRefreshUnchanged:
         }
 
 
-class GroupSabManagedError(TerminalRefreshError):
+class GroupSabManagedError(ConflictError, TerminalRefreshError):
     """Report that SAB, not GPAD, is the source of truth for a group.
 
-    GPAD may never replace a `sab_managed` group's annotations. The message does
-    not name the group, so it can be logged and returned to API clients as is.
+    GPAD may never replace a `sab_managed` group's annotations. A refresh job
+    fails with `failure_code`, and a request to start one is rejected as a
+    conflict. Neither message names the group, so both can be logged safely.
 
     Attributes:
         group_key: The SAB-managed group.
     """
 
     failure_code = RefreshFailureCode.GROUP_SAB_MANAGED
+    code = "group_sab_managed"
+    message = (
+        "The source's group is managed in SAB, so GPAD can no longer replace its "
+        "annotations"
+    )
 
     def __init__(self, group_key: str) -> None:
         self.group_key = group_key
-        super().__init__("group is SAB-managed")
+        # Only `TerminalRefreshError` initializes the exception. It comes after
+        # the SAB category in the bases, so its `super()` call reaches
+        # `Exception` and the text the refresh runner sees is unchanged.
+        TerminalRefreshError.__init__(self, "group is SAB-managed")
 
 
 class NoValidAnnotationsError(ValueError):

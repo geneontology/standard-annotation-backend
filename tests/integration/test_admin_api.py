@@ -113,10 +113,19 @@ def test_unknown_source_is_422_unknown_source(
     response = integration_api_client.post(path, json={"source_key": "missing"})
 
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
-    error = response.json()["error"]
-    assert error["code"] == "unknown_source"
-    assert error["details"][0]["location"] == ["source_key"]
-    assert error["details"][0]["type"] == "unknown_source"
+    assert response.json() == {
+        "error": {
+            "code": "unknown_source",
+            "message": "Source is not configured",
+            "details": [
+                {
+                    "location": ["source_key"],
+                    "message": "Source is not configured",
+                    "type": "unknown_source",
+                }
+            ],
+        }
+    }
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(JobRecord)) == 0
 
@@ -204,7 +213,9 @@ def test_global_admin_reads_a_job_and_others_cannot(
     assert found.status_code == status.HTTP_200_OK
     assert found.json()["job_id"] == created["job_id"]
     assert missing.status_code == status.HTTP_404_NOT_FOUND
-    assert missing.json()["error"]["code"] == "job_not_found"
+    assert missing.json() == {
+        "error": {"code": "job_not_found", "message": "Job was not found"}
+    }
     assert denied.status_code == status.HTTP_403_FORBIDDEN
 
 
@@ -403,7 +414,15 @@ def test_sab_managed_group_is_409_and_creates_no_job(
     response = integration_api_client.post(path, json={"source_key": "mgi-gpad"})
 
     assert response.status_code == status.HTTP_409_CONFLICT
-    assert response.json()["error"]["code"] == "group_sab_managed"
+    assert response.json() == {
+        "error": {
+            "code": "group_sab_managed",
+            "message": (
+                "The source's group is managed in SAB, so GPAD can no longer "
+                "replace its annotations"
+            ),
+        }
+    }
     assert dispatched == []
     with session_factory() as session:
         assert (

@@ -13,12 +13,15 @@ from standard_annotation_backend.domain.auth import (
     RequestContext,
     authorize_role,
 )
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.jobs import (
+    JobNotFoundError,
+    JobStatus,
+    JobType,
+)
 from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.repositories import (
     InvalidJobTransitionError,
-    JobNotFoundError,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
@@ -26,7 +29,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
 )
 from standard_annotation_backend.services.audit_service import AuditService
 
-__all__ = ["InvalidJobTransitionError", "Job", "JobNotFoundError", "JobService"]
+__all__ = ["InvalidJobTransitionError", "Job", "JobService"]
 
 MAX_AUDITED_FAILURE_ISSUES = 10
 

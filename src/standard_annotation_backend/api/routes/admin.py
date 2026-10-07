@@ -1,6 +1,6 @@
 """Expose global-admin operations: reference data refreshes and job status."""
 
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, status
@@ -10,7 +10,11 @@ from standard_annotation_backend.api.dependencies import (
     get_job_service,
     get_unit_of_work_factory,
 )
-from standard_annotation_backend.api.errors import BEARER_ERROR_RESPONSES
+from standard_annotation_backend.api.errors import (
+    BEARER_ERROR_RESPONSES,
+    RequestValidationFailedError,
+    error_responses,
+)
 from standard_annotation_backend.api.examples import (
     ANNOTATION_REFRESH_EXAMPLES,
     ENTITY_REFRESH_EXAMPLES,
@@ -18,16 +22,22 @@ from standard_annotation_backend.api.examples import (
 )
 from standard_annotation_backend.api.models import (
     AnnotationCutoverRequest,
-    ApiErrorResponse,
     JobResource,
     RefreshJobsResource,
     RefreshRequest,
 )
 from standard_annotation_backend.config import get_settings
+from standard_annotation_backend.domain.annotation_management import (
+    GroupSabManagedError,
+)
 from standard_annotation_backend.domain.auth import (
     RequestContext,
 )
-from standard_annotation_backend.domain.refresh import RefreshKindName
+from standard_annotation_backend.domain.jobs import JobNotFoundError
+from standard_annotation_backend.domain.refresh import (
+    RefreshKindName,
+    UnknownSourceError,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.refresh_start_service import (
@@ -42,24 +52,6 @@ router = APIRouter(
     responses={**BEARER_ERROR_RESPONSES},
 )
 
-_SOURCE_KEY_ERRORS: dict[int | str, dict[str, Any]] = {
-    status.HTTP_422_UNPROCESSABLE_CONTENT: {
-        "model": ApiErrorResponse,
-        "description": (
-            "Request validation failed, or source_key is not configured for this "
-            "kind (unknown_source)."
-        ),
-    },
-}
-_GROUP_SAB_MANAGED_ERROR: dict[int | str, dict[str, Any]] = {
-    status.HTTP_409_CONFLICT: {
-        "model": ApiErrorResponse,
-        "description": (
-            "The source's group is SAB-managed, so GPAD can no longer replace its "
-            "annotations (group_sab_managed). No job is created."
-        ),
-    },
-}
 _SHARED_DESCRIPTION = (
     "Queued or running jobs for the same source are returned instead of "
     "duplicated. Requires the admin role with global scope."
@@ -115,7 +107,7 @@ def refresh_authorization(
     "/ontology-refreshes",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,
-    responses=_SOURCE_KEY_ERRORS,
+    responses=error_responses(RequestValidationFailedError, UnknownSourceError),
     summary="Refresh ontologies",
     description=(
         "Refresh configured ontologies from their OBO sources, activating a new "
@@ -140,7 +132,7 @@ def refresh_ontologies(
     "/entity-refreshes",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,
-    responses=_SOURCE_KEY_ERRORS,
+    responses=error_responses(RequestValidationFailedError, UnknownSourceError),
     summary="Refresh entity catalogs",
     description=(
         "Refresh configured entity catalogs from their GPI sources. Send {} to "
@@ -163,7 +155,9 @@ def refresh_entities(
     "/annotation-refreshes",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,
-    responses={**_SOURCE_KEY_ERRORS, **_GROUP_SAB_MANAGED_ERROR},
+    responses=error_responses(
+        RequestValidationFailedError, UnknownSourceError, GroupSabManagedError
+    ),
     summary="Replace groups' annotations from GPAD",
     description=(
         "Replace a group's annotations with the contents of its configured GPAD "
@@ -190,7 +184,9 @@ def refresh_annotations(
     "/annotation-cutovers",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,
-    responses={**_SOURCE_KEY_ERRORS, **_GROUP_SAB_MANAGED_ERROR},
+    responses=error_responses(
+        RequestValidationFailedError, UnknownSourceError, GroupSabManagedError
+    ),
     summary="Move a group to SAB management",
     description=(
         "Run the final GPAD import for one annotation source. It publishes only if "
@@ -214,7 +210,7 @@ def cut_over_annotations(
 @router.get(
     "/jobs/{job_id}",
     response_model=JobResource,
-    responses={status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse}},
+    responses=error_responses(JobNotFoundError),
     summary="Read a job",
     description=(
         "Return a job's status, progress, warnings, and result. Requires the "

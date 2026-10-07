@@ -22,9 +22,6 @@ from standard_annotation_backend.auth.github_oauth import (
     OAuthConfigurationError,
     OAuthUpstreamError,
 )
-from standard_annotation_backend.domain.annotation_management import (
-    GroupSabManagedError,
-)
 from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
     PermissionDeniedError,
@@ -46,11 +43,7 @@ from standard_annotation_backend.domain.errors import (
     UnavailableError,
     UpstreamError,
 )
-from standard_annotation_backend.domain.refresh import UnknownSourceError
 from standard_annotation_backend.domain.validation import ValidationIssue
-from standard_annotation_backend.persistence.repositories import (
-    JobNotFoundError,
-)
 from standard_annotation_backend.persistence.repositories.auth import (
     CredentialPersistenceError,
 )
@@ -330,12 +323,6 @@ def install_exception_handlers(app: FastAPI) -> None:
             "Authentication required",
             (("WWW-Authenticate", "Bearer"),),
         ),
-        GroupSabManagedError: _FixedErrorResponse(
-            status.HTTP_409_CONFLICT,
-            "group_sab_managed",
-            "The source's group is managed in SAB, so GPAD can no longer "
-            "replace its annotations",
-        ),
         PermissionDeniedError: _FixedErrorResponse(
             status.HTTP_403_FORBIDDEN,
             "permission_denied",
@@ -416,11 +403,6 @@ def install_exception_handlers(app: FastAPI) -> None:
             "ontology_unavailable",
             "The ontology required for closure search is unavailable",
         ),
-        JobNotFoundError: _FixedErrorResponse(
-            status.HTTP_404_NOT_FOUND,
-            "job_not_found",
-            "Job was not found",
-        ),
     }
 
     def fixed_error_handler(
@@ -440,24 +422,6 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     for error_type, error_response in fixed_errors.items():
         app.add_exception_handler(error_type, fixed_error_handler(error_response))
-
-    @app.exception_handler(UnknownSourceError)
-    def handle_unknown_source(
-        _request: Request, _error: UnknownSourceError
-    ) -> JSONResponse:
-        message = "Source is not configured"
-        return _error_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code="unknown_source",
-            message=message,
-            details=[
-                ApiValidationIssue(
-                    location=("source_key",),
-                    message=message,
-                    type="unknown_source",
-                )
-            ],
-        )
 
     @app.exception_handler(ApiError)
     def handle_api_error(_request: Request, error: ApiError) -> JSONResponse:
