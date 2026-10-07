@@ -1,7 +1,8 @@
 """Convert expected application failures into consistent HTTP responses."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -29,6 +30,23 @@ from standard_annotation_backend.domain.auth import (
     PermissionDeniedError,
 )
 from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
+from standard_annotation_backend.domain.errors import (
+    BadRequestError,
+    ConflictError,
+    DuplicatePeers,
+    ErrorDetails,
+    ForbiddenError,
+    InvalidInputError,
+    NotFoundError,
+    PreconditionFailedError,
+    PreconditionRequiredError,
+    SabError,
+    StaleChangeSet,
+    StaleVersion,
+    UnauthenticatedError,
+    UnavailableError,
+    UpstreamError,
+)
 from standard_annotation_backend.domain.refresh import UnknownSourceError
 from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.repositories import (
@@ -143,6 +161,7 @@ def _error_response(
     code: str,
     message: str,
     details: ApiErrorDetails | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     response = ApiErrorResponse(
         error=ApiErrorBody(code=code, message=message, details=details)
@@ -150,6 +169,7 @@ def _error_response(
     return JSONResponse(
         status_code=status_code,
         content=response.model_dump(mode="json", exclude_none=True),
+        headers=headers,
     )
 
 
@@ -157,6 +177,127 @@ def _validation_details(
     errors: Sequence[ValidationIssue],
 ) -> list[ApiValidationIssue]:
     return [ApiValidationIssue.model_validate(error) for error in errors]
+
+
+STATUS_BY_BASE: tuple[tuple[type[SabError], int], ...] = (
+    (BadRequestError, status.HTTP_400_BAD_REQUEST),
+    (UnauthenticatedError, status.HTTP_401_UNAUTHORIZED),
+    (ForbiddenError, status.HTTP_403_FORBIDDEN),
+    (NotFoundError, status.HTTP_404_NOT_FOUND),
+    (ConflictError, status.HTTP_409_CONFLICT),
+    (PreconditionFailedError, status.HTTP_412_PRECONDITION_FAILED),
+    (InvalidInputError, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    (PreconditionRequiredError, status.HTTP_428_PRECONDITION_REQUIRED),
+    (UpstreamError, status.HTTP_502_BAD_GATEWAY),
+    (UnavailableError, status.HTTP_503_SERVICE_UNAVAILABLE),
+)
+"""Map each outcome category to its HTTP status."""
+
+_STATUS_DESCRIPTIONS = {
+    status.HTTP_400_BAD_REQUEST: "Bad request",
+    status.HTTP_401_UNAUTHORIZED: "Authentication required",
+    status.HTTP_403_FORBIDDEN: "Forbidden",
+    status.HTTP_404_NOT_FOUND: "Not found",
+    status.HTTP_409_CONFLICT: "Conflict",
+    status.HTTP_412_PRECONDITION_FAILED: "Precondition failed",
+    status.HTTP_422_UNPROCESSABLE_CONTENT: "Invalid input",
+    status.HTTP_428_PRECONDITION_REQUIRED: "Precondition required",
+    status.HTTP_502_BAD_GATEWAY: "Upstream service failed",
+    status.HTTP_503_SERVICE_UNAVAILABLE: "Service unavailable",
+}
+
+_BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
+
+
+def status_for(error_type: type[SabError]) -> int:
+    """Return the HTTP status for an error class.
+
+    Raises:
+        TypeError: If the class derives from none of the outcome categories.
+    """
+    for base, status_code in STATUS_BY_BASE:
+        if issubclass(error_type, base):
+            return status_code
+    raise TypeError(f"{error_type.__name__} has no outcome category")
+
+
+def _headers_for(error_type: type[SabError]) -> Mapping[str, str] | None:
+    """Return HTTP-only headers for an error, such as the bearer challenge."""
+    if issubclass(error_type, AuthenticationRequiredError):
+        return _BEARER_CHALLENGE
+    return None
+
+
+def _api_details(details: ErrorDetails | None) -> ApiErrorDetails | None:
+    """Convert domain error details to the public detail models."""
+    match details:
+        case None:
+            return None
+        case DuplicatePeers(peer_ids=peer_ids):
+            return DuplicateAnnotationDetails(peer_ids=peer_ids)
+        case StaleVersion():
+            return StaleAnnotationVersionDetails(
+                annotation_id=details.annotation_id,
+                expected_version=details.expected_version,
+                current_version=details.current_version,
+            )
+        case StaleChangeSet():
+            return StaleChangeSetDetails(
+                change_set_id=details.change_set_id,
+                annotation_id=details.annotation_id,
+                expected_version=details.expected_version,
+                current_version=details.current_version,
+            )
+        case _:
+            return _validation_details(details)
+
+
+def sab_error_response(error: SabError) -> JSONResponse:
+    """Build the error envelope for an application error."""
+    error_type = type(error)
+    return _error_response(
+        status_code=status_for(error_type),
+        code=error.code,
+        message=error.message,
+        details=_api_details(error.details()),
+        headers=_headers_for(error_type),
+    )
+
+
+def error_responses(*error_types: type[SabError]) -> dict[int | str, dict[str, Any]]:
+    """Describe the error responses a route can return, for OpenAPI.
+
+    Errors are grouped by status. Each description lists the codes that status
+    can carry, so the documentation always matches what the handler produces.
+
+    Args:
+        error_types: Every application error the route can raise.
+
+    Returns:
+        A `responses` mapping for a FastAPI route or router.
+    """
+    codes_by_status: dict[int, list[str]] = {}
+    challenges: set[int] = set()
+    for error_type in error_types:
+        status_code = status_for(error_type)
+        codes = codes_by_status.setdefault(status_code, [])
+        if error_type.code not in codes:
+            codes.append(error_type.code)
+        if _headers_for(error_type):
+            challenges.add(status_code)
+    responses: dict[int | str, dict[str, Any]] = {}
+    for status_code in sorted(codes_by_status):
+        listed = ", ".join(f"`{code}`" for code in codes_by_status[status_code])
+        entry: dict[str, Any] = {
+            "model": ApiErrorResponse,
+            "description": f"{_STATUS_DESCRIPTIONS[status_code]}: {listed}.",
+        }
+        if status_code in challenges:
+            entry["headers"] = {
+                "WWW-Authenticate": {"schema": {"type": "string", "const": "Bearer"}}
+            }
+        responses[status_code] = entry
+    return responses
 
 
 def oauth_callback_failure_response() -> JSONResponse:
@@ -174,6 +315,10 @@ def install_exception_handlers(app: FastAPI) -> None:
     Args:
         app: FastAPI application that should use the handlers.
     """
+
+    @app.exception_handler(SabError)
+    def handle_sab_error(_request: Request, error: SabError) -> JSONResponse:
+        return sab_error_response(error)
 
     # "Fixed" means the response depends only on the exception type; no value
     # carried by the exception instance affects its status, body, or headers.
