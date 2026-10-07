@@ -11,7 +11,11 @@ from standard_annotation_backend.api.dependencies import (
     get_authenticated_context,
     get_comment_service,
 )
-from standard_annotation_backend.api.errors import BEARER_ERROR_RESPONSES
+from standard_annotation_backend.api.errors import (
+    BEARER_ERROR_RESPONSES,
+    RequestValidationFailedError,
+    error_responses,
+)
 from standard_annotation_backend.api.examples import (
     ANNOTATION_COMMENT_CREATE_EXAMPLES,
     ANNOTATION_COMMENT_EDIT_EXAMPLES,
@@ -20,9 +24,13 @@ from standard_annotation_backend.api.models import (
     AnnotationCommentPageResponse,
     AnnotationCommentRequest,
     AnnotationCommentResource,
-    ApiErrorResponse,
 )
+from standard_annotation_backend.domain.annotations import AnnotationNotFoundError
 from standard_annotation_backend.domain.auth import RequestContext
+from standard_annotation_backend.domain.comments import (
+    CommentNotFoundError,
+    InvalidCommentError,
+)
 from standard_annotation_backend.services.comment_service import CommentService
 
 router = APIRouter(
@@ -31,8 +39,12 @@ router = APIRouter(
     dependencies=[Depends(get_authenticated_context)],
     responses={
         **BEARER_ERROR_RESPONSES,
-        status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
+        **error_responses(
+            AnnotationNotFoundError,
+            CommentNotFoundError,
+            InvalidCommentError,
+            RequestValidationFailedError,
+        ),
     },
 )
 

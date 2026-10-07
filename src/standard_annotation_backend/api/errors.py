@@ -49,8 +49,6 @@ from standard_annotation_backend.domain.errors import (
 from standard_annotation_backend.domain.refresh import UnknownSourceError
 from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.repositories import (
-    CommentNotFoundError,
-    InvalidCommentError,
     JobNotFoundError,
 )
 from standard_annotation_backend.persistence.repositories.auth import (
@@ -433,16 +431,6 @@ def install_exception_handlers(app: FastAPI) -> None:
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "ontology_unavailable",
             "The ontology required for closure search is unavailable",
-        ),
-        CommentNotFoundError: _FixedErrorResponse(
-            status.HTTP_404_NOT_FOUND,
-            "comment_not_found",
-            "Comment was not found",
-        ),
-        InvalidCommentError: _FixedErrorResponse(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "invalid_comment",
-            "Comment body must contain non-whitespace text",
         ),
         JobNotFoundError: _FixedErrorResponse(
             status.HTTP_404_NOT_FOUND,

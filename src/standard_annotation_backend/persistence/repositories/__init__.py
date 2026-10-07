@@ -16,8 +16,6 @@ from standard_annotation_backend.persistence.repositories.change_sets import (
 )
 from standard_annotation_backend.persistence.repositories.comments import (
     AnnotationCommentRepository,
-    CommentNotFoundError,
-    InvalidCommentError,
 )
 from standard_annotation_backend.persistence.repositories.entities import (
     EntityRepository,
@@ -42,10 +40,8 @@ __all__ = [
     "AuthRepository",
     "ChangeSetNotFoundError",
     "ChangeSetRepository",
-    "CommentNotFoundError",
     "EntityRepository",
     "InvalidChangeSetStateError",
-    "InvalidCommentError",
     "InvalidJobTransitionError",
     "JobNotFoundError",
     "JobRepository",

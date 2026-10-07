@@ -10,10 +10,10 @@ from standard_annotation_backend.domain.auth import (
     RequestContext,
     authorize_role,
 )
+from standard_annotation_backend.domain.comments import CommentNotFoundError
 from standard_annotation_backend.persistence.models import AnnotationCommentRecord
 from standard_annotation_backend.persistence.repositories import (
     AuditRepository,
-    CommentNotFoundError,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,

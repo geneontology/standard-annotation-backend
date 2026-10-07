@@ -19,6 +19,7 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationVersionNotFoundError,
     EmptyAnnotationPatchError,
 )
+from standard_annotation_backend.domain.comments import InvalidCommentError
 from standard_annotation_backend.domain.errors import (
     BadRequestError,
     ConflictError,
@@ -184,6 +185,21 @@ def test_empty_patch_names_the_request_body() -> None:
             "type": "empty_annotation_patch",
         }
     ]
+
+
+def test_blank_comment_names_the_comment_body_field() -> None:
+    """A comment with no visible text is invalid input located at its body field."""
+    assert _body(InvalidCommentError())["error"] == {
+        "code": "invalid_comment",
+        "message": "Comment body must contain non-whitespace text",
+        "details": [
+            {
+                "location": ["body", "body"],
+                "message": "Comment body must contain non-whitespace text",
+                "type": "invalid_comment",
+            }
+        ],
+    }
 
 
 def test_request_validation_failure_reports_each_issue() -> None:

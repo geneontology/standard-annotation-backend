@@ -11,6 +11,10 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationNotFoundError,
     AnnotationStatus,
 )
+from standard_annotation_backend.domain.comments import (
+    CommentNotFoundError,
+    InvalidCommentError,
+)
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
 )
@@ -22,14 +26,6 @@ from standard_annotation_backend.persistence.repositories.pagination import (
     Page,
     load_page,
 )
-
-
-class CommentNotFoundError(LookupError):
-    """Raised when a comment write targets a missing or deleted comment."""
-
-
-class InvalidCommentError(ValueError):
-    """Raised when a comment body is blank."""
 
 
 class AnnotationCommentRepository:
@@ -270,13 +266,11 @@ class AnnotationCommentRepository:
         )
         comment = self.session.scalar(statement)
         if comment is None:
-            raise CommentNotFoundError(
-                f"comment {comment_id} was not found or is deleted"
-            )
+            raise CommentNotFoundError(comment_id)
         return comment
 
     @staticmethod
     def _validate_body(body: str) -> None:
         """Reject comment text that contains only whitespace."""
         if not body.strip():
-            raise InvalidCommentError("comment body must not be blank")
+            raise InvalidCommentError()

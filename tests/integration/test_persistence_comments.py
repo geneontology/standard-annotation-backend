@@ -17,6 +17,10 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationOrigin,
     ChangeSource,
 )
+from standard_annotation_backend.domain.comments import (
+    CommentNotFoundError,
+    InvalidCommentError,
+)
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
 )
@@ -28,8 +32,6 @@ from standard_annotation_backend.persistence.models import (
 from standard_annotation_backend.persistence.repositories import (
     AnnotationCommentRepository,
     AnnotationRepository,
-    CommentNotFoundError,
-    InvalidCommentError,
     Page,
 )
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
