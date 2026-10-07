@@ -55,31 +55,6 @@ these to `error_responses` alongside the route's own errors.
 """
 
 
-class ApiError(RuntimeError):
-    """Describe an HTTP error that can be returned safely to API clients.
-
-    Attributes:
-        status_code: HTTP status code for the response.
-        code: Stable identifier that clients can handle programmatically.
-        message: Plain-language explanation suitable for clients and logs.
-        details: Optional structured information specific to the error.
-    """
-
-    def __init__(
-        self,
-        *,
-        status_code: int,
-        code: str,
-        message: str,
-        details: ApiErrorDetails | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self.code = code
-        self.message = message
-        self.details = details
-        super().__init__(message)
-
-
 def _error_response(
     *,
     status_code: int,
@@ -259,6 +234,19 @@ def oauth_callback_failure_response() -> JSONResponse:
     )
 
 
+def unexpected_error_response() -> JSONResponse:
+    """Return a safe envelope for a failure that SAB does not expect.
+
+    The response names no cause, because unexpected exceptions can carry
+    secrets or internal details in their messages.
+    """
+    return _error_response(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        code="internal_error",
+        message="An unexpected error occurred",
+    )
+
+
 def install_exception_handlers(app: FastAPI) -> None:
     """Register the application's consistent error-response handlers.
 
@@ -269,15 +257,6 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(SabError)
     def handle_sab_error(_request: Request, error: SabError) -> JSONResponse:
         return sab_error_response(error)
-
-    @app.exception_handler(ApiError)
-    def handle_api_error(_request: Request, error: ApiError) -> JSONResponse:
-        return _error_response(
-            status_code=error.status_code,
-            code=error.code,
-            message=error.message,
-            details=error.details,
-        )
 
     @app.exception_handler(RequestValidationError)
     def handle_request_validation_error(

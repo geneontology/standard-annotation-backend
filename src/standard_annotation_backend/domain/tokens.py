@@ -147,6 +147,15 @@ def _one_calendar_year_after(created_at: datetime) -> datetime:
     )
 
 
+class InvalidExpirationError(ValueError):
+    """The requested token expiration time cannot be accepted.
+
+    Raised only for problems a client can cause with the requested expiration
+    time. Other `ValueError` failures from `resolve_expiration` indicate a
+    server-side defect.
+    """
+
+
 def resolve_expiration(expires_at: datetime, created_at: datetime) -> datetime:
     """Resolve a future UTC expiration no later than one calendar year from creation.
 
@@ -161,22 +170,24 @@ def resolve_expiration(expires_at: datetime, created_at: datetime) -> datetime:
         The requested expiration converted to UTC.
 
     Raises:
-        ValueError: If creation lacks a timezone or expiry is outside the allowed range.
+        InvalidExpirationError: If the expiry lacks a timezone or is outside the
+            allowed range.
+        ValueError: If the creation time lacks a timezone, which is a caller bug.
     """
     if created_at.tzinfo is None or created_at.utcoffset() is None:
         raise ValueError("creation timestamp must have a timezone")
     created_at = created_at.astimezone(UTC)
     maximum = _one_calendar_year_after(created_at)
     if expires_at.tzinfo is None or expires_at.utcoffset() is None:
-        raise ValueError("expiration timestamp must have a timezone")
+        raise InvalidExpirationError("expiration timestamp must have a timezone")
     try:
         expires_at = expires_at.astimezone(UTC)
     except OverflowError:
-        raise ValueError(
+        raise InvalidExpirationError(
             "expiration timestamp is outside the supported range"
         ) from None
     if not created_at < expires_at <= maximum:
-        raise ValueError(
+        raise InvalidExpirationError(
             "expiration must be in the future and within one calendar year"
         )
     return expires_at

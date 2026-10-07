@@ -14,7 +14,7 @@ from standard_annotation_backend.api.dependencies import (
     parse_if_match,
     require_expected_version,
 )
-from standard_annotation_backend.api.errors import ApiError, install_exception_handlers
+from standard_annotation_backend.api.errors import install_exception_handlers
 from standard_annotation_backend.api.models import (
     AnnotationCreateRequest,
     AnnotationPageResponse,
@@ -366,29 +366,6 @@ def test_write_openapi_documents_unknown_subject_failure(
     assert "unknown_db_object_id" in response["description"]
     assert response["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ApiErrorResponse"
-    }
-
-
-def test_malformed_query_api_error_keeps_its_stable_code() -> None:
-    app = FastAPI()
-    install_exception_handlers(app)
-
-    @app.get("/resource")
-    def route() -> None:
-        raise ApiError(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code="unknown_query_parameter",
-            message="Unknown query parameter: unexpected",
-        )
-
-    response = TestClient(app).get("/resource")
-
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert response.json() == {
-        "error": {
-            "code": "unknown_query_parameter",
-            "message": "Unknown query parameter: unexpected",
-        }
     }
 
 

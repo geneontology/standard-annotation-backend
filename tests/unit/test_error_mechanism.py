@@ -1,14 +1,19 @@
 """Tests for converting application errors into HTTP responses and docs."""
 
+import importlib
 import json
+import pkgutil
+import re
 from typing import Any
 from uuid import UUID
 
 from fastapi import status
 
+import standard_annotation_backend
 from standard_annotation_backend.api.csrf import CsrfValidationError
 from standard_annotation_backend.api.errors import (
     BEARER_ERRORS,
+    STATUS_BY_BASE,
     RequestValidationFailedError,
     error_responses,
     sab_error_response,
@@ -175,7 +180,10 @@ def test_deleted_and_missing_annotations_are_indistinguishable() -> None:
     assert _body(AnnotationDeletedError(ANNOTATION_ID)) == _body(
         AnnotationNotFoundError(ANNOTATION_ID)
     )
-    assert sab_error_response(AnnotationDeletedError(ANNOTATION_ID)).status_code == 404
+    assert (
+        sab_error_response(AnnotationDeletedError(ANNOTATION_ID)).status_code
+        == status.HTTP_404_NOT_FOUND
+    )
 
 
 def test_missing_version_has_its_own_code() -> None:
@@ -257,8 +265,14 @@ def test_only_missing_bearer_authentication_sends_a_bearer_challenge() -> None:
 
 def test_denied_permission_and_csrf_disclose_no_details() -> None:
     """Forbidden responses carry only their code and fixed message."""
-    assert sab_error_response(PermissionDeniedError()).status_code == 403
-    assert sab_error_response(CsrfValidationError()).status_code == 403
+    assert (
+        sab_error_response(PermissionDeniedError()).status_code
+        == status.HTTP_403_FORBIDDEN
+    )
+    assert (
+        sab_error_response(CsrfValidationError()).status_code
+        == status.HTTP_403_FORBIDDEN
+    )
     assert _body(PermissionDeniedError()) == {
         "error": {"code": "permission_denied", "message": "Permission denied"}
     }
@@ -303,3 +317,116 @@ def test_bearer_error_docs_list_each_code_and_the_challenge_header() -> None:
     }
     assert "`permission_denied`" in responses[403]["description"]
     assert "`credential_storage_unavailable`" in responses[503]["description"]
+
+
+_BASES = tuple(base for base, _ in STATUS_BY_BASE)
+
+
+def _assigned(error_type: type[SabError], name: str) -> bool:
+    """Return whether a class or one of its ancestors assigns `name`.
+
+    `SabError` and the outcome categories only annotate `code` and `message`,
+    so an assignment can only come from a class below them.
+    """
+    return any(name in klass.__dict__ for klass in error_type.__mro__)
+
+
+def _needs_definition(error_type: type[SabError]) -> bool:
+    """Return whether a class can be raised and so must be fully defined.
+
+    Grouping classes that assign no `code` and have subclasses are exempt.
+    """
+    return not error_type.__subclasses__() or _assigned(error_type, "code")
+
+
+def _definition_problems(error_type: type[SabError]) -> list[str]:
+    """Describe what keeps an error class from producing a safe response."""
+    problems: list[str] = []
+    for name in ("code", "message"):
+        if not _assigned(error_type, name) or not getattr(error_type, name):
+            problems.append(f"missing {name}")
+    if _assigned(error_type, "message") and re.search(
+        r"\{.*\}|%[sdr]", error_type.message
+    ):
+        problems.append("message has a format placeholder")
+    if sum(issubclass(error_type, base) for base in _BASES) != 1:
+        problems.append("not exactly one outcome category")
+    if (
+        issubclass(error_type, InvalidInputError)
+        and error_type.issue_location is InvalidInputError.issue_location
+        and error_type.details is InvalidInputError.details
+    ):
+        problems.append("no issue location or details")
+    return problems
+
+
+def _application_errors() -> list[type[SabError]]:
+    """Return every error class SAB defines that must be fully defined."""
+    for module in pkgutil.walk_packages(
+        standard_annotation_backend.__path__, "standard_annotation_backend."
+    ):
+        importlib.import_module(module.name)
+    found: list[type[SabError]] = []
+    pending = list(SabError.__subclasses__())
+    while pending:
+        error_type = pending.pop()
+        pending.extend(error_type.__subclasses__())
+        if (
+            error_type not in _BASES
+            and error_type.__module__.startswith("standard_annotation_backend.")
+            and _needs_definition(error_type)
+            and error_type not in found
+        ):
+            found.append(error_type)
+    return found
+
+
+def test_every_public_error_is_complete_and_unambiguous() -> None:
+    """Each error has a code, a fixed message, one outcome, and located issues."""
+    errors = _application_errors()
+    assert errors
+    problems = {
+        error_type.__name__: found
+        for error_type in errors
+        if (found := _definition_problems(error_type))
+    }
+    assert problems == {}
+    codes: dict[str, type[SabError]] = {}
+    for error_type in errors:
+        owner = codes.setdefault(error_type.code, error_type)
+        assert (
+            owner is error_type
+            or issubclass(error_type, owner)
+            or issubclass(owner, error_type)
+        ), f"{error_type.__name__} reuses {owner.__name__}'s code"
+
+
+def test_error_definition_check_reports_incomplete_errors() -> None:
+    """The completeness check flags errors that could not produce a response."""
+
+    class MissingCode(NotFoundError):
+        message = "Thing was not found"
+
+    class Unlocated(InvalidInputError):
+        code = "unlocated_thing"
+        message = "Thing is invalid"
+
+    class Templated(ConflictError):
+        code = "templated_thing"
+        message = "Thing {name} conflicts"
+
+    class Grouping(NotFoundError):
+        pass
+
+    class Member(Grouping):
+        code = "member_not_found"
+        message = "Member was not found"
+
+    assert _needs_definition(MissingCode)
+    assert _definition_problems(MissingCode) == ["missing code"]
+    assert _definition_problems(Unlocated) == ["no issue location or details"]
+    assert _definition_problems(Templated) == ["message has a format placeholder"]
+    assert not _needs_definition(Grouping)
+    assert _definition_problems(Member) == []
+    assert _definition_problems(_Missing) == []
+    assert _definition_problems(_Bad) == []

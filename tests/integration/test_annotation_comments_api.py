@@ -417,7 +417,7 @@ def test_audit_failure_rolls_back_the_complete_comment_mutation(
     session_factory: sessionmaker[Session],
     operation: str,
 ) -> None:
-    """A failed audit insert rolls back its comment mutation atomically."""
+    """A failed audit insert returns `internal_error` and rolls back the mutation."""
     annotation = _create_annotation(integration_api_client)
     annotation_id = annotation["annotation_id"]
     comment: dict[str, object] | None = None
@@ -438,23 +438,22 @@ def test_audit_failure_rolls_back_the_complete_comment_mutation(
 
     event.listen(AuditEventRecord, "before_insert", reject_audit_insert)
     try:
-        with pytest.raises(RuntimeError, match="audit storage unavailable"):
-            if operation == "create":
-                integration_api_client.post(
-                    f"/annotations/{annotation_id}/comments",
-                    json={"body": "Uncommitted comment"},
-                )
-            elif operation == "edit":
-                assert comment is not None
-                integration_api_client.patch(
-                    f"/annotations/{annotation_id}/comments/{comment['comment_id']}",
-                    json={"body": "Uncommitted edit"},
-                )
-            else:
-                assert comment is not None
-                integration_api_client.delete(
-                    f"/annotations/{annotation_id}/comments/{comment['comment_id']}"
-                )
+        if operation == "create":
+            response = integration_api_client.post(
+                f"/annotations/{annotation_id}/comments",
+                json={"body": "Uncommitted comment"},
+            )
+        elif operation == "edit":
+            assert comment is not None
+            response = integration_api_client.patch(
+                f"/annotations/{annotation_id}/comments/{comment['comment_id']}",
+                json={"body": "Uncommitted edit"},
+            )
+        else:
+            assert comment is not None
+            response = integration_api_client.delete(
+                f"/annotations/{annotation_id}/comments/{comment['comment_id']}"
+            )
     finally:
         event.remove(AuditEventRecord, "before_insert", reject_audit_insert)
 
@@ -470,6 +469,8 @@ def test_audit_failure_rolls_back_the_complete_comment_mutation(
             select(func.count()).select_from(AuditEventRecord)
         )
 
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert response.json()["error"]["code"] == "internal_error"
     assert audit_count_after == audit_count_before
     if operation == "create":
         assert stored_comments == ()

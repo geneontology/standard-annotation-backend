@@ -27,6 +27,7 @@ from standard_annotation_backend.domain.auth import (
 )
 from standard_annotation_backend.domain.tokens import (
     TOKEN_MANAGEMENT_SESSION_TTL,
+    InvalidExpirationError,
     InvalidTokenError,
     ManagementSessionRequiredError,
     OAuthCallbackError,
@@ -256,10 +257,10 @@ class TokenService:
                 raise InvalidTokenError(validation_issues(error)) from None
             try:
                 expires_at = resolve_expiration(data.expires_at, now)
-            except ValueError as error:
+            except InvalidExpirationError:
                 issue = ValidationIssue(
                     location=("expires_at",),
-                    message=str(error),
+                    message="Token expiration is outside the allowed range",
                     type=InvalidTokenError.code,
                 )
                 raise InvalidTokenError((issue,)) from None

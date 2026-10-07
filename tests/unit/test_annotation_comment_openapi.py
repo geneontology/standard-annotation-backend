@@ -44,6 +44,14 @@ def test_comment_openapi_documents_routes_models_errors_and_examples(
     assert set(collection["post"]["responses"]) == {"201"} | common_errors
     assert set(item["patch"]["responses"]) == {"200"} | common_errors
     assert set(item["delete"]["responses"]) == {"204"} | common_errors
+    for operation in collection.values():
+        description = operation["responses"]["404"]["description"]
+        assert "`annotation_not_found`" in description
+        assert "comment_not_found" not in description
+    for operation in item.values():
+        description = operation["responses"]["404"]["description"]
+        assert "`annotation_not_found`" in description
+        assert "`comment_not_found`" in description
     for operation in (*collection.values(), *item.values()):
         assert operation["security"] == [{"Bearer": []}]
 

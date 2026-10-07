@@ -210,7 +210,7 @@ def cut_over_annotations(
 @router.get(
     "/jobs/{job_id}",
     response_model=JobResource,
-    responses=error_responses(JobNotFoundError),
+    responses=error_responses(JobNotFoundError, RequestValidationFailedError),
     summary="Read a job",
     description=(
         "Return a job's status, progress, warnings, and result. Requires the "

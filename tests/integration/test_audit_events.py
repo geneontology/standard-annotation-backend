@@ -188,21 +188,20 @@ def test_audit_write_failure_rolls_back_the_complete_annotation_create(
     integration_api_client: TestClient,
     session_factory: sessionmaker[Session],
 ) -> None:
-    """An audit insertion failure leaves no annotation-related database state."""
+    """An audit insertion failure returns `internal_error` and stores nothing."""
 
     def reject_audit_insert(*_: object) -> None:
         raise RuntimeError("audit storage unavailable")
 
     event.listen(AuditEventRecord, "before_insert", reject_audit_insert)
     try:
-        with pytest.raises(RuntimeError, match="audit storage unavailable"):
-            integration_api_client.post(
-                "/annotations",
-                json={
-                    "owning_group_id": "group-1",
-                    "annotation": VALID_ANNOTATION,
-                },
-            )
+        response = integration_api_client.post(
+            "/annotations",
+            json={
+                "owning_group_id": "group-1",
+                "annotation": VALID_ANNOTATION,
+            },
+        )
     finally:
         event.remove(AuditEventRecord, "before_insert", reject_audit_insert)
 
@@ -218,4 +217,6 @@ def test_audit_write_failure_rolls_back_the_complete_annotation_create(
             )
         )
 
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert response.json()["error"]["code"] == "internal_error"
     assert counts == (0, 0, 0, 0, 0)

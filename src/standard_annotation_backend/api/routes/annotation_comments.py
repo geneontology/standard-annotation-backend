@@ -27,10 +27,7 @@ from standard_annotation_backend.api.models import (
 )
 from standard_annotation_backend.domain.annotations import AnnotationNotFoundError
 from standard_annotation_backend.domain.auth import RequestContext
-from standard_annotation_backend.domain.comments import (
-    CommentNotFoundError,
-    InvalidCommentError,
-)
+from standard_annotation_backend.domain.comments import CommentNotFoundError
 from standard_annotation_backend.services.comment_service import CommentService
 
 router = APIRouter(
@@ -40,8 +37,6 @@ router = APIRouter(
     responses=error_responses(
         *BEARER_ERRORS,
         AnnotationNotFoundError,
-        CommentNotFoundError,
-        InvalidCommentError,
         RequestValidationFailedError,
     ),
 )
@@ -121,7 +116,11 @@ def create_annotation_comment(
     return AnnotationCommentResource.from_service(result)
 
 
-@router.patch("/{comment_id}", response_model=AnnotationCommentResource)
+@router.patch(
+    "/{comment_id}",
+    response_model=AnnotationCommentResource,
+    responses=error_responses(AnnotationNotFoundError, CommentNotFoundError),
+)
 def edit_annotation_comment(
     annotation_id: UUID,
     comment_id: UUID,
@@ -154,7 +153,11 @@ def edit_annotation_comment(
     )
 
 
-@router.delete("/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{comment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=error_responses(AnnotationNotFoundError, CommentNotFoundError),
+)
 def delete_annotation_comment(
     annotation_id: UUID,
     comment_id: UUID,

@@ -388,9 +388,7 @@ def test_out_of_range_expiration_reports_a_located_invalid_token_issue(
             "details": [
                 {
                     "location": ["expires_at"],
-                    "message": (
-                        "expiration must be in the future and within one calendar year"
-                    ),
+                    "message": "Token expiration is outside the allowed range",
                     "type": "invalid_token",
                 }
             ],
