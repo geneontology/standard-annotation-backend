@@ -8,6 +8,10 @@ from uuid import UUID
 
 import pytest
 
+from standard_annotation_backend.domain.annotation_search import (
+    AnnotationFilter,
+    OwnershipScope,
+)
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationNotFoundError,
@@ -23,10 +27,7 @@ from standard_annotation_backend.domain.auth import (
     PermissionDeniedError,
     RequestContext,
 )
-from standard_annotation_backend.persistence.repositories import (
-    AnnotationSearchFilters,
-    Page,
-)
+from standard_annotation_backend.persistence.repositories import Page
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_service import (
     AnnotationService,
@@ -162,7 +163,8 @@ class FakeAnnotationRepository:
         self.last_actor_id: str | None = None
         self.last_owning_group_id: str | None = None
         self.last_expected_version: int | None = None
-        self.last_filters: AnnotationSearchFilters | None = None
+        self.last_criteria: AnnotationFilter | None = None
+        self.last_scope: OwnershipScope | None = None
         self.last_limit: int | None = None
         self.last_offset: int | None = None
         self.get_count = 0
@@ -237,12 +239,14 @@ class FakeAnnotationRepository:
 
     def list_active(
         self,
-        filters: AnnotationSearchFilters,
+        criteria: AnnotationFilter,
+        scope: OwnershipScope,
         *,
         limit: int,
         offset: int,
     ) -> Page[CurrentRecord]:
-        self.last_filters = filters
+        self.last_criteria = criteria
+        self.last_scope = scope
         self.last_limit = limit
         self.last_offset = offset
         return self.active_page
@@ -583,8 +587,7 @@ def test_list_maps_every_filter_and_preserves_page_metadata(
         total=7,
     )
 
-    result = service_harness.service.list(
-        context=REQUEST_CONTEXT,
+    criteria = AnnotationFilter(
         db_object_id="UniProtKB:P12345",
         negation=False,
         relation="RO:0002331",
@@ -595,22 +598,17 @@ def test_list_maps_every_filter_and_preserves_page_metadata(
         references=("PMID:1", "PMID:2"),
         with_or_from=("UniProtKB:Q1",),
         interacting_taxon_id=("NCBITaxon:9606",),
+    )
+
+    result = service_harness.service.list(
+        context=REQUEST_CONTEXT,
+        criteria=criteria,
         limit=25,
         offset=50,
     )
 
-    assert service_harness.repository.last_filters == AnnotationSearchFilters(
-        db_object_id="UniProtKB:P12345",
-        negation=False,
-        relation="RO:0002331",
-        ontology_class_id="GO:0008150",
-        evidence_type="ECO:0000314",
-        annotation_date=date(2026, 9, 9),
-        assigned_by="GO_Central",
-        references=("PMID:1", "PMID:2"),
-        with_or_from=("UniProtKB:Q1",),
-        interacting_taxon_id=("NCBITaxon:9606",),
-    )
+    assert service_harness.repository.last_criteria == criteria
+    assert service_harness.repository.last_scope == OwnershipScope()
     assert [item.annotation_id for item in result.items] == [FIXED_ID]
     assert result.items[0].annotation.db_object_id == "UniProtKB:P12345"
     assert result.total == 7
@@ -779,13 +777,15 @@ def test_in_scope_reads_and_sql_filter_selection(
         group_id=None if scope is AuthorizationScope.GLOBAL else "group-1",
     )
     assert service_harness.service.get(FIXED_ID, context=context).version == 1
-    service_harness.service.list(context=context, limit=1, offset=3)
-    filters = service_harness.repository.last_filters
-    assert filters is not None
-    assert filters.owning_group_id == (
+    service_harness.service.list(
+        context=context, criteria=AnnotationFilter(), limit=1, offset=3
+    )
+    ownership = service_harness.repository.last_scope
+    assert ownership is not None
+    assert ownership.owning_group_id == (
         None if scope is AuthorizationScope.GLOBAL else "group-1"
     )
-    assert filters.created_by == (
+    assert ownership.created_by == (
         "provisional-api-user" if scope is AuthorizationScope.SELF else None
     )
     assert service_harness.repository.last_limit == 1

@@ -5,7 +5,6 @@ from standard_annotation_backend.persistence.repositories.annotation_imports imp
 )
 from standard_annotation_backend.persistence.repositories.annotations import (
     AnnotationRepository,
-    AnnotationSearchFilters,
 )
 from standard_annotation_backend.persistence.repositories.audit import AuditRepository
 from standard_annotation_backend.persistence.repositories.auth import AuthRepository
@@ -32,7 +31,6 @@ __all__ = [
     "AnnotationCommentRepository",
     "AnnotationImportRepository",
     "AnnotationRepository",
-    "AnnotationSearchFilters",
     "AuditRepository",
     "AuthRepository",
     "ChangeSetRepository",

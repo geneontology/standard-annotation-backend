@@ -1,6 +1,5 @@
 """Expose HTTP operations for creating and managing current annotations."""
 
-from datetime import date
 from typing import Annotated
 from uuid import UUID
 
@@ -10,8 +9,6 @@ from standard_annotation_backend.api.dependencies import (
     IF_MATCH_OPENAPI,
     IfMatchRequiredError,
     MalformedIfMatchError,
-    PageLimit,
-    PageOffset,
     get_annotation_service,
     get_authenticated_context,
     require_expected_version,
@@ -27,6 +24,7 @@ from standard_annotation_backend.api.examples import (
 )
 from standard_annotation_backend.api.models import (
     AnnotationCreateRequest,
+    AnnotationListQuery,
     AnnotationPageResponse,
     AnnotationPatchRequest,
     AnnotationResource,
@@ -63,29 +61,13 @@ _ETAG_RESPONSE_HEADER = {
     "schema": {"type": "string", "example": '"1"'},
 }
 
-_FILTER_NAMES = frozenset(
-    {
-        "db_object_id",
-        "negation",
-        "relation",
-        "ontology_class_id",
-        "ontology_class_id_closure",
-        "references",
-        "evidence_type",
-        "with_or_from",
-        "interacting_taxon_id",
-        "annotation_date",
-        "assigned_by",
-    }
-)
-_PAGINATION_NAMES = frozenset({"limit", "offset"})
+_QUERY_PARAMETER_NAMES = frozenset(AnnotationListQuery.model_fields)
 _UNSUPPORTED_FILTER_NAMES = frozenset(
     {"annotation_extensions", "annotation_properties"}
 )
 
 
 def _reject_unknown_query_parameters(request: Request) -> None:
-    allowed_names = _FILTER_NAMES | _PAGINATION_NAMES
     names = tuple(name for name, _value in request.query_params.multi_items())
 
     unsupported_closure = next(
@@ -106,7 +88,9 @@ def _reject_unknown_query_parameters(request: Request) -> None:
     if unsupported_name is not None:
         raise UnsupportedFilterError(unsupported_name)
 
-    unknown_name = next((name for name in names if name not in allowed_names), None)
+    unknown_name = next(
+        (name for name in names if name not in _QUERY_PARAMETER_NAMES), None
+    )
     if unknown_name is not None:
         raise UnknownQueryParameterError(unknown_name)
 
@@ -131,27 +115,7 @@ def _reject_unknown_query_parameters(request: Request) -> None:
 def list_annotations(
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
     context: Annotated[RequestContext, Depends(get_authenticated_context)],
-    db_object_id: Annotated[str | None, Query()] = None,
-    negation: Annotated[bool | None, Query()] = None,
-    relation: Annotated[str | None, Query()] = None,
-    ontology_class_id: Annotated[str | None, Query()] = None,
-    ontology_class_id_closure: Annotated[
-        str | None,
-        Query(
-            description=(
-                "Return annotations whose ontology class is a descendant-or-self "
-                "of `ontology_class_id` through this loaded predicate."
-            )
-        ),
-    ] = None,
-    references: Annotated[list[str] | None, Query()] = None,
-    evidence_type: Annotated[str | None, Query()] = None,
-    with_or_from: Annotated[list[str] | None, Query()] = None,
-    interacting_taxon_id: Annotated[list[str] | None, Query()] = None,
-    annotation_date: Annotated[date | None, Query()] = None,
-    assigned_by: Annotated[str | None, Query()] = None,
-    limit: PageLimit = 50,
-    offset: PageOffset = 0,
+    query: Annotated[AnnotationListQuery, Query()],
 ) -> AnnotationPageResponse:
     """Return active annotations that match every supplied filter.
 
@@ -161,19 +125,7 @@ def list_annotations(
     Args:
         service: Annotation operations for this request.
         context: Authenticated identity and ownership scope for this query.
-        db_object_id: Database object identifier to match.
-        negation: Negation value to match.
-        relation: Relation identifier to match.
-        ontology_class_id: Ontology class identifier to match.
-        ontology_class_id_closure: Loaded predicate for descendant-or-self matching.
-        references: Reference identifiers that must all be present.
-        evidence_type: Evidence type identifier to match.
-        with_or_from: Supporting identifiers that must all be present.
-        interacting_taxon_id: Taxon identifiers that must all be present.
-        annotation_date: Annotation date to match.
-        assigned_by: Assigning organization to match.
-        limit: Maximum number of annotations to return.
-        offset: Number of matching annotations to skip.
+        query: Search filters and pagination parameters.
 
     Returns:
         The requested annotations and pagination information.
@@ -181,19 +133,9 @@ def list_annotations(
     return AnnotationPageResponse.from_service(
         service.list(
             context=context,
-            db_object_id=db_object_id,
-            negation=negation,
-            relation=relation,
-            ontology_class_id=ontology_class_id,
-            ontology_class_id_closure=ontology_class_id_closure,
-            references=tuple(references or ()),
-            evidence_type=evidence_type,
-            with_or_from=tuple(with_or_from or ()),
-            interacting_taxon_id=tuple(interacting_taxon_id or ()),
-            annotation_date=annotation_date,
-            assigned_by=assigned_by,
-            limit=limit,
-            offset=offset,
+            criteria=query.to_filter(),
+            limit=query.limit,
+            offset=query.offset,
         )
     )
 

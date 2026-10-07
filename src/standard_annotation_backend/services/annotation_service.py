@@ -1,11 +1,11 @@
 """Provide annotation operations shared by HTTP and other entry points."""
 
-from dataclasses import dataclass, replace
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotation_search import (
-    ClosureTermRequiredError,
+    AnnotationFilter,
     OntologyUnavailableError,
     UnsupportedClosurePredicateError,
 )
@@ -36,7 +36,7 @@ from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.resource_authorization import (
     load_authorized_annotation,
-    ownership_filters,
+    ownership_scope,
 )
 
 
@@ -285,70 +285,42 @@ class AnnotationService:
         self,
         *,
         context: RequestContext,
-        db_object_id: str | None = None,
-        negation: bool | None = None,
-        relation: str | None = None,
-        ontology_class_id: str | None = None,
-        ontology_class_id_closure: str | None = None,
-        evidence_type: str | None = None,
-        annotation_date: date | None = None,
-        assigned_by: str | None = None,
-        references: tuple[str, ...] = (),
-        with_or_from: tuple[str, ...] = (),
-        interacting_taxon_id: tuple[str, ...] = (),
+        criteria: AnnotationFilter,
         limit: int = 50,
         offset: int = 0,
     ) -> ResultPage[CurrentAnnotation]:
         """Find active annotations whose stored fields match every supplied filter.
 
-        Repeating a list-valued filter requires an annotation to contain every
-        supplied value. Results use a stable order so offset pagination is repeatable.
+        Results are limited to the caller's ownership scope and use a stable order
+        so offset pagination is repeatable.
 
         Args:
             context: Authenticated identity and ownership scope for the query.
-            db_object_id: Database object identifier to match.
-            negation: Negation value to match.
-            relation: Relation identifier to match.
-            ontology_class_id: Ontology class identifier to match.
-            ontology_class_id_closure: Predicate used for descendant-or-self search.
-            evidence_type: Evidence type identifier to match.
-            annotation_date: Annotation date to match.
-            assigned_by: Assigning organization to match.
-            references: Reference identifiers that must all be present.
-            with_or_from: Supporting identifiers that must all be present.
-            interacting_taxon_id: Taxon identifiers that must all be present.
+            criteria: Field values that matching annotations must have.
             limit: Maximum number of annotations to return.
             offset: Number of matching annotations to skip.
 
         Returns:
             The requested annotations and pagination information.
+
+        Raises:
+            OntologyUnavailableError: If closure search is requested while no GO
+                ontology is active.
+            UnsupportedClosurePredicateError: If the closure predicate is not
+                loaded for the active GO ontology.
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
-        if ontology_class_id_closure is not None and ontology_class_id is None:
-            raise ClosureTermRequiredError
-        filters = replace(
-            ownership_filters(context),
-            db_object_id=db_object_id,
-            negation=negation,
-            relation=relation,
-            ontology_class_id=ontology_class_id,
-            ontology_class_id_closure=ontology_class_id_closure,
-            evidence_type=evidence_type,
-            annotation_date=annotation_date,
-            assigned_by=assigned_by,
-            references=references,
-            with_or_from=with_or_from,
-            interacting_taxon_id=interacting_taxon_id,
-        )
+        scope = ownership_scope(context)
         with self._unit_of_work_factory() as unit_of_work:
-            if ontology_class_id_closure is not None:
+            if criteria.ontology_class_id_closure is not None:
                 active = unit_of_work.ontologies.get_active(OntologyKey.GO)
                 if active is None:
                     raise OntologyUnavailableError
-                if ontology_class_id_closure not in active.loaded_predicates:
+                if criteria.ontology_class_id_closure not in active.loaded_predicates:
                     raise UnsupportedClosurePredicateError("ontology_class_id_closure")
             page = unit_of_work.annotations.list_active(
-                filters,
+                criteria,
+                scope,
                 limit=limit,
                 offset=offset,
             )

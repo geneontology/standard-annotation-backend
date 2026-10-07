@@ -8,12 +8,15 @@ import pytest
 from seeding import insert_annotation
 from sqlalchemy import event
 
+from standard_annotation_backend.domain.annotation_search import (
+    AnnotationFilter,
+    OwnershipScope,
+)
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
     ChangeSource,
 )
-from standard_annotation_backend.persistence import repositories
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 UnitOfWorkFactory = Callable[[], SqlAlchemyUnitOfWork]
@@ -47,38 +50,38 @@ def _create(
 def _scalar_filters(
     field_name: str,
     field_value: object,
-) -> repositories.AnnotationSearchFilters:
+) -> AnnotationFilter:
     if field_name == "negation":
         assert isinstance(field_value, bool)
-        return repositories.AnnotationSearchFilters(negation=field_value)
+        return AnnotationFilter(negation=field_value)
     if field_name == "annotation_date":
         assert isinstance(field_value, date)
-        return repositories.AnnotationSearchFilters(annotation_date=field_value)
+        return AnnotationFilter(annotation_date=field_value)
 
     assert isinstance(field_value, str)
     if field_name == "db_object_id":
-        return repositories.AnnotationSearchFilters(db_object_id=field_value)
+        return AnnotationFilter(db_object_id=field_value)
     if field_name == "relation":
-        return repositories.AnnotationSearchFilters(relation=field_value)
+        return AnnotationFilter(relation=field_value)
     if field_name == "ontology_class_id":
-        return repositories.AnnotationSearchFilters(ontology_class_id=field_value)
+        return AnnotationFilter(ontology_class_id=field_value)
     if field_name == "evidence_type":
-        return repositories.AnnotationSearchFilters(evidence_type=field_value)
+        return AnnotationFilter(evidence_type=field_value)
     if field_name == "assigned_by":
-        return repositories.AnnotationSearchFilters(assigned_by=field_value)
+        return AnnotationFilter(assigned_by=field_value)
     raise AssertionError(f"unsupported scalar filter {field_name}")
 
 
 def _multivalued_filters(
     field_name: str,
     values: tuple[str, ...],
-) -> repositories.AnnotationSearchFilters:
+) -> AnnotationFilter:
     if field_name == "references":
-        return repositories.AnnotationSearchFilters(references=values)
+        return AnnotationFilter(references=values)
     if field_name == "with_or_from":
-        return repositories.AnnotationSearchFilters(with_or_from=values)
+        return AnnotationFilter(with_or_from=values)
     if field_name == "interacting_taxon_id":
-        return repositories.AnnotationSearchFilters(interacting_taxon_id=values)
+        return AnnotationFilter(interacting_taxon_id=values)
     raise AssertionError(f"unsupported multivalued filter {field_name}")
 
 
@@ -137,7 +140,8 @@ def test_scalar_search_returns_stable_page_and_exact_total(
 
     with unit_of_work_factory() as unit_of_work:
         page = unit_of_work.annotations.list_active(
-            repositories.AnnotationSearchFilters(assigned_by="MGI"),
+            AnnotationFilter(assigned_by="MGI"),
+            OwnershipScope(),
             limit=2,
             offset=1,
         )
@@ -148,7 +152,8 @@ def test_scalar_search_returns_stable_page_and_exact_total(
         ]
 
         empty_page = unit_of_work.annotations.list_active(
-            repositories.AnnotationSearchFilters(assigned_by="MGI"),
+            AnnotationFilter(assigned_by="MGI"),
+            OwnershipScope(),
             limit=2,
             offset=3,
         )
@@ -202,7 +207,8 @@ def test_active_page_total_and_items_share_one_database_snapshot(
             once=True,
         )
         page = reader.annotations.list_active(
-            repositories.AnnotationSearchFilters(assigned_by="MGI"),
+            AnnotationFilter(assigned_by="MGI"),
+            OwnershipScope(),
             limit=10,
             offset=0,
         )
@@ -243,7 +249,8 @@ def test_scalar_search_excludes_soft_deleted_rows_from_items_and_total(
 
     with unit_of_work_factory() as unit_of_work:
         page = unit_of_work.annotations.list_active(
-            repositories.AnnotationSearchFilters(assigned_by="MGI"),
+            AnnotationFilter(assigned_by="MGI"),
+            OwnershipScope(),
             limit=10,
             offset=0,
         )
@@ -297,6 +304,7 @@ def test_scalar_search_applies_each_supported_filter(
     with unit_of_work_factory() as unit_of_work:
         page = unit_of_work.annotations.list_active(
             _scalar_filters(filter_name, filter_value),
+            OwnershipScope(),
             limit=10,
             offset=0,
         )
@@ -340,6 +348,7 @@ def test_multivalued_search_requires_every_requested_value(
     with unit_of_work_factory() as unit_of_work:
         page = unit_of_work.annotations.list_active(
             _multivalued_filters(field_name, (first_value, second_value)),
+            OwnershipScope(),
             limit=10,
             offset=0,
         )
@@ -385,10 +394,11 @@ def test_multivalued_search_combines_with_scalar_filters(
 
     with unit_of_work_factory() as unit_of_work:
         page = unit_of_work.annotations.list_active(
-            repositories.AnnotationSearchFilters(
+            AnnotationFilter(
                 assigned_by="MGI",
                 references=("PMID:1", "PMID:2"),
             ),
+            OwnershipScope(),
             limit=10,
             offset=0,
         )

@@ -15,7 +15,9 @@ from uuid import UUID
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 
+from standard_annotation_backend.api.dependencies import PageLimit, PageOffset
 from standard_annotation_backend.api.examples import CHANGE_SET_PROPOSAL_EXAMPLES
+from standard_annotation_backend.domain.annotation_search import AnnotationFilter
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationExtension,
@@ -164,6 +166,92 @@ class AnnotationPatchRequest(BaseModel):
             Top-level field names mapped to their JSON-compatible replacement values.
         """
         return self.model_dump(mode="json", exclude_unset=True)
+
+
+class AnnotationSearchQuery(BaseModel):
+    """Describe the query parameters that filter an annotation search.
+
+    Each scalar parameter must match exactly. Repeating a list-valued parameter
+    requires every supplied value to be present. Unknown parameter names are not
+    rejected here; the search route reports them with its own error codes.
+
+    Attributes:
+        db_object_id: Database object identifier to match.
+        negation: Negation value to match.
+        relation: Relation identifier to match.
+        ontology_class_id: Ontology class identifier to match.
+        ontology_class_id_closure: Loaded predicate for descendant-or-self matching.
+        references: Reference identifiers that must all be present.
+        evidence_type: Evidence type identifier to match.
+        with_or_from: Supporting identifiers that must all be present.
+        interacting_taxon_id: Taxon identifiers that must all be present.
+        annotation_date: Annotation date to match.
+        assigned_by: Assigning organization to match.
+    """
+
+    db_object_id: str | None = None
+    negation: bool | None = None
+    relation: str | None = None
+    ontology_class_id: str | None = None
+    ontology_class_id_closure: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Return annotations whose ontology class is a descendant-or-self "
+                "of `ontology_class_id` through this loaded predicate."
+            )
+        ),
+    ] = None
+    references: list[str] | None = None
+    evidence_type: str | None = None
+    with_or_from: list[str] | None = None
+    interacting_taxon_id: list[str] | None = None
+    annotation_date: date | None = None
+    assigned_by: str | None = None
+
+    def to_filter(self) -> AnnotationFilter:
+        """Return these parameters as annotation search criteria.
+
+        Call this from the route body rather than during query parsing so that
+        an invalid combination is reported with its own error code instead of as
+        a generic request-validation failure.
+
+        Returns:
+            Criteria with omitted list parameters represented as empty tuples.
+
+        Raises:
+            ClosureTermRequiredError: If `ontology_class_id_closure` is supplied
+                without `ontology_class_id`.
+        """
+        return AnnotationFilter(
+            db_object_id=self.db_object_id,
+            negation=self.negation,
+            relation=self.relation,
+            ontology_class_id=self.ontology_class_id,
+            ontology_class_id_closure=self.ontology_class_id_closure,
+            references=tuple(self.references or ()),
+            evidence_type=self.evidence_type,
+            with_or_from=tuple(self.with_or_from or ()),
+            interacting_taxon_id=tuple(self.interacting_taxon_id or ()),
+            annotation_date=self.annotation_date,
+            assigned_by=self.assigned_by,
+        )
+
+
+class AnnotationListQuery(AnnotationSearchQuery):
+    """Describe every query parameter accepted by the annotation search route.
+
+    FastAPI documents a query-parameter model as individual parameters only when
+    it is the route's sole query input, so the pagination parameters are part of
+    this model rather than separate route arguments.
+
+    Attributes:
+        limit: Maximum number of annotations to return.
+        offset: Number of matching annotations to skip.
+    """
+
+    limit: PageLimit = 50
+    offset: PageOffset = 0
 
 
 class AnnotationResource(BaseModel):

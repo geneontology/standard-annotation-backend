@@ -1,13 +1,16 @@
 """Read and write annotations in caller-managed transactions."""
 
 from collections.abc import Iterable
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, delete, exists, select
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.annotation_search import (
+    AnnotationFilter,
+    OwnershipScope,
+)
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationDeletedError,
@@ -45,70 +48,126 @@ from standard_annotation_backend.persistence.repositories.pagination import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class AnnotationSearchFilters:
-    """Hold exact-match criteria for finding active annotations.
+def _closure_condition(term_id: str, predicate_id: str) -> ColumnElement[bool]:
+    """Match annotations whose ontology class is the term or one of its descendants.
 
-    Each scalar value must match exactly. Every value in a tuple must be present
-    in the corresponding list-valued annotation field.
+    Descendants are read from the closure (precomputed ancestor relationships)
+    of the active GO ontology through the given predicate.
 
-    Attributes:
-        db_object_id: Database object identifier to match.
-        negation: Negation value to match.
-        relation: Relation identifier to match.
-        ontology_class_id: Ontology class identifier to match.
-        evidence_type: Evidence type identifier to match.
-        annotation_date: Annotation date to match.
-        assigned_by: Assigning organization to match.
-        references: Reference identifiers that must all be present.
-        with_or_from: Supporting identifiers that must all be present.
-        interacting_taxon_id: Taxon identifiers that must all be present.
-        owning_group_id: Group whose annotations may be returned.
-        created_by: Actor recorded in the immutable first annotation version.
+    Args:
+        term_id: Ontology term whose descendants-or-self are matched.
+        predicate_id: Loaded closure predicate relating descendants to the term.
+
+    Returns:
+        An SQL condition on the annotation's ontology class.
     """
+    return exists(
+        select(1)
+        .select_from(OntologyClosureRecord)
+        .join(
+            OntologyMetadataRecord,
+            OntologyMetadataRecord.version_id == OntologyClosureRecord.version_id,
+        )
+        .where(
+            OntologyMetadataRecord.ontology_key == OntologyKey.GO.value,
+            OntologyMetadataRecord.active.is_(True),
+            OntologyClosureRecord.subject_term_id == AnnotationRecord.ontology_class_id,
+            OntologyClosureRecord.object_term_id == term_id,
+            OntologyClosureRecord.predicate_id == predicate_id,
+        )
+    )
 
-    db_object_id: str | None = None
-    negation: bool | None = None
-    relation: str | None = None
-    ontology_class_id: str | None = None
-    ontology_class_id_closure: str | None = None
-    evidence_type: str | None = None
-    annotation_date: date | None = None
-    assigned_by: str | None = None
-    references: tuple[str, ...] = ()
-    with_or_from: tuple[str, ...] = ()
-    interacting_taxon_id: tuple[str, ...] = ()
-    owning_group_id: str | None = None
-    created_by: str | None = None
+
+def _multivalued_condition(field_name: str, field_value: str) -> ColumnElement[bool]:
+    """Match annotations whose list-valued field contains a value.
+
+    Args:
+        field_name: Stored name of the list-valued annotation field.
+        field_value: Value that the field must contain.
+
+    Returns:
+        An SQL condition on the annotation's stored list values.
+    """
+    return exists(
+        select(1).where(
+            AnnotationMultivaluedFieldValueRecord.annotation_id
+            == AnnotationRecord.annotation_id,
+            AnnotationMultivaluedFieldValueRecord.field_name == field_name,
+            AnnotationMultivaluedFieldValueRecord.field_value == field_value,
+        )
+    )
 
 
-def _ownership_conditions(
-    owning_group_id: str | None, created_by: str | None
-) -> tuple[ColumnElement[bool], ...]:
+def _criteria_conditions(criteria: AnnotationFilter) -> list[ColumnElement[bool]]:
+    """Build the SQL conditions for every supplied search criterion.
+
+    Args:
+        criteria: Field values that matching annotations must have.
+
+    Returns:
+        SQL conditions that a matching annotation must satisfy together.
+    """
+    conditions: list[ColumnElement[bool]] = []
+    if criteria.db_object_id is not None:
+        conditions.append(AnnotationRecord.db_object_id == criteria.db_object_id)
+    if criteria.negation is not None:
+        conditions.append(AnnotationRecord.negation == criteria.negation)
+    if criteria.relation is not None:
+        conditions.append(AnnotationRecord.relation == criteria.relation)
+    if criteria.ontology_class_id is not None:
+        if criteria.ontology_class_id_closure is not None:
+            conditions.append(
+                _closure_condition(
+                    criteria.ontology_class_id, criteria.ontology_class_id_closure
+                )
+            )
+        else:
+            conditions.append(
+                AnnotationRecord.ontology_class_id == criteria.ontology_class_id
+            )
+    if criteria.evidence_type is not None:
+        conditions.append(AnnotationRecord.evidence_type == criteria.evidence_type)
+    if criteria.annotation_date is not None:
+        conditions.append(AnnotationRecord.annotation_date == criteria.annotation_date)
+    if criteria.assigned_by is not None:
+        conditions.append(AnnotationRecord.assigned_by == criteria.assigned_by)
+    conditions.extend(
+        _multivalued_condition("references", value) for value in criteria.references
+    )
+    conditions.extend(
+        _multivalued_condition("with_or_from", value) for value in criteria.with_or_from
+    )
+    conditions.extend(
+        _multivalued_condition("interacting_taxon_id", value)
+        for value in criteria.interacting_taxon_id
+    )
+    return conditions
+
+
+def _ownership_conditions(scope: OwnershipScope) -> list[ColumnElement[bool]]:
     """Build ownership conditions to apply before pagination.
 
     Args:
-        owning_group_id: Group key that returned annotations must match.
-        created_by: Actor on the first annotation version that results must match.
+        scope: Group and first-version creator that results must match.
 
     Returns:
         SQL conditions for the requested ownership restrictions.
     """
     conditions: list[ColumnElement[bool]] = []
-    if owning_group_id is not None:
-        conditions.append(AnnotationRecord.owning_group_id == owning_group_id)
-    if created_by is not None:
+    if scope.owning_group_id is not None:
+        conditions.append(AnnotationRecord.owning_group_id == scope.owning_group_id)
+    if scope.created_by is not None:
         conditions.append(
             exists(
                 select(1).where(
                     AnnotationVersionRecord.annotation_id
                     == AnnotationRecord.annotation_id,
                     AnnotationVersionRecord.version == 1,
-                    AnnotationVersionRecord.actor_id == created_by,
+                    AnnotationVersionRecord.actor_id == scope.created_by,
                 )
             )
         )
-    return tuple(conditions)
+    return conditions
 
 
 class AnnotationRepository:
@@ -204,15 +263,17 @@ class AnnotationRepository:
 
     def list_active(
         self,
-        filters: AnnotationSearchFilters,
+        criteria: AnnotationFilter,
+        scope: OwnershipScope,
         *,
         limit: int,
         offset: int,
     ) -> Page[AnnotationRecord]:
-        """List active annotations that match every supplied filter.
+        """List active annotations that match every supplied criterion.
 
         Args:
-            filters: Exact field values that matching annotations must contain.
+            criteria: Field values that matching annotations must have.
+            scope: Ownership restrictions applied before pagination.
             limit: Maximum number of annotations to return.
             offset: Number of matching annotations to skip.
 
@@ -221,67 +282,9 @@ class AnnotationRepository:
         """
         statement = select(AnnotationRecord).where(
             AnnotationRecord.status == AnnotationStatus.ACTIVE,
-            *_ownership_conditions(filters.owning_group_id, filters.created_by),
+            *_ownership_conditions(scope),
+            *_criteria_conditions(criteria),
         )
-        for field_name in (
-            "db_object_id",
-            "negation",
-            "relation",
-            "ontology_class_id",
-            "evidence_type",
-            "annotation_date",
-            "assigned_by",
-        ):
-            value = getattr(filters, field_name)
-            if value is not None:
-                if (
-                    field_name == "ontology_class_id"
-                    and filters.ontology_class_id_closure is not None
-                ):
-                    statement = statement.where(
-                        exists(
-                            select(1)
-                            .select_from(OntologyClosureRecord)
-                            .join(
-                                OntologyMetadataRecord,
-                                OntologyMetadataRecord.version_id
-                                == OntologyClosureRecord.version_id,
-                            )
-                            .where(
-                                OntologyMetadataRecord.ontology_key
-                                == OntologyKey.GO.value,
-                                OntologyMetadataRecord.active.is_(True),
-                                OntologyClosureRecord.subject_term_id
-                                == AnnotationRecord.ontology_class_id,
-                                OntologyClosureRecord.object_term_id == value,
-                                OntologyClosureRecord.predicate_id
-                                == filters.ontology_class_id_closure,
-                            )
-                        )
-                    )
-                    continue
-                statement = statement.where(
-                    getattr(AnnotationRecord, field_name) == value
-                )
-        for field_name in (
-            "references",
-            "with_or_from",
-            "interacting_taxon_id",
-        ):
-            for field_value in getattr(filters, field_name):
-                statement = statement.where(
-                    exists(
-                        select(1).where(
-                            AnnotationMultivaluedFieldValueRecord.annotation_id
-                            == AnnotationRecord.annotation_id,
-                            AnnotationMultivaluedFieldValueRecord.field_name
-                            == field_name,
-                            AnnotationMultivaluedFieldValueRecord.field_value
-                            == field_value,
-                        )
-                    )
-                )
-
         return load_page(
             self.session,
             statement,

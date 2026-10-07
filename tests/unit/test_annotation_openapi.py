@@ -4,6 +4,8 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from standard_annotation_backend.api.models import AnnotationSearchQuery
+
 
 def test_creation_ownership_is_optional_and_documents_token_derivation(
     client: TestClient,
@@ -137,6 +139,20 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
             parameter["name"] == "If-Match" and parameter["in"] == "header"
             for parameter in parameters
         )
+
+
+def test_annotation_search_documents_exactly_its_filters_and_pagination(
+    client: TestClient,
+) -> None:
+    """Search documents one query parameter per filter plus `limit` and `offset`."""
+    parameters = client.get("/openapi.json").json()["paths"]["/annotations"]["get"][
+        "parameters"
+    ]
+
+    assert all(parameter["in"] == "query" for parameter in parameters)
+    assert sorted(parameter["name"] for parameter in parameters) == sorted(
+        [*AnnotationSearchQuery.model_fields, "limit", "offset"]
+    )
 
 
 @pytest.mark.parametrize(

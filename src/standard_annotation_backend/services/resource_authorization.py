@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+from standard_annotation_backend.domain.annotation_search import OwnershipScope
 from standard_annotation_backend.domain.annotations import AnnotationNotFoundError
 from standard_annotation_backend.domain.auth import (
     AuthorizationContext,
@@ -12,29 +13,26 @@ from standard_annotation_backend.domain.auth import (
     authorize,
 )
 from standard_annotation_backend.persistence.models import AnnotationRecord
-from standard_annotation_backend.persistence.repositories import (
-    AnnotationRepository,
-    AnnotationSearchFilters,
-)
+from standard_annotation_backend.persistence.repositories import AnnotationRepository
 
 
-def ownership_filters(context: AuthorizationContext) -> AnnotationSearchFilters:
-    """Build annotation query filters for the selected ownership scope.
+def ownership_scope(context: AuthorizationContext) -> OwnershipScope:
+    """Build the annotation search restriction for the selected ownership scope.
 
     Args:
         context: Trusted identity and selected authorization.
 
     Returns:
-        Filters restricting results by group and, for self scope, creator.
+        A scope restricting results by group and, for self scope, creator.
 
     Raises:
         PermissionDeniedError: If a restricted scope has no selected group.
     """
     if context.scope is AuthorizationScope.GLOBAL:
-        return AnnotationSearchFilters()
+        return OwnershipScope()
     if context.group_id is None:
         raise PermissionDeniedError
-    return AnnotationSearchFilters(
+    return OwnershipScope(
         owning_group_id=context.group_id,
         created_by=context.actor_id
         if context.scope is AuthorizationScope.SELF
