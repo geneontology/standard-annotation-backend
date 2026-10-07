@@ -10,9 +10,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from standard_annotation_backend.api.errors import (
+    OAuthCallbackFailedError,
+    UnexpectedError,
     install_exception_handlers,
-    oauth_callback_failure_response,
-    unexpected_error_response,
+    sab_error_response,
 )
 from standard_annotation_backend.api.routes.admin import router as admin_router
 from standard_annotation_backend.api.routes.annotation_comments import (
@@ -147,7 +148,7 @@ async def protect_token_management_responses(
             # Callback failures must still consume browser state. Do not render
             # or log the exception: even unexpected failures may retain OAuth
             # secrets.
-            response = oauth_callback_failure_response()
+            response = sab_error_response(OAuthCallbackFailedError())
         else:
             logger.error(
                 "Unexpected request failure: method=%s path=%s failure_type=%s",
@@ -155,7 +156,7 @@ async def protect_token_management_responses(
                 path,
                 type(error).__name__,
             )
-            response = unexpected_error_response()
+            response = sab_error_response(UnexpectedError())
     if (
         path.startswith("/auth/github/")
         or path.startswith("/assets/")

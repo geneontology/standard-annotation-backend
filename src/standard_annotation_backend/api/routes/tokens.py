@@ -16,11 +16,11 @@ from standard_annotation_backend.api.csrf import (
 )
 from standard_annotation_backend.api.dependencies import get_unit_of_work_factory
 from standard_annotation_backend.api.errors import (
+    OAuthCallbackFailedError,
     RequestValidationFailedError,
     error_responses,
 )
 from standard_annotation_backend.api.models import (
-    ApiErrorResponse,
     TokenContextListResponse,
     TokenContextResource,
     TokenCreatedResponse,
@@ -161,20 +161,15 @@ def github_login(
     "/auth/github/callback",
     response_class=RedirectResponse,
     status_code=status.HTTP_303_SEE_OTHER,
-    responses={
-        status.HTTP_500_INTERNAL_SERVER_ERROR: {
-            "model": ApiErrorResponse,
-            "description": "Internal server error: `oauth_callback_failed`.",
-        },
-        **error_responses(
-            OAuthStateError,
-            OAuthCallbackError,
-            OAuthIdentityNotAllowedError,
-            OAuthUpstreamError,
-            OAuthConfigurationError,
-            CredentialPersistenceError,
-        ),
-    },
+    responses=error_responses(
+        OAuthStateError,
+        OAuthCallbackError,
+        OAuthIdentityNotAllowedError,
+        OAuthUpstreamError,
+        OAuthConfigurationError,
+        CredentialPersistenceError,
+        OAuthCallbackFailedError,
+    ),
 )
 def github_callback(
     request: Request,

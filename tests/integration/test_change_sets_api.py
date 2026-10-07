@@ -314,7 +314,7 @@ def test_false_boolean_number_test_rejects_proposal_without_audit(
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     error = response.json()["error"]
     assert error["code"] == "invalid_change_set"
-    assert error["details"][0]["location"] == ["patch"]
+    assert error["details"][0]["location"] == ["body", "patch"]
     assert error["details"][0]["type"] == "invalid_patch_operation"
     assert client.get(f"/annotations/{target['annotation_id']}").json() == target
     with session_factory() as session:
@@ -397,6 +397,10 @@ def test_invalid_candidate_can_be_previewed_but_not_accepted(
         "message",
         "type",
     }
+    assert preview.json()["validation_errors"][0]["location"] == [
+        "annotation",
+        "db_object_id",
+    ]
     accepted = client.post(f"{path}/accept", json={})
     assert accepted.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert accepted.json()["error"]["code"] == "invalid_change_set"

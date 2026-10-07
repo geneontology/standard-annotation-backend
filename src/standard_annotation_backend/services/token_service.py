@@ -254,12 +254,14 @@ class TokenService:
             try:
                 data = TokenCreateInput.model_validate(payload)
             except ValidationError as error:
-                raise InvalidTokenError(validation_issues(error)) from None
+                raise InvalidTokenError(
+                    validation_issues(error, root=("body",))
+                ) from None
             try:
                 expires_at = resolve_expiration(data.expires_at, now)
             except InvalidExpirationError:
                 issue = ValidationIssue(
-                    location=("expires_at",),
+                    location=("body", "expires_at"),
                     message="Token expiration is outside the allowed range",
                     type=InvalidTokenError.code,
                 )

@@ -155,13 +155,14 @@ def test_job_read_documents_path_parameter_and_typed_errors(schema: dict) -> Non
     [parameter] = operation["parameters"]
     assert parameter["name"] == "job_id"
     assert parameter["schema"]["format"] == "uuid"
-    for code in ("401", "403", "404", "503"):
+    for code in ("401", "403", "404", "500", "503"):
         assert operation["responses"][code]["content"]["application/json"][
             "schema"
         ] == {"$ref": "#/components/schemas/ApiErrorResponse"}
     responses = operation["responses"]
     assert "`authentication_required`" in responses["401"]["description"]
     assert "`permission_denied`" in responses["403"]["description"]
+    assert "`internal_error`" in responses["500"]["description"]
     assert "`credential_storage_unavailable`" in responses["503"]["description"]
 
 
@@ -171,7 +172,7 @@ def test_refresh_operations_are_bearer_protected_with_typed_errors(
 ) -> None:
     """Every documented failure uses the standard API error response."""
     operation = schema["paths"][path]["post"]
-    expected = {"202", "401", "403", "503"}
+    expected = {"202", "401", "403", "500", "503"}
     if path in SOURCE_KEY_PATHS:
         expected.add("422")
     if path.startswith("/admin/annotation-"):

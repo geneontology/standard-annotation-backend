@@ -108,6 +108,10 @@ class NotFoundError(SabError):
     """
 
 
+class MethodNotAllowedError(SabError):
+    """The resource does not support the request's method."""
+
+
 class ConflictError(SabError):
     """The request is valid but conflicts with the current state."""
 
@@ -125,7 +129,12 @@ class InvalidInputError(SabError):
     """
 
     def issue_location(self) -> tuple[str | int, ...]:
-        """Return where in the request the problem is, such as `("body",)`."""
+        """Return where the problem is, such as `("body", "source_key")`.
+
+        The first element names what was checked: `body`, `query`, `path`, or
+        `header` for a part of the HTTP request, or `annotation` for the
+        annotation the request would produce.
+        """
         raise NotImplementedError
 
     def details(self) -> ErrorDetails | None:
@@ -140,6 +149,10 @@ class InvalidInputError(SabError):
 
 class PreconditionRequiredError(SabError):
     """The request must name the version it expects, and does not."""
+
+
+class InternalServerError(SabError):
+    """The request failed because of a problem in SAB."""
 
 
 class UpstreamError(SabError):

@@ -9,10 +9,6 @@ from fastapi.routing import APIRoute
 from standard_annotation_backend.api.models import ApiErrorResponse
 from standard_annotation_backend.main import app
 
-# The OAuth callback documents a 500 that is not raised as a `SabError`, so it is
-# written by hand instead of generated from an error class.
-_HAND_WRITTEN = {("/auth/github/callback", 500)}
-
 
 def _is_error(status_code: str | int) -> bool:
     return str(status_code).startswith(("4", "5"))
@@ -66,10 +62,7 @@ def _assert_error_responses(
             continue
         where = (owner, int(status_code))
         assert response["model"] is ApiErrorResponse, where
-        if where in _HAND_WRITTEN:
-            assert "`oauth_callback_failed`" in response["description"], where
-        else:
-            assert "`" in response["description"], where
+        assert "`" in response["description"], where
 
 
 def test_every_route_including_hidden_ones_documents_errors_with_codes() -> None:
@@ -88,6 +81,33 @@ def test_every_route_including_hidden_ones_documents_errors_with_codes() -> None
                 visited.add(route.path)
                 _assert_error_responses(route.responses, route.path)
 
-    # Prove the walk reached hidden routes and the one hand-written entry.
+    # Prove the walk reached hidden routes, including the OAuth callback.
     assert {"/auth/github/callback", "/tokens", "/token-management"} <= visited
     assert {"/admin/jobs/{job_id}", "/annotations/{annotation_id}"} <= visited
+
+
+def test_oauth_callback_documents_its_internal_failure_code() -> None:
+    """The OAuth callback documents its 500 as `oauth_callback_failed`."""
+    callback = next(
+        route
+        for router in _included_routers()
+        for route in router.routes
+        if isinstance(route, APIRoute) and route.path == "/auth/github/callback"
+    )
+
+    assert "`oauth_callback_failed`" in callback.responses[500]["description"]
+
+
+def test_every_bearer_route_documents_internal_error() -> None:
+    """Every route that accepts a bearer token documents `500: internal_error`."""
+    schema = app.openapi()
+    checked = []
+    for path, operations in schema["paths"].items():
+        for method, operation in operations.items():
+            if {"Bearer": []} not in operation.get("security", []):
+                continue
+            checked.append((method, path))
+            description = operation["responses"]["500"]["description"]
+            assert "`internal_error`" in description, (method, path)
+    assert ("get", "/annotations") in checked
+    assert ("post", "/change-sets/{change_set_id}/accept") in checked

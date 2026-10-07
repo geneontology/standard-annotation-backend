@@ -43,7 +43,7 @@ UNKNOWN_ERROR = {
         "message": "Annotation db_object_id is not in the active entity catalog",
         "details": [
             {
-                "location": ["db_object_id"],
+                "location": ["annotation", "db_object_id"],
                 "message": "Annotation db_object_id is not in the active entity catalog",
                 "type": "unknown_db_object_id",
             }

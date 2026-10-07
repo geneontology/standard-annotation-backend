@@ -220,7 +220,7 @@ def test_annotation_openapi_documents_applicable_typed_errors(
     """OpenAPI lists only applicable statuses using the standard error model."""
     schema = client.get("/openapi.json").json()
     responses = schema["paths"][path][method]["responses"]
-    assert set(responses) == expected_statuses | {"401", "403", "503"}
+    assert set(responses) == expected_statuses | {"401", "403", "500", "503"}
     assert schema["paths"][path][method]["security"] == [{"Bearer": []}]
     assert (
         responses["401"]["headers"]["WWW-Authenticate"]["schema"]["const"] == "Bearer"

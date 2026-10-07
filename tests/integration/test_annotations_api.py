@@ -281,7 +281,10 @@ def test_patch_rejects_explicit_null_for_a_required_field(
 
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert response.json()["error"]["code"] == "invalid_annotation"
-    assert response.json()["error"]["details"][0]["location"] == ["relation"]
+    assert response.json()["error"]["details"][0]["location"] == [
+        "annotation",
+        "relation",
+    ]
 
 
 def test_patch_rejects_unknown_fields(integration_api_client: TestClient) -> None:

@@ -129,7 +129,7 @@ def test_busy_lock_errors_are_retryable_not_terminal(error: Exception) -> None:
 
 
 def test_unknown_source_is_a_located_invalid_input_error() -> None:
-    """An unknown source is reported to clients at `source_key` as before."""
+    """An unknown source is reported to clients at the body's `source_key`."""
     error = UnknownSourceError(RefreshKindName.ENTITY, "mgi")
 
     assert isinstance(error, SabError)
@@ -138,7 +138,7 @@ def test_unknown_source_is_a_located_invalid_input_error() -> None:
     assert error.message == "Source is not configured"
     assert error.details() == (
         {
-            "location": ("source_key",),
+            "location": ("body", "source_key"),
             "message": "Source is not configured",
             "type": "unknown_source",
         },

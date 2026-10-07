@@ -152,10 +152,12 @@ def test_invalid_create_preview_reports_validation_and_remains_reviewable(
     preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert not preview.can_accept
     assert any(
-        issue["location"] == ("db_object_id",) for issue in preview.validation_errors
+        issue["location"] == ("annotation", "db_object_id")
+        for issue in preview.validation_errors
     )
-    with pytest.raises(InvalidChangeSetError):
+    with pytest.raises(InvalidChangeSetError) as raised:
         service.accept(proposed.change_set_id, context=REVIEWER)
+    assert all(issue["location"][0] == "annotation" for issue in raised.value.errors)
     assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
@@ -332,7 +334,7 @@ def test_false_boolean_number_test_does_not_persist_proposal_or_audit(
             context=PROPOSER,
         )
 
-    assert raised.value.errors[0]["location"] == ("patch",)
+    assert raised.value.errors[0]["location"] == ("body", "patch")
     assert raised.value.errors[0]["type"] == "invalid_patch_operation"
     assert annotations.get(target.annotation_id, context=PROPOSER) == target
     with session_factory() as session:
@@ -362,7 +364,7 @@ def test_update_preview_reports_invalid_post_patch_annotation(
     )
     preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert not preview.can_accept
-    assert preview.validation_errors[0]["location"] == ("db_object_id",)
+    assert preview.validation_errors[0]["location"] == ("annotation", "db_object_id")
     with pytest.raises(InvalidChangeSetError):
         service.accept(proposed.change_set_id, context=REVIEWER)
     assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"

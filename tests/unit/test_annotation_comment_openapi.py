@@ -38,6 +38,7 @@ def test_comment_openapi_documents_routes_models_errors_and_examples(
         status.HTTP_403_FORBIDDEN,
         status.HTTP_404_NOT_FOUND,
         status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
         status.HTTP_503_SERVICE_UNAVAILABLE,
     )
     assert set(collection["get"]["responses"]) == {"200"} | common_errors

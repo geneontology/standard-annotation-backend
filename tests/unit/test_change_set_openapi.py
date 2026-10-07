@@ -163,6 +163,7 @@ def test_change_set_routes_and_responses(
     errors = errors | {
         status.HTTP_401_UNAUTHORIZED,
         status.HTTP_403_FORBIDDEN,
+        status.HTTP_500_INTERNAL_SERVER_ERROR,
         status.HTTP_503_SERVICE_UNAVAILABLE,
     }
     assert set(responses) == {str(code) for code in {success, *errors}}
@@ -172,6 +173,7 @@ def test_change_set_routes_and_responses(
     )
     assert "`authentication_required`" in responses["401"]["description"]
     assert "`permission_denied`" in responses["403"]["description"]
+    assert "`internal_error`" in responses["500"]["description"]
     assert "`credential_storage_unavailable`" in responses["503"]["description"]
     assert responses[str(success)]["content"]["application/json"]["schema"] == {
         "$ref": f"#/components/schemas/{model}"

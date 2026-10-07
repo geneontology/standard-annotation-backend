@@ -424,7 +424,7 @@ def test_create_rejects_invalid_payload_without_persisting_or_committing(
             context=REQUEST_CONTEXT,
         )
 
-    assert raised.value.errors[0]["location"] == ("db_object_id",)
+    assert raised.value.errors[0]["location"] == ("annotation", "db_object_id")
     assert service_harness.repository.last_annotation is None
     assert service_harness.unit_of_work.commit_count == 0
 
@@ -532,7 +532,7 @@ def test_patch_reports_validation_errors_from_the_complete_merged_result(
             context=REQUEST_CONTEXT,
         )
 
-    assert raised.value.errors[0]["location"] == ("db_object_id",)
+    assert raised.value.errors[0]["location"] == ("annotation", "db_object_id")
     assert service_harness.repository.last_annotation is None
     assert service_harness.unit_of_work.commit_count == 0
 

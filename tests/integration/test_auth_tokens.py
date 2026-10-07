@@ -355,7 +355,10 @@ def test_invalid_expiration_never_persists_token_or_audit(
     error = response.json()["error"]
     assert error["code"] in {"invalid_token", "request_validation_error"}
     assert error["details"]
-    assert all("expires_at" in issue["location"] for issue in error["details"])
+    assert all(
+        issue["location"][0] == "body" and "expires_at" in issue["location"]
+        for issue in error["details"]
+    )
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(ApiTokenRecord)) == 0
         assert session.scalar(select(func.count()).select_from(AuditEventRecord)) == 0
@@ -387,7 +390,7 @@ def test_out_of_range_expiration_reports_a_located_invalid_token_issue(
             "message": "Token name, context, or expiration is invalid",
             "details": [
                 {
-                    "location": ["expires_at"],
+                    "location": ["body", "expires_at"],
                     "message": "Token expiration is outside the allowed range",
                     "type": "invalid_token",
                 }
@@ -826,7 +829,7 @@ def test_creation_service_validates_names_without_an_http_boundary(
                 "expires_at": _future_expiration(),
             },
         )
-    assert [issue["location"] for issue in raised.value.errors] == [("name",)]
+    assert [issue["location"] for issue in raised.value.errors] == [("body", "name")]
     assert service.list_tokens(raw) == ()
 
 

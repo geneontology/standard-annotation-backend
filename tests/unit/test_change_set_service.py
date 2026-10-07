@@ -54,6 +54,30 @@ def test_invalid_create_envelope_is_rejected_before_transaction(
             ),
         )
     assert error.value.errors
+    assert all(issue["location"][0] == "body" for issue in error.value.errors)
+
+
+def test_invalid_create_annotation_is_located_at_the_body_annotation_field() -> None:
+    """Non-JSON proposal annotation data is reported at the body's `annotation`."""
+    module = import_module("standard_annotation_backend.services.change_set_service")
+    service = module.ChangeSetService(_unopened_transaction)
+    with pytest.raises(InvalidChangeSetError) as error:
+        service.propose_create(
+            payload={"value": float("inf")},
+            owning_group_id="group",
+            reason="reason",
+            context=RequestContext(
+                actor_id="proposer",
+                token_id=uuid4(),
+                token_name="Test proposer",
+                role=AuthorizationRole.EDIT,
+                scope=AuthorizationScope.GLOBAL,
+                group_id=None,
+            ),
+        )
+    assert [issue["location"][:3] for issue in error.value.errors] == [
+        ("body", "annotation", "value")
+    ]
 
 
 @pytest.mark.parametrize("reason", ["", " ", "\t\n"])
@@ -76,7 +100,7 @@ def test_rejection_requires_nonblank_reason_without_opening_transaction(
                 group_id=None,
             ),
         )
-    assert error.value.errors[0]["location"] == ("review_reason",)
+    assert error.value.errors[0]["location"] == ("body", "review_reason")
 
 
 @pytest.mark.parametrize(
@@ -157,7 +181,7 @@ def test_proposals_require_strict_positive_base_version(
                 else {}
             ),
         )
-    assert error.value.errors[0]["location"] == ("base_version",)
+    assert error.value.errors[0]["location"] == ("body", "base_version")
 
 
 @pytest.mark.parametrize("reason", [42, {"text": "reviewed"}])
@@ -180,4 +204,4 @@ def test_acceptance_rejects_nontext_review_reason_before_transaction(
                 group_id=None,
             ),
         )
-    assert error.value.errors[0]["location"] == ("review_reason",)
+    assert error.value.errors[0]["location"] == ("body", "review_reason")

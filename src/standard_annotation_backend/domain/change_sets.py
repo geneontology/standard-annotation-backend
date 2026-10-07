@@ -92,7 +92,12 @@ class ChangeSetStateError(ConflictError):
 
 
 class InvalidChangeSetError(InvalidInputError):
-    """Report validation issues in a proposal or its candidate annotation."""
+    """Report validation issues in a proposal or its candidate annotation.
+
+    Issues in the proposal request start with `body`, such as
+    `("body", "base_version")`. Issues in the candidate annotation start with
+    `annotation`.
+    """
 
     code = "invalid_change_set"
     message = "Change set is invalid"

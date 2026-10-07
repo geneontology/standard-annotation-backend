@@ -41,6 +41,17 @@ class AnnotationValidationResult:
     errors: tuple[ValidationIssue, ...]
 
 
+ANNOTATION_ROOT = "annotation"
+"""First location element of issues found in annotation content.
+
+Issue locations start with what was checked: a part of the HTTP request
+(`body`, `query`, `path`, or `header`) or `annotation`, the annotation a request
+would produce. That annotation may come from a request body, a merged partial
+update, or a stored change-set proposal, so its issues are not tied to one
+request part.
+"""
+
+
 def validate_annotation(payload: object) -> AnnotationValidationResult:
     """Validate an annotation payload and normalize any validation errors.
 
@@ -49,7 +60,8 @@ def validate_annotation(payload: object) -> AnnotationValidationResult:
 
     Returns:
         A result containing either the validated annotation or structured
-        validation errors.
+        validation errors. Each error location starts with `annotation`, such as
+        `("annotation", "db_object_id")`.
 
     Note:
         Identifier formats declared as LinkML structured patterns are not fully
@@ -60,13 +72,15 @@ def validate_annotation(payload: object) -> AnnotationValidationResult:
         annotation = Annotation.model_validate(payload)
     except ValidationError as error:
         return AnnotationValidationResult(
-            annotation=None, errors=validation_issues(error)
+            annotation=None, errors=validation_issues(error, root=(ANNOTATION_ROOT,))
         )
 
     return AnnotationValidationResult(annotation=annotation, errors=())
 
 
-def validation_issues(error: ValidationError) -> tuple[ValidationIssue, ...]:
+def validation_issues(
+    error: ValidationError, *, root: tuple[str | int, ...] = ()
+) -> tuple[ValidationIssue, ...]:
     """Convert a Pydantic validation error into serializable issues.
 
     Only each failure's location, message, and type are kept. The rejected input
@@ -74,13 +88,17 @@ def validation_issues(error: ValidationError) -> tuple[ValidationIssue, ...]:
 
     Args:
         error: Validation error raised by a Pydantic model.
+        root: Location elements placed before each Pydantic location, such as
+            `("body",)` when the validated model holds request body fields.
 
     Returns:
         One issue per validation failure, in the order Pydantic reported them.
     """
     return tuple(
         ValidationIssue(
-            location=detail["loc"], message=detail["msg"], type=detail["type"]
+            location=(*root, *detail["loc"]),
+            message=detail["msg"],
+            type=detail["type"],
         )
         for detail in error.errors(
             include_url=False, include_context=False, include_input=False

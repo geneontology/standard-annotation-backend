@@ -109,7 +109,7 @@ def test_unknown_source_is_422_unknown_source(
     session_factory: sessionmaker[Session],
     path: str,
 ) -> None:
-    """An unconfigured key is reported at `source_key` and creates no job."""
+    """An unconfigured key is reported at the body's `source_key` and creates no job."""
     response = integration_api_client.post(path, json={"source_key": "missing"})
 
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
@@ -119,7 +119,7 @@ def test_unknown_source_is_422_unknown_source(
             "message": "Source is not configured",
             "details": [
                 {
-                    "location": ["source_key"],
+                    "location": ["body", "source_key"],
                     "message": "Source is not configured",
                     "type": "unknown_source",
                 }

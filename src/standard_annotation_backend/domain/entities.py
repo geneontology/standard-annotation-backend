@@ -73,8 +73,8 @@ class UnknownDbObjectIdError(InvalidInputError):
         super().__init__()
 
     def issue_location(self) -> tuple[str | int, ...]:
-        """Return the `db_object_id` field."""
-        return ("db_object_id",)
+        """Return the annotation's `db_object_id` field."""
+        return ("annotation", "db_object_id")
 
 
 class EntityCandidateConflictError(TerminalRefreshError):

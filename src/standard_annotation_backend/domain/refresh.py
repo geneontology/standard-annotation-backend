@@ -174,8 +174,8 @@ class UnknownSourceError(InvalidInputError, TerminalRefreshError):
         TerminalRefreshError.__init__(self, "source is not configured")
 
     def issue_location(self) -> tuple[str | int, ...]:
-        """Return the request field that names the source."""
-        return ("source_key",)
+        """Return the request body field that names the source."""
+        return ("body", "source_key")
 
 
 class RetryableRefreshError(Exception):

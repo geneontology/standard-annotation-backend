@@ -48,7 +48,7 @@ def test_invalid_payload_returns_structured_errors() -> None:
     assert result.annotation is None
     assert result.errors == (
         {
-            "location": ("ontology_class_id",),
+            "location": ("annotation", "ontology_class_id"),
             "message": "Field required",
             "type": "missing",
         },
@@ -70,7 +70,7 @@ def test_schema_constraints_reject_invalid_values(field: str, value: object) -> 
     result = validate_annotation(payload)
 
     assert result.annotation is None
-    assert result.errors[0]["location"][0] == field
+    assert result.errors[0]["location"][:2] == ("annotation", field)
 
 
 def test_extra_sab_identifier_is_rejected_by_core_schema() -> None:
@@ -81,7 +81,7 @@ def test_extra_sab_identifier_is_rejected_by_core_schema() -> None:
 
     assert result.annotation is None
     assert result.annotation is None
-    assert result.errors[0]["location"] == ("annotation_id",)
+    assert result.errors[0]["location"] == ("annotation", "annotation_id")
     assert result.errors[0]["type"] == "extra_forbidden"
 
 
@@ -118,6 +118,19 @@ def test_validation_issues_keep_location_message_and_type_only() -> None:
         ),
     )
     assert all(set(issue) == {"location", "message", "type"} for issue in issues)
+
+
+def test_validation_issues_place_a_root_before_each_location() -> None:
+    """A supplied root names what was checked before each Pydantic location."""
+    with pytest.raises(ValidationError) as caught:
+        _Outer.model_validate({"nested": [{"count": "x"}]})
+
+    issues = validation_issues(caught.value, root=("body",))
+
+    assert [issue["location"] for issue in issues] == [
+        ("body", "name"),
+        ("body", "nested", 0, "count"),
+    ]
 
 
 @pytest.mark.parametrize(

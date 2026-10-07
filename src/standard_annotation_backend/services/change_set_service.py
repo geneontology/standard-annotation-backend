@@ -129,7 +129,7 @@ class AcceptedChangeSet(BaseModel):
 class _CreateProposal(BaseModel):
     model_config = ConfigDict(strict=True, allow_inf_nan=False)
 
-    payload: dict[str, JsonValue]
+    annotation: dict[str, JsonValue]
     owning_group_id: TrimmedNonBlankString
     reason: TrimmedNonBlankString
 
@@ -200,7 +200,7 @@ class ChangeSetService:
         proposal = _validate_input(
             _CreateProposal,
             {
-                "payload": payload,
+                "annotation": payload,
                 "owning_group_id": group,
                 "reason": reason,
             },
@@ -208,7 +208,7 @@ class ChangeSetService:
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.change_sets.create(
                 operation=ChangeSetOperation.CREATE,
-                annotation_payload=proposal.model_dump(mode="json")["payload"],
+                annotation_payload=proposal.model_dump(mode="json")["annotation"],
                 owning_group_id=proposal.owning_group_id,
                 proposed_by=context.actor_id,
                 reason=proposal.reason,
@@ -658,7 +658,7 @@ def _base_snapshot(
         raise InvalidChangeSetError(
             (
                 ValidationIssue(
-                    location=("base_version",),
+                    location=("body", "base_version"),
                     type="base_version_not_found",
                     message="The target annotation has no such saved version.",
                 ),
@@ -668,7 +668,7 @@ def _base_snapshot(
         raise InvalidChangeSetError(
             (
                 ValidationIssue(
-                    location=("base_version",),
+                    location=("body", "base_version"),
                     type="base_version_deleted",
                     message="The saved version represents a deleted annotation.",
                 ),
@@ -685,7 +685,7 @@ def _apply_patch(annotation: dict[str, object], patch: object) -> dict[str, obje
         raise InvalidChangeSetError(
             (
                 ValidationIssue(
-                    location=("patch", *error.issue.location),
+                    location=("body", "patch", *error.issue.location),
                     type=error.issue.type,
                     message="The patch cannot be applied to the annotation.",
                 ),
@@ -756,11 +756,14 @@ def _build_preview(
 
 
 def _validate_input[T: BaseModel](model: type[T], payload: object) -> T:
-    """Validate workflow input and expose stable annotation-style issue details."""
+    """Validate workflow input and report issues located in the request body.
+
+    Each model's field names match the request body fields they hold.
+    """
     try:
         return model.model_validate(payload)
     except ValidationError as error:
-        raise InvalidChangeSetError(validation_issues(error)) from None
+        raise InvalidChangeSetError(validation_issues(error, root=("body",))) from None
 
 
 def _lock_proposal(

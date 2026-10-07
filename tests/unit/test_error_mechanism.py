@@ -1,6 +1,7 @@
 """Tests for converting application errors into HTTP responses and docs."""
 
 import importlib
+import inspect
 import json
 import pkgutil
 import re
@@ -37,7 +38,9 @@ from standard_annotation_backend.domain.errors import (
     DuplicatePeers,
     ErrorDetails,
     ForbiddenError,
+    InternalServerError,
     InvalidInputError,
+    MethodNotAllowedError,
     NotFoundError,
     PreconditionFailedError,
     PreconditionRequiredError,
@@ -90,15 +93,18 @@ def test_each_base_maps_to_one_status() -> None:
         UnauthenticatedError: status.HTTP_401_UNAUTHORIZED,
         ForbiddenError: status.HTTP_403_FORBIDDEN,
         NotFoundError: status.HTTP_404_NOT_FOUND,
+        MethodNotAllowedError: status.HTTP_405_METHOD_NOT_ALLOWED,
         ConflictError: status.HTTP_409_CONFLICT,
         PreconditionFailedError: status.HTTP_412_PRECONDITION_FAILED,
         InvalidInputError: status.HTTP_422_UNPROCESSABLE_CONTENT,
         PreconditionRequiredError: status.HTTP_428_PRECONDITION_REQUIRED,
+        InternalServerError: status.HTTP_500_INTERNAL_SERVER_ERROR,
         UpstreamError: status.HTTP_502_BAD_GATEWAY,
         UnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
     }
     for base, code in expected.items():
         assert status_for(base) == code
+    assert {base for base, _ in STATUS_BY_BASE} == set(expected)
 
 
 def test_error_without_details_omits_details() -> None:
@@ -263,6 +269,16 @@ def test_only_missing_bearer_authentication_sends_a_bearer_challenge() -> None:
     }
 
 
+def test_response_headers_merge_with_the_bearer_challenge() -> None:
+    """Extra response headers are added without dropping the bearer challenge."""
+    response = sab_error_response(
+        AuthenticationRequiredError(), headers={"Allow": "GET"}
+    )
+
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert response.headers["Allow"] == "GET"
+
+
 def test_denied_permission_and_csrf_disclose_no_details() -> None:
     """Forbidden responses carry only their code and fixed message."""
     assert (
@@ -287,7 +303,7 @@ def test_denied_permission_and_csrf_disclose_no_details() -> None:
 def test_invalid_token_reports_the_rejected_input_issues() -> None:
     """Invalid token input returns the located problems found in that input."""
     issue: ValidationIssue = {
-        "location": ("name",),
+        "location": ("body", "name"),
         "message": "String should have at least 1 character",
         "type": "string_too_short",
     }
@@ -297,7 +313,7 @@ def test_invalid_token_reports_the_rejected_input_issues() -> None:
         "message": "Token name, context, or expiration is invalid",
         "details": [
             {
-                "location": ["name"],
+                "location": ["body", "name"],
                 "message": "String should have at least 1 character",
                 "type": "string_too_short",
             }
@@ -306,10 +322,11 @@ def test_invalid_token_reports_the_rejected_input_issues() -> None:
 
 
 def test_bearer_error_docs_list_each_code_and_the_challenge_header() -> None:
-    """Bearer-protected routes document 401, 403, and 503 with their codes."""
+    """Bearer-protected routes document 401, 403, 500, and 503 with their codes."""
     responses = error_responses(*BEARER_ERRORS)
 
-    assert set(responses) == {401, 403, 503}
+    assert set(responses) == {401, 403, 500, 503}
+    assert "`internal_error`" in responses[500]["description"]
     assert "`authentication_required`" in responses[401]["description"]
     assert responses[401]["headers"]["WWW-Authenticate"]["schema"] == {
         "type": "string",
@@ -430,3 +447,39 @@ def test_error_definition_check_reports_incomplete_errors() -> None:
     assert _definition_problems(Member) == []
     assert _definition_problems(_Missing) == []
     assert _definition_problems(_Bad) == []
+
+
+_ISSUE_ROOTS = {"body", "query", "path", "header", "annotation"}
+"""Allowed first elements of an issue location.
+
+`body`, `query`, `path`, and `header` name the part of the HTTP request that was
+checked; `annotation` names the annotation the request would produce.
+"""
+
+
+def _representative(error_type: type[InvalidInputError]) -> InvalidInputError:
+    """Construct an error, passing a placeholder for each required argument."""
+    parameters = [
+        parameter
+        for parameter in inspect.signature(error_type).parameters.values()
+        if parameter.default is inspect.Parameter.empty
+    ]
+    return error_type(*("placeholder" for _ in parameters))
+
+
+def test_every_default_issue_location_starts_with_an_allowed_root() -> None:
+    """Each error's own issue location names what was checked first."""
+    located = [
+        error_type
+        for error_type in _application_errors()
+        if issubclass(error_type, InvalidInputError)
+        and error_type.issue_location is not InvalidInputError.issue_location
+    ]
+    assert len(located) >= 10
+    roots = {
+        error_type.__name__: _representative(error_type).issue_location()[0]
+        for error_type in located
+    }
+    assert {
+        name: root for name, root in roots.items() if root not in _ISSUE_ROOTS
+    } == {}

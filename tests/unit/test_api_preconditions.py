@@ -323,7 +323,7 @@ def test_invalid_annotation_error_preserves_normalized_validation_details() -> N
         raise InvalidAnnotationPayloadError(
             (
                 {
-                    "location": ("db_object_id",),
+                    "location": ("annotation", "db_object_id"),
                     "message": "A supplied domain validation message",
                     "type": "missing",
                 },
@@ -339,7 +339,7 @@ def test_invalid_annotation_error_preserves_normalized_validation_details() -> N
             "message": "Annotation payload is invalid",
             "details": [
                 {
-                    "location": ["db_object_id"],
+                    "location": ["annotation", "db_object_id"],
                     "message": "A supplied domain validation message",
                     "type": "missing",
                 }
