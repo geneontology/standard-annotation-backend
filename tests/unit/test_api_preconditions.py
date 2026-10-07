@@ -22,7 +22,7 @@ from standard_annotation_backend.api.models import (
     AnnotationVersionPageResponse,
     AnnotationVersionResource,
 )
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
 from standard_annotation_backend.domain.auth import PermissionDeniedError
 from standard_annotation_backend.persistence.repositories import (
     AnnotationDeletedError,
@@ -218,7 +218,7 @@ def test_resource_models_convert_all_service_results() -> None:
         version=1,
         is_deleted=False,
         actor_id="provisional-api-user",
-        change_source="api",
+        change_source=ChangeSource.API,
         created_at=CREATED_AT,
         annotation=annotation,
     )

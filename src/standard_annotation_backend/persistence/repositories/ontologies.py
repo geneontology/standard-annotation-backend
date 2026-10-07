@@ -1,13 +1,14 @@
 """Persist immutable ontology snapshots in caller-managed transactions."""
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from datetime import datetime
-from itertools import islice
+from itertools import batched
 from uuid import UUID
 
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.jobs import ACTIVE_JOB_STATUSES
 from standard_annotation_backend.domain.ontology import (
     OntologyCandidateConflictError,
     OntologyClosureRow,
@@ -107,7 +108,7 @@ class OntologyRepository:
             }
             for term in sorted(snapshot.terms.values(), key=lambda value: value.term_id)
         )
-        for batch in _batches(term_rows):
+        for batch in batched(term_rows, _INSERT_BATCH_SIZE, strict=False):
             self.session.execute(insert(OntologyTermRecord), batch)
 
         closure_values = (
@@ -120,7 +121,7 @@ class OntologyRepository:
             }
             for row in closure_rows
         )
-        for batch in _batches(closure_values):
+        for batch in batched(closure_values, _INSERT_BATCH_SIZE, strict=False):
             self.session.execute(insert(OntologyClosureRecord), batch)
         self.session.flush()
         return record
@@ -269,7 +270,7 @@ class OntologyRepository:
             for record, status in rows
             if not record.active
             and record is not predecessor
-            and status not in {"queued", "running"}
+            and status not in ACTIVE_JOB_STATUSES
         )
         version_ids = tuple(record.version_id for record in candidates)
         if not version_ids:
@@ -364,10 +365,3 @@ class OntologyRepository:
         if record.bulk_data_pruned_at is not None:
             raise OntologySnapshotPrunedError(version_id)
         return record
-
-
-def _batches[T](rows: Iterable[T]) -> Iterator[list[T]]:
-    """Yield lists of at most 5,000 rows without loading every row at once."""
-    iterator = iter(rows)
-    while batch := list(islice(iterator, _INSERT_BATCH_SIZE)):
-        yield batch

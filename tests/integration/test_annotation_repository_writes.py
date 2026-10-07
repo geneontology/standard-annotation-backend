@@ -9,6 +9,7 @@ from seeding import insert_annotation
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.persistence import repositories
 from standard_annotation_backend.persistence.models import (
@@ -46,7 +47,7 @@ def _create_existing(
             unit_of_work.annotations.session,
             annotation=annotation,
             actor_id="creator",
-            change_source="api",
+            change_source=ChangeSource.API,
             owning_group_id="group-1",
             record_origin=AnnotationOrigin.DIRECT,
             annotation_id=annotation_id,
@@ -75,7 +76,7 @@ def _create_legacy_annotations(
                 unit_of_work.annotations.session,
                 annotation=annotation,
                 actor_id="importer",
-                change_source="legacy-import",
+                change_source=ChangeSource.ANNOTATION_REFRESH,
                 owning_group_id="legacy",
                 record_origin=AnnotationOrigin.IMPORT,
                 source_import_job_id=job_id,

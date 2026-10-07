@@ -22,7 +22,7 @@ from standard_annotation_backend.domain.annotation_management import (
     CutoverRejectedError,
     GroupSabManagedError,
 )
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
@@ -317,11 +317,14 @@ def _apply_local_change(
                 _annotation("UniProtKB:Q99999"),
                 expected_version=1,
                 actor_id="curator",
-                change_source="api",
+                change_source=ChangeSource.API,
             )
         elif change == "soft_delete":
             uow.annotations.soft_delete(
-                imported, expected_version=1, actor_id="curator", change_source="api"
+                imported,
+                expected_version=1,
+                actor_id="curator",
+                change_source=ChangeSource.API,
             )
         else:
             uow.comments.create(imported, body="Looks wrong", created_by="curator")
@@ -397,7 +400,7 @@ def test_ontology_term_replacement_does_not_force_a_reimport(
             ),
             expected_version=1,
             actor_id="system",
-            change_source="ontology_refresh",
+            change_source=ChangeSource.ONTOLOGY_REFRESH,
         )
         uow.commit()
 
@@ -474,10 +477,13 @@ def test_refresh_replaces_only_the_target_groups_annotations_and_history(
             _annotation("UniProtKB:Q99999"),
             expected_version=1,
             actor_id="curator",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         uow.annotations.soft_delete(
-            soft_deleted, expected_version=1, actor_id="curator", change_source="api"
+            soft_deleted,
+            expected_version=1,
+            actor_id="curator",
+            change_source=ChangeSource.API,
         )
         uow.comments.create(edited, body="note", created_by="curator")
         for annotation_id in (edited, soft_deleted):

@@ -2,9 +2,8 @@
 
 import hashlib
 import json
-from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
-from itertools import islice
+from itertools import batched
 from typing import cast
 from uuid import UUID
 
@@ -25,6 +24,10 @@ from standard_annotation_backend.domain.entities import (
     EntityRemovalImpact,
     UnknownDbObjectIdError,
 )
+from standard_annotation_backend.domain.jobs import (
+    ACTIVE_JOB_STATUSES,
+    TERMINAL_JOB_STATUSES,
+)
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     acquire_transaction_lock,
@@ -37,8 +40,10 @@ from standard_annotation_backend.persistence.models import (
     EntityStagingRecord,
     JobRecord,
 )
+from standard_annotation_backend.persistence.repositories.jobs import lock_job_record
 
 _INSERT_BATCH_SIZE = 5_000
+"""Rows per batched statement, keeping each within PostgreSQL's parameter limit."""
 _ENTITY_JOB_TYPES = frozenset({"entity_refresh", "entity_retirement"})
 
 
@@ -68,12 +73,7 @@ class EntityRepository:
             EntityCandidateConflictError: If the job does not exist or is not an
                 entity job.
         """
-        job = self.session.scalar(
-            select(JobRecord)
-            .where(JobRecord.job_id == job_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+        job = lock_job_record(self.session, job_id)
         if job is None or job.job_type not in _ENTITY_JOB_TYPES:
             raise EntityCandidateConflictError
         return job
@@ -201,7 +201,7 @@ class EntityRepository:
             if existing.publication_result is None:
                 self._verify_staging(existing)
             return existing
-        if job.status not in {"queued", "running"}:
+        if job.status not in ACTIVE_JOB_STATUSES:
             raise EntityCandidateConflictError
         candidate = EntityCatalogSnapshotRecord(
             job_id=job_id,
@@ -224,7 +224,7 @@ class EntityRepository:
         )
         self.session.add(candidate)
         self.session.flush([candidate])
-        for batch in _batches(rows):
+        for batch in batched(rows, _INSERT_BATCH_SIZE, strict=False):
             self.session.execute(insert(EntityStagingRecord), batch)
         return candidate
 
@@ -265,7 +265,7 @@ class EntityRepository:
         )
         if candidate.publication_result is not None:
             return EntityRefreshResult.from_job_result(candidate.publication_result)
-        if candidate.active or job.status not in {"queued", "running"}:
+        if candidate.active or job.status not in ACTIVE_JOB_STATUSES:
             raise EntityCandidateConflictError
         current = self.session.scalar(
             select(EntityCatalogSnapshotRecord)
@@ -309,9 +309,13 @@ class EntityRepository:
             )
         )
         self._insert_memberships(candidate, new_ids)
-        for batch in _batches(
-            {key: value for key, value in row.items() if key != "job_id"}
-            for row in rows
+        for batch in batched(
+            (
+                {key: value for key, value in row.items() if key != "job_id"}
+                for row in rows
+            ),
+            _INSERT_BATCH_SIZE,
+            strict=False,
         ):
             self.session.execute(insert(EntitySourceRecord), batch)
         result = EntityRefreshResult(
@@ -395,7 +399,7 @@ class EntityRepository:
         kept.
         """
         job = self.lock_job(job_id)
-        if job.status in {"failed", "succeeded"}:
+        if job.status in TERMINAL_JOB_STATUSES:
             self.session.execute(
                 delete(EntityStagingRecord).where(EntityStagingRecord.job_id == job_id)
             )
@@ -534,13 +538,17 @@ class EntityRepository:
         collided = False
         try:
             with self.session.begin_nested():
-                for batch in _batches(
-                    {
-                        "db_object_id": identifier,
-                        "source_key": candidate.source_key,
-                        "snapshot_id": candidate.snapshot_id,
-                    }
-                    for identifier in sorted(identifiers)
+                for batch in batched(
+                    (
+                        {
+                            "db_object_id": identifier,
+                            "source_key": candidate.source_key,
+                            "snapshot_id": candidate.snapshot_id,
+                        }
+                        for identifier in sorted(identifiers)
+                    ),
+                    _INSERT_BATCH_SIZE,
+                    strict=False,
                 ):
                     self.session.execute(insert(EntityMembershipRecord), batch)
         except IntegrityError as error:
@@ -557,7 +565,11 @@ class EntityRepository:
         impacts: dict[str, list[UUID]] = {
             identifier: [] for identifier in sorted(removed)
         }
-        for batch in _batches({"id": identifier} for identifier in sorted(removed)):
+        for batch in batched(
+            ({"id": identifier} for identifier in sorted(removed)),
+            _INSERT_BATCH_SIZE,
+            strict=False,
+        ):
             rows = self.session.execute(
                 select(AnnotationRecord.db_object_id, AnnotationRecord.annotation_id)
                 .where(
@@ -596,14 +608,3 @@ def _catalog_digest(
         )
         hasher.update(b"\n")
     return hasher.hexdigest()
-
-
-def _batches(rows: Iterable[dict[str, object]]) -> Iterator[list[dict[str, object]]]:
-    """Split rows into lists of at most 5,000 for batched inserts.
-
-    This keeps each statement within PostgreSQL's parameter limit and matches the
-    batch size used for ontology terms.
-    """
-    iterator = iter(rows)
-    while batch := list(islice(iterator, _INSERT_BATCH_SIZE)):
-        yield batch

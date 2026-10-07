@@ -12,7 +12,7 @@ from pydantic import (
     ValidationError,
 )
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
     PermissionAction,
@@ -55,7 +55,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
 )
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.resource_authorization import (
-    authorize_annotation,
+    load_authorized_annotation,
 )
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
@@ -299,12 +299,12 @@ class ChangeSetService:
             },
         )
         with self._unit_of_work_factory() as unit_of_work:
-            target = _current_target(unit_of_work.annotations, annotation_id)
-            authorize_annotation(
+            load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.CHANGE_SET_PROPOSE,
-                target,
+                annotation_id,
+                include_deleted=True,
             )
             base = _base_snapshot(unit_of_work.annotations, annotation_id, base_version)
             _apply_patch(base.annotation_data, proposal.patch)
@@ -384,12 +384,12 @@ class ChangeSetService:
             },
         )
         with self._unit_of_work_factory() as unit_of_work:
-            target = _current_target(unit_of_work.annotations, annotation_id)
-            authorize_annotation(
+            load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.CHANGE_SET_PROPOSE,
-                target,
+                annotation_id,
+                include_deleted=True,
             )
             _base_snapshot(unit_of_work.annotations, annotation_id, base_version)
             record = unit_of_work.change_sets.create(
@@ -588,8 +588,13 @@ def _authorize_change_set(
             )
         else:
             assert record.annotation_id is not None
-            target = _current_target(repository, record.annotation_id)
-            authorize_annotation(repository, context, action, target)
+            load_authorized_annotation(
+                repository,
+                context,
+                action,
+                record.annotation_id,
+                include_deleted=True,
+            )
     except (PermissionDeniedError, AnnotationNotFoundError):
         raise ChangeSetNotFoundError(record.change_set_id) from None
 
@@ -621,7 +626,7 @@ def _accept_proposal(
             annotation=validation.annotation,
             owning_group_id=record.owning_group_id,
             actor_id=record.proposed_by,
-            change_source="change_set",
+            change_source=ChangeSource.CHANGE_SET,
         )
     else:
         assert record.annotation_id is not None and record.base_version is not None
@@ -631,14 +636,14 @@ def _accept_proposal(
                 validation.annotation,
                 expected_version=record.base_version,
                 actor_id=record.proposed_by,
-                change_source="change_set",
+                change_source=ChangeSource.CHANGE_SET,
             )
         else:
             changed = unit_of_work.annotations.soft_delete(
                 record.annotation_id,
                 expected_version=record.base_version,
                 actor_id=record.proposed_by,
-                change_source="change_set",
+                change_source=ChangeSource.CHANGE_SET,
             )
     preview = ChangeSetPreview(
         change_set_id=record.change_set_id,

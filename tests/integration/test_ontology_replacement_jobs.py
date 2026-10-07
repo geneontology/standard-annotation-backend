@@ -11,6 +11,7 @@ from sqlalchemy import Engine
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
@@ -85,7 +86,7 @@ def _prepare(
                 uow.annotations.session,
                 annotation=annotation,
                 actor_id="creator",
-                change_source="test",
+                change_source=ChangeSource.API,
                 owning_group_id="group-1",
                 record_origin=AnnotationOrigin.DIRECT,
                 annotation_id=annotation_id,

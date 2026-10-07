@@ -15,6 +15,7 @@ __all__ = [
     "AnnotationOrigin",
     "AnnotationProperties",
     "AnnotationStatus",
+    "ChangeSource",
     "new_annotation_id",
 ]
 
@@ -31,6 +32,25 @@ class AnnotationOrigin(StrEnum):
 
     DIRECT = "direct"
     IMPORT = "import"
+
+
+class ChangeSource(StrEnum):
+    """The workflow recorded on an annotation version.
+
+    Version history uses this to show how each change was made, and annotation
+    refreshes use it to tell local edits apart from changes SAB made itself.
+    """
+
+    API = "api"
+    """A direct create, update, or delete request."""
+    CHANGE_SET = "change_set"
+    """An accepted change-set proposal."""
+    ONTOLOGY_REFRESH = "ontology_refresh"
+    """An automatic replacement of an obsolete ontology term."""
+    ANNOTATION_REFRESH = "annotation_refresh"
+    """An import of a group's annotations from a GPAD source."""
+    ANNOTATION_CUTOVER = "annotation_cutover"
+    """The final GPAD import made when a group moves to SAB management."""
 
 
 def new_annotation_id() -> UUID:

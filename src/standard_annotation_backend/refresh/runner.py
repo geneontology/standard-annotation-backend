@@ -27,7 +27,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
 from uuid import UUID
 
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.jobs import (
+    TERMINAL_JOB_STATUSES,
+    JobType,
+)
 from standard_annotation_backend.domain.refresh import (
     ProgressReporter,
     RefreshFailureCode,
@@ -52,8 +55,6 @@ from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.job_service import Job, JobService
 
 logger = logging.getLogger(__name__)
-
-_TERMINAL = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED})
 
 
 class RefreshKind(Protocol):
@@ -182,7 +183,7 @@ class RefreshRunner:
             job = self._jobs.start(job_id)
             kind = self._kinds.get(job.job_type)
             source_key = _source_key_or_none(job)
-            if job.status in _TERMINAL:
+            if job.status in TERMINAL_JOB_STATUSES:
                 # A redelivered message for a finished job only repeats the kind's
                 # follow-up work, such as scheduling ontology pruning, which is
                 # safe to repeat.
@@ -207,7 +208,7 @@ class RefreshRunner:
             if not acquired:
                 return
             job = self._jobs.start(job_id)
-            if job.status in _TERMINAL:
+            if job.status in TERMINAL_JOB_STATUSES:
                 return
             source_key = _source_key_or_none(job)
             if job.job_type is not JobType.ENTITY_RETIREMENT or source_key is None:

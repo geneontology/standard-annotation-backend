@@ -7,8 +7,7 @@ and move the group to `sab_managed` permanently. One service runs both job types
 Staging and publication commit in separate transactions.
 """
 
-from collections.abc import Iterator
-from itertools import islice
+from itertools import batched
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotation_management import (
@@ -223,7 +222,9 @@ class AnnotationRefreshService:
             imports.lock_job(job_id)
             imports.discard_unpublished(job_id)
             with GpadDocument(text) as document:
-                for batch in _batches(document.items()):
+                for batch in batched(
+                    document.items(), _STAGING_BATCH_SIZE, strict=False
+                ):
                     parsed: list[ParsedAnnotation] = []
                     for item in batch:
                         if isinstance(item, ParsedAnnotation):
@@ -346,9 +347,3 @@ def _has_unknown_subject_rejections(report: dict[str, object]) -> bool:
     """Report whether a stored rejection report counts any unknown-entity rejection."""
     by_code = report.get("by_code")
     return isinstance(by_code, dict) and bool(by_code.get(UNKNOWN_DB_OBJECT_ID))
-
-
-def _batches[T](items: Iterator[T]) -> Iterator[list[T]]:
-    """Split streamed items into lists of at most 5,000."""
-    while batch := list(islice(items, _STAGING_BATCH_SIZE)):
-        yield batch

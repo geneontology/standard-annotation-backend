@@ -16,6 +16,7 @@ from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
     AnnotationStatus,
+    ChangeSource,
     new_annotation_id,
 )
 from standard_annotation_backend.domain.audit import AuditAction
@@ -42,7 +43,7 @@ def insert_annotation(
     *,
     owning_group_id: str = "MGI",
     actor_id: str = "curator",
-    change_source: str = "test",
+    change_source: ChangeSource = ChangeSource.API,
     record_origin: AnnotationOrigin = AnnotationOrigin.DIRECT,
     source_import_job_id: UUID | None = None,
     annotation_id: UUID | None = None,

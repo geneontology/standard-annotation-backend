@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 
 from standard_annotation_backend.domain.annotations import (
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.persistence import models
 from standard_annotation_backend.persistence.models import (
@@ -715,7 +716,7 @@ def test_annotation_version_constraint_rejects_nonpositive_versions(
                 "annotation_data": {},
                 "is_deleted": False,
                 "actor_id": "test-user",
-                "change_source": "test",
+                "change_source": ChangeSource.API,
             },
         )
 
@@ -735,7 +736,7 @@ def test_comment_constraint_rejects_unknown_annotation_version(
                 "annotation_data": {},
                 "is_deleted": False,
                 "actor_id": "test-user",
-                "change_source": "test",
+                "change_source": ChangeSource.API,
             },
         )
 
@@ -768,7 +769,7 @@ def test_comment_constraint_rejects_whitespace_only_body(
                 "annotation_data": {},
                 "is_deleted": False,
                 "actor_id": "test-user",
-                "change_source": "test",
+                "change_source": ChangeSource.API,
             },
         )
 

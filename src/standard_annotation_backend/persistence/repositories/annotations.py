@@ -12,6 +12,7 @@ from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
     AnnotationStatus,
+    ChangeSource,
     new_annotation_id,
 )
 from standard_annotation_backend.domain.ontology import OntologyKey
@@ -395,7 +396,7 @@ class AnnotationRepository:
         annotation: Annotation,
         actor_id: str,
         owning_group_id: str,
-        change_source: str = "api",
+        change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         """Store an annotation unless an equivalent one is active.
 
@@ -463,7 +464,7 @@ class AnnotationRepository:
         *,
         expected_version: int,
         actor_id: str,
-        change_source: str = "api",
+        change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         """Update an annotation when the client version is current.
 
@@ -541,7 +542,7 @@ class AnnotationRepository:
         persistence_data: AnnotationPersistenceData,
         *,
         actor_id: str,
-        change_source: str,
+        change_source: ChangeSource,
     ) -> AnnotationRecord:
         """Save replacement data and rebuild the records used for searching.
 
@@ -586,7 +587,7 @@ class AnnotationRepository:
         annotation: Annotation,
         *,
         actor_id: str,
-        change_source: str,
+        change_source: ChangeSource,
     ) -> AnnotationRecord:
         """Update one annotation after system-wide validation is complete.
 
@@ -615,7 +616,7 @@ class AnnotationRepository:
         *,
         expected_version: int,
         actor_id: str,
-        change_source: str = "api",
+        change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         """Mark an annotation as deleted when its version matches.
 
@@ -659,7 +660,7 @@ class AnnotationRepository:
         record: AnnotationRecord,
         *,
         actor_id: str,
-        change_source: str,
+        change_source: ChangeSource,
     ) -> AnnotationRecord:
         """Save a deletion version and remove records used for active searches.
 

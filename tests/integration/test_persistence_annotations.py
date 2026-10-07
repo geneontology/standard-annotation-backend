@@ -13,6 +13,7 @@ from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
     AnnotationStatus,
+    ChangeSource,
 )
 from standard_annotation_backend.persistence.annotation_data import (
     prepare_annotation_for_persistence,
@@ -165,7 +166,7 @@ def test_imported_duplicate_peers_coexist_and_find_each_other(
                 unit_of_work.annotations.session,
                 annotation=validated_annotation,
                 actor_id="importer",
-                change_source="legacy-import",
+                change_source=ChangeSource.ANNOTATION_REFRESH,
                 owning_group_id="legacy",
                 record_origin=AnnotationOrigin.IMPORT,
                 source_import_job_id=job_id,
@@ -207,7 +208,7 @@ def test_update_appends_version_and_replaces_current_derived_values(
             changed,
             expected_version=1,
             actor_id="editor",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         unit_of_work.commit()
         assert record.current_version == 2
@@ -287,7 +288,7 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
                 intervening,
                 expected_version=1,
                 actor_id="intervening-editor",
-                change_source="api",
+                change_source=ChangeSource.API,
             )
             unit_of_work.commit()
 
@@ -302,7 +303,7 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
                     candidate,
                     expected_version=2,
                     actor_id="final-editor",
-                    change_source="api",
+                    change_source=ChangeSource.API,
                 )
 
 
@@ -334,7 +335,7 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
                 intervening,
                 expected_version=1,
                 actor_id="intervening-editor",
-                change_source="api",
+                change_source=ChangeSource.API,
             )
             unit_of_work.commit()
 
@@ -348,7 +349,7 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
                     annotation_id,
                     expected_version=2,
                     actor_id="deleter",
-                    change_source="api",
+                    change_source=ChangeSource.API,
                 )
 
 
@@ -364,7 +365,7 @@ def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
             annotation_id,
             expected_version=1,
             actor_id="deleter",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         unit_of_work.commit()
         assert deleted.current_version == 2
@@ -414,7 +415,7 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
             annotation_id,
             expected_version=1,
             actor_id="deleter",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         unit_of_work.commit()
 
@@ -425,14 +426,14 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
                 validated_annotation,
                 expected_version=2,
                 actor_id="editor",
-                change_source="api",
+                change_source=ChangeSource.API,
             )
         with pytest.raises(AnnotationDeletedError):
             unit_of_work.annotations.soft_delete(
                 annotation_id,
                 expected_version=2,
                 actor_id="deleter",
-                change_source="api",
+                change_source=ChangeSource.API,
             )
 
     missing_id = uuid4()
@@ -443,14 +444,14 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
                 validated_annotation,
                 expected_version=1,
                 actor_id="editor",
-                change_source="api",
+                change_source=ChangeSource.API,
             )
         with pytest.raises(AnnotationNotFoundError):
             unit_of_work.annotations.soft_delete(
                 missing_id,
                 expected_version=1,
                 actor_id="deleter",
-                change_source="api",
+                change_source=ChangeSource.API,
             )
 
 

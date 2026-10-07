@@ -1,5 +1,7 @@
 """Apply domain ownership rules to annotation records."""
 
+from uuid import UUID
+
 from standard_annotation_backend.domain.auth import (
     AuthorizationContext,
     AuthorizationScope,
@@ -69,3 +71,38 @@ def authorize_annotation(
         authorize(context, action, ResourceOwnership(creator, record.owning_group_id))
     except PermissionDeniedError:
         raise AnnotationNotFoundError(record.annotation_id) from None
+
+
+def load_authorized_annotation(
+    repository: AnnotationRepository,
+    context: AuthorizationContext,
+    action: PermissionAction,
+    annotation_id: UUID,
+    *,
+    include_deleted: bool = False,
+) -> AnnotationRecord:
+    """Return an annotation only when it exists within the selected ownership scope.
+
+    A missing annotation and one outside the caller's scope raise the same error,
+    so callers cannot learn whether an inaccessible annotation exists. Callers
+    check the role with `authorize_role` before calling this function.
+
+    Args:
+        repository: Repository used to read the annotation and its first version.
+        context: Trusted identity and selected authorization.
+        action: Existing-resource action being attempted.
+        annotation_id: Identifier of the annotation to load.
+        include_deleted: Whether a soft-deleted annotation may be returned.
+
+    Returns:
+        The current annotation record.
+
+    Raises:
+        AnnotationNotFoundError: If the annotation is missing, is deleted while
+            `include_deleted` is false, or is outside the selected scope.
+    """
+    record = repository.get(annotation_id, include_deleted=include_deleted)
+    if record is None:
+        raise AnnotationNotFoundError(annotation_id)
+    authorize_annotation(repository, context, action, record)
+    return record

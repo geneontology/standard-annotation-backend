@@ -15,6 +15,7 @@ from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
@@ -357,7 +358,7 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
             uow.annotations.session,
             annotation=annotation,
             actor_id="creator",
-            change_source="test",
+            change_source=ChangeSource.API,
             owning_group_id="group-1",
             record_origin=AnnotationOrigin.DIRECT,
             annotation_id=annotation_id,

@@ -20,6 +20,14 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationExtension,
     AnnotationProperties,
 )
+from standard_annotation_backend.domain.auth import (
+    AuthorizationRole,
+    AuthorizationScope,
+)
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetOperation,
+    ChangeSetState,
+)
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.refresh.sources import SourceKey
 from standard_annotation_backend.services.annotation_service import (
@@ -480,7 +488,7 @@ class ChangeSetPreviewResource(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     change_set_id: UUID
-    operation: Literal["create", "update", "delete"]
+    operation: ChangeSetOperation
     annotation_id: UUID | None
     base_version: int | None
     current_version: int | None
@@ -504,8 +512,8 @@ class ChangeSetResource(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     change_set_id: UUID
-    operation: Literal["create", "update", "delete"]
-    state: Literal["proposed", "accepted", "rejected", "stale"]
+    operation: ChangeSetOperation
+    state: ChangeSetState
     owning_group_id: str
     annotation_id: UUID | None
     base_version: int | None
@@ -599,8 +607,8 @@ class TokenContextResource(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     assignment_id: UUID
-    role: Literal["read", "edit", "admin"]
-    scope: Literal["self", "group", "global"]
+    role: AuthorizationRole
+    scope: AuthorizationScope
     group_id: str | None
 
 
@@ -623,8 +631,8 @@ class TokenResource(BaseModel):
     expires_at: datetime
     last_used_at: datetime | None
     revoked_at: datetime | None
-    role: Literal["read", "edit", "admin"]
-    scope: Literal["self", "group", "global"]
+    role: AuthorizationRole
+    scope: AuthorizationScope
     group_id: str | None
     assignment_is_active: bool
 

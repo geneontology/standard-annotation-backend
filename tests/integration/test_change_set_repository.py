@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.persistence import models, repositories
 from standard_annotation_backend.persistence.locks import (
@@ -26,7 +27,7 @@ def _create_target(factory: UnitOfWorkFactory, annotation: Annotation) -> UUID:
             unit_of_work.annotations.session,
             annotation=annotation,
             actor_id="creator",
-            change_source="api",
+            change_source=ChangeSource.API,
             owning_group_id="target-group",
             record_origin=AnnotationOrigin.DIRECT,
         )

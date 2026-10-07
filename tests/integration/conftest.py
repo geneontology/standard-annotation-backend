@@ -11,7 +11,6 @@ import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from psycopg import sql
-from seeding import insert_annotation
 from sqlalchemy import Engine, select
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
@@ -24,6 +23,7 @@ from standard_annotation_backend.api.dependencies import (
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
@@ -312,6 +312,11 @@ def seed_annotation(
     session_factory: sessionmaker[Session],
 ) -> Callable[[str], UUID]:
     """Provide a helper that creates one active direct annotation for a subject."""
+    # Imported here, not at module level: unit tests load this module to check
+    # the database guard, and `tests/integration` is only on the import path
+    # when pytest collects integration tests.
+    from seeding import insert_annotation
+
     with session_factory() as session:
         if (
             session.scalar(
@@ -341,7 +346,7 @@ def seed_annotation(
                 uow.annotations.session,
                 annotation=annotation,
                 actor_id="curator",
-                change_source="test",
+                change_source=ChangeSource.API,
                 owning_group_id="MGI",
                 record_origin=AnnotationOrigin.DIRECT,
                 annotation_id=annotation_id,

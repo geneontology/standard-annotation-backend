@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+from standard_annotation_backend.domain.annotations import ChangeSource
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import RequestContext
 from standard_annotation_backend.persistence.models import AuditEventRecord, JobRecord
@@ -58,7 +59,7 @@ class AuditService:
             change_set_id=change_set_id,
             annotation_id=annotation_id,
             annotation_version=annotation_version,
-            details={"change_source": "change_set", "operation": operation},
+            details={"change_source": ChangeSource.CHANGE_SET, "operation": operation},
         )
 
     def record_annotation_mutation(
@@ -91,7 +92,7 @@ class AuditService:
             result=AuditResult.SUCCESS,
             annotation_id=annotation_id,
             annotation_version=annotation_version,
-            details={"change_source": "api"},
+            details={"change_source": ChangeSource.API},
         )
 
     def record_annotation_comment_mutation(
@@ -127,7 +128,7 @@ class AuditService:
             annotation_id=annotation_id,
             annotation_version=annotation_version,
             comment_id=comment_id,
-            details={"change_source": "api"},
+            details={"change_source": ChangeSource.API},
         )
 
     def record_ontology_annotation_update(
@@ -146,7 +147,7 @@ class AuditService:
             annotation_id=annotation_id,
             annotation_version=annotation_version,
             job_id=job_id,
-            details={"change_source": "ontology_refresh"},
+            details={"change_source": ChangeSource.ONTOLOGY_REFRESH},
         )
 
     def record_ontology_refreshed(

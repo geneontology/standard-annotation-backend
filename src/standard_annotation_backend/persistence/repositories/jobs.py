@@ -7,12 +7,38 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.jobs import (
+    ACTIVE_JOB_STATUSES,
+    JobStatus,
+    JobType,
+)
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     acquire_transaction_lock,
 )
 from standard_annotation_backend.persistence.models import JobRecord
+
+
+def lock_job_record(session: Session, job_id: UUID) -> JobRecord | None:
+    """Load a job under a row lock held until the transaction ends.
+
+    The row is reloaded from the database even if the session already holds it,
+    so callers see the state committed by any transaction that held the lock
+    before them.
+
+    Args:
+        session: Session whose transaction holds the lock.
+        job_id: Identifier of the job to lock.
+
+    Returns:
+        The locked job, or `None` if no job has the identifier.
+    """
+    return session.scalar(
+        select(JobRecord)
+        .where(JobRecord.job_id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
 
 
 class JobNotFoundError(LookupError):
@@ -80,7 +106,7 @@ class JobRepository:
             select(JobRecord)
             .where(
                 JobRecord.job_type == job_type,
-                JobRecord.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+                JobRecord.status.in_(ACTIVE_JOB_STATUSES),
                 JobRecord.parameters["source_key"].astext == source_key,
             )
             .order_by(JobRecord.created_at, JobRecord.job_id)
@@ -161,7 +187,7 @@ class JobRepository:
             if record.error == error:
                 return JobMutation(record, False)
             raise InvalidJobTransitionError("job already failed with another error")
-        if status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
+        if status not in ACTIVE_JOB_STATUSES:
             raise InvalidJobTransitionError("terminal job outcome cannot change")
         record.status = JobStatus.FAILED
         record.error = error
@@ -174,12 +200,7 @@ class JobRepository:
 
     def _lock(self, job_id: UUID) -> JobRecord:
         """Load a job under a row lock held until the transaction ends."""
-        record = self.session.scalar(
-            select(JobRecord)
-            .where(JobRecord.job_id == job_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+        record = lock_job_record(self.session, job_id)
         if record is None:
             raise JobNotFoundError(job_id)
         return record

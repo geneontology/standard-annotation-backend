@@ -3,9 +3,9 @@
 Every method works in the caller's transaction; the caller commits.
 """
 
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
-from itertools import islice
+from itertools import batched
 from uuid import UUID
 
 from sqlalchemy import delete, false, func, insert, literal, null, or_, select
@@ -26,9 +26,10 @@ from standard_annotation_backend.domain.annotation_management import (
 from standard_annotation_backend.domain.annotations import (
     AnnotationOrigin,
     AnnotationStatus,
+    ChangeSource,
     new_annotation_id,
 )
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.jobs import TERMINAL_JOB_STATUSES, JobType
 from standard_annotation_backend.domain.refresh import SourceProvenance
 from standard_annotation_backend.gpad.parser import ParsedAnnotation
 from standard_annotation_backend.persistence.annotation_data import (
@@ -53,9 +54,10 @@ from standard_annotation_backend.persistence.models import (
     GroupAnnotationManagementRecord,
     JobRecord,
 )
+from standard_annotation_backend.persistence.repositories.jobs import lock_job_record
 
 _GPAD_JOB_TYPES = frozenset({JobType.ANNOTATION_REFRESH, JobType.ANNOTATION_CUTOVER})
-_SYSTEM_CHANGE_SOURCES = ("ontology_refresh",)
+_SYSTEM_CHANGE_SOURCES = (ChangeSource.ONTOLOGY_REFRESH,)
 """Version sources that are system maintenance rather than local edits."""
 _INSERT_BATCH_SIZE = 5_000
 
@@ -75,12 +77,7 @@ class AnnotationImportRepository:
             AnnotationImportConflictError: If the job does not exist or is not a
                 GPAD job.
         """
-        job = self.session.scalar(
-            select(JobRecord)
-            .where(JobRecord.job_id == job_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+        job = lock_job_record(self.session, job_id)
         if job is None or job.job_type not in _GPAD_JOB_TYPES:
             raise AnnotationImportConflictError
         return job
@@ -161,7 +158,7 @@ class AnnotationImportRepository:
             (AnnotationStagingMultivaluedValueRecord, multivalued),
             (AnnotationStagingDuplicateReferenceRecord, references),
         ):
-            for batch in _batches(rows):
+            for batch in batched(rows, _INSERT_BATCH_SIZE, strict=False):
                 self.session.execute(insert(model), batch)
 
     def record_staged(
@@ -277,7 +274,7 @@ class AnnotationImportRepository:
                 GPAD job.
         """
         job = self.lock_job(job_id)
-        if job.status in {"failed", "succeeded"}:
+        if job.status in TERMINAL_JOB_STATUSES:
             self.discard_unpublished(job_id)
 
     def publish(self, job_id: UUID, *, actor_id: str) -> AnnotationRefreshResult:
@@ -320,7 +317,9 @@ class AnnotationImportRepository:
             self._require_staged_subjects(job_id)
         deleted = self._delete_group_data(record.group_key)
         change_source = (
-            "annotation_cutover" if record.is_cutover else "annotation_refresh"
+            ChangeSource.ANNOTATION_CUTOVER
+            if record.is_cutover
+            else ChangeSource.ANNOTATION_REFRESH
         )
         self._copy_staging(job_id, record.group_key, actor_id, change_source)
         now = datetime.now(UTC)
@@ -445,7 +444,7 @@ class AnnotationImportRepository:
         return len(deleted_ids.all())
 
     def _copy_staging(
-        self, job_id: UUID, group_key: str, actor_id: str, change_source: str
+        self, job_id: UUID, group_key: str, actor_id: str, change_source: ChangeSource
     ) -> None:
         """Insert a job's staged annotations, versions, and lookup rows."""
         staging = AnnotationStagingRecord
@@ -506,7 +505,7 @@ class AnnotationImportRepository:
                     staging.annotation_data,
                     false(),
                     literal(actor_id),
-                    literal(change_source),
+                    literal(change_source.value),
                 ).where(staging.job_id == job_id),
             )
         )
@@ -559,10 +558,3 @@ def _result(record: AnnotationImportRecord) -> AnnotationRefreshResult:
         ),
         rejection_report=RejectionReport.from_json(record.rejection_report),
     )
-
-
-def _batches(rows: Sequence[dict[str, object]]) -> Iterator[list[dict[str, object]]]:
-    """Split rows into lists of at most 5,000 for batched inserts."""
-    iterator = iter(rows)
-    while batch := list(islice(iterator, _INSERT_BATCH_SIZE)):
-        yield batch

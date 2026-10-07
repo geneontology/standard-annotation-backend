@@ -9,7 +9,7 @@ from seeding import insert_annotation
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
@@ -104,7 +104,7 @@ def test_create_preview_preserves_annotations_and_acceptance_records_history(
         assert annotation.owning_group_id == "curator-group"
         version = session.scalar(select(AnnotationVersionRecord))
         assert version is not None
-        assert version.change_source == "change_set"
+        assert version.change_source is ChangeSource.CHANGE_SET
         assert version.actor_id == "proposer"
         events = list(
             session.scalars(
@@ -231,15 +231,19 @@ def test_create_audit_failure_rolls_back_entire_workflow(
         assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
-@pytest.mark.parametrize("change_source", ["api", "change_set"])
+@pytest.mark.parametrize("change_source", [ChangeSource.API, ChangeSource.CHANGE_SET])
 def test_repository_create_records_selected_workflow(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
-    change_source: str,
+    change_source: ChangeSource,
 ) -> None:
     """The shared duplicate-safe write retains API defaults and explicit workflow."""
     with unit_of_work_factory() as unit_of_work:
-        kwargs = {} if change_source == "api" else {"change_source": change_source}
+        kwargs = (
+            {}
+            if change_source is ChangeSource.API
+            else {"change_source": change_source}
+        )
         created = unit_of_work.annotations.create(
             annotation=validated_annotation,
             actor_id="writer",
@@ -248,7 +252,7 @@ def test_repository_create_records_selected_workflow(
         )
         version = unit_of_work.annotations.get_version(created.annotation_id, 1)
         assert version is not None
-        assert version.change_source == change_source
+        assert version.change_source is change_source
 
 
 def test_update_preview_and_acceptance_use_base_snapshot(
@@ -292,7 +296,7 @@ def test_update_preview_and_acceptance_use_base_snapshot(
     with unit_of_work_factory() as unit_of_work:
         version = unit_of_work.annotations.get_version(target.annotation_id, 2)
         assert version is not None
-        assert version.change_source == "change_set"
+        assert version.change_source is ChangeSource.CHANGE_SET
         assert version.actor_id == "proposer"
     assert accepted.change_set.reviewed_by == "reviewer"
 
@@ -412,7 +416,7 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
             annotation=validated_annotation,
             owning_group_id="group",
             actor_id="importer",
-            change_source="import",
+            change_source=ChangeSource.ANNOTATION_REFRESH,
         )
         target_id = target.annotation_id
         legacy = insert_annotation(
@@ -420,7 +424,7 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
             annotation=validated_annotation,
             owning_group_id="other",
             actor_id="importer",
-            change_source="import",
+            change_source=ChangeSource.ANNOTATION_REFRESH,
         )
         new_peer = insert_annotation(
             unit_of_work.annotations.session,
@@ -429,7 +433,7 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
             ),
             owning_group_id="other",
             actor_id="importer",
-            change_source="import",
+            change_source=ChangeSource.ANNOTATION_REFRESH,
         )
         legacy_id, new_peer_id = legacy.annotation_id, new_peer.annotation_id
         unit_of_work.commit()
@@ -515,18 +519,22 @@ def test_update_proposal_requires_existing_base_version(
     assert error.value.errors[0]["type"] == "base_version_not_found"
 
 
-@pytest.mark.parametrize("change_source", ["api", "change_set"])
+@pytest.mark.parametrize("change_source", [ChangeSource.API, ChangeSource.CHANGE_SET])
 def test_repository_update_records_selected_workflow(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
-    change_source: str,
+    change_source: ChangeSource,
 ) -> None:
     """Shared update policy retains the default API source or the selected source."""
     with unit_of_work_factory() as unit_of_work:
         target = unit_of_work.annotations.create(
             annotation=validated_annotation, actor_id="writer", owning_group_id="group"
         )
-        kwargs = {} if change_source == "api" else {"change_source": change_source}
+        kwargs = (
+            {}
+            if change_source is ChangeSource.API
+            else {"change_source": change_source}
+        )
         unit_of_work.annotations.update(
             target.annotation_id,
             validated_annotation,
@@ -536,7 +544,7 @@ def test_repository_update_records_selected_workflow(
         )
         version = unit_of_work.annotations.get_version(target.annotation_id, 2)
         assert version is not None
-        assert version.change_source == change_source
+        assert version.change_source is change_source
 
 
 def test_delete_preview_and_acceptance_preserve_history(
@@ -576,7 +584,7 @@ def test_delete_preview_and_acceptance_preserve_history(
         version = unit_of_work.annotations.get_version(target.annotation_id, 2)
         assert version is not None
         assert version.is_deleted
-        assert version.change_source == "change_set"
+        assert version.change_source is ChangeSource.CHANGE_SET
         assert version.actor_id == "proposer"
     assert accepted.change_set.reviewed_by == "reviewer"
 
@@ -752,24 +760,28 @@ def test_unknown_change_set_has_transport_neutral_not_found_error(
     assert error.value.change_set_id == missing_id
 
 
-@pytest.mark.parametrize("change_source", ["api", "change_set"])
+@pytest.mark.parametrize("change_source", [ChangeSource.API, ChangeSource.CHANGE_SET])
 def test_repository_delete_records_selected_workflow(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
-    change_source: str,
+    change_source: ChangeSource,
 ) -> None:
     """Shared delete policy preserves the API default and explicit review source."""
     with unit_of_work_factory() as unit_of_work:
         target = unit_of_work.annotations.create(
             annotation=validated_annotation, actor_id="writer", owning_group_id="group"
         )
-        kwargs = {} if change_source == "api" else {"change_source": change_source}
+        kwargs = (
+            {}
+            if change_source is ChangeSource.API
+            else {"change_source": change_source}
+        )
         unit_of_work.annotations.soft_delete(
             target.annotation_id, actor_id="writer", expected_version=1, **kwargs
         )
         version = unit_of_work.annotations.get_version(target.annotation_id, 2)
         assert version is not None
-        assert version.change_source == change_source
+        assert version.change_source is change_source
 
 
 def test_delete_proposal_requires_existing_active_base_snapshot(
@@ -849,7 +861,7 @@ def test_repository_detected_stale_write_is_persisted_after_intervening_transact
         *,
         expected_version: int,
         actor_id: str,
-        change_source: str = "api",
+        change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         update_elsewhere()
         return original_update(
@@ -867,7 +879,7 @@ def test_repository_detected_stale_write_is_persisted_after_intervening_transact
         *,
         expected_version: int,
         actor_id: str,
-        change_source: str = "api",
+        change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         update_elsewhere()
         return original_delete(

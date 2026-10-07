@@ -8,7 +8,7 @@ from uuid import UUID
 
 import pytest
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
@@ -94,7 +94,7 @@ class VersionRecord:
     annotation_data: dict[str, object]
     is_deleted: bool
     actor_id: str
-    change_source: str
+    change_source: ChangeSource
     created_at: datetime
 
 
@@ -138,7 +138,7 @@ def _version_record(
         annotation_data=annotation_data or _valid_payload(),
         is_deleted=is_deleted,
         actor_id="provisional-api-user",
-        change_source="api",
+        change_source=ChangeSource.API,
         created_at=UPDATED_AT,
     )
 

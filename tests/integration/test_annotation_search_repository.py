@@ -11,6 +11,7 @@ from sqlalchemy import event
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.persistence import repositories
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
@@ -35,7 +36,7 @@ def _create(
         unit_of_work.annotations.session,
         annotation=annotation,
         actor_id="creator",
-        change_source="test",
+        change_source=ChangeSource.API,
         owning_group_id="group-1",
         record_origin=AnnotationOrigin.DIRECT,
         annotation_id=annotation_id,
@@ -236,7 +237,7 @@ def test_scalar_search_excludes_soft_deleted_rows_from_items_and_total(
             deleted_id,
             expected_version=1,
             actor_id="deleter",
-            change_source="test",
+            change_source=ChangeSource.API,
         )
         unit_of_work.commit()
 
@@ -415,7 +416,7 @@ def test_version_queries_include_deleted_annotation_and_paginate_oldest_first(
             _changed(validated_annotation, assigned_by="MGI"),
             expected_version=1,
             actor_id="editor",
-            change_source="test",
+            change_source=ChangeSource.API,
         )
         unit_of_work.commit()
     with unit_of_work_factory() as unit_of_work:
@@ -423,7 +424,7 @@ def test_version_queries_include_deleted_annotation_and_paginate_oldest_first(
             annotation_id,
             expected_version=2,
             actor_id="deleter",
-            change_source="test",
+            change_source=ChangeSource.API,
         )
         unit_of_work.commit()
 
@@ -480,7 +481,7 @@ def test_version_page_total_and_items_share_one_database_snapshot(
                     _changed(validated_annotation, assigned_by="MGI"),
                     expected_version=1,
                     actor_id="concurrent-editor",
-                    change_source="test",
+                    change_source=ChangeSource.API,
                 )
                 writer.commit()
 

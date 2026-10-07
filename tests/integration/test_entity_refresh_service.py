@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.entities import (
@@ -205,13 +206,16 @@ def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
                 uow.annotations.session,
                 annotation=annotation,
                 actor_id="curator",
-                change_source="test",
+                change_source=ChangeSource.API,
                 owning_group_id="MGI",
                 record_origin=AnnotationOrigin.DIRECT,
                 annotation_id=annotation_id,
             )
         deleted = uow.annotations.soft_delete(
-            UUID(int=4), expected_version=1, actor_id="curator", change_source="test"
+            UUID(int=4),
+            expected_version=1,
+            actor_id="curator",
+            change_source=ChangeSource.API,
         )
         assert deleted.status == "deleted"
         assert deleted.current_version == 2

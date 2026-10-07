@@ -12,7 +12,6 @@ from standard_annotation_backend.domain.auth import (
 )
 from standard_annotation_backend.persistence.models import AnnotationCommentRecord
 from standard_annotation_backend.persistence.repositories import (
-    AnnotationNotFoundError,
     AuditRepository,
     CommentNotFoundError,
 )
@@ -24,6 +23,7 @@ from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.resource_authorization import (
     authorize_annotation,
+    load_authorized_annotation,
 )
 
 
@@ -84,14 +84,11 @@ class CommentService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            annotation = unit_of_work.annotations.get(annotation_id)
-            if annotation is None:
-                raise AnnotationNotFoundError(annotation_id)
-            authorize_annotation(
+            load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.ANNOTATION_READ,
-                annotation,
+                annotation_id,
             )
             comment = unit_of_work.comments.create(
                 annotation_id,
@@ -133,14 +130,11 @@ class CommentService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            annotation = unit_of_work.annotations.get(annotation_id)
-            if annotation is None:
-                raise AnnotationNotFoundError(annotation_id)
-            authorize_annotation(
+            load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.ANNOTATION_READ,
-                annotation,
+                annotation_id,
             )
             page = unit_of_work.comments.list(
                 annotation_id,
@@ -281,14 +275,11 @@ def _authorized_comment_for_mutation(
         PermissionDeniedError: If the caller is neither the author nor an annotation
             administrator.
     """
-    annotation = unit_of_work.annotations.get(annotation_id)
-    if annotation is None:
-        raise AnnotationNotFoundError(annotation_id)
-    authorize_annotation(
+    annotation = load_authorized_annotation(
         unit_of_work.annotations,
         context,
         PermissionAction.ANNOTATION_READ,
-        annotation,
+        annotation_id,
     )
     comment = unit_of_work.comments.get_for_annotation(annotation_id, comment_id)
     if comment is None:

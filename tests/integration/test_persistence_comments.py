@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
@@ -51,7 +52,7 @@ def _create_annotation(
             unit_of_work.annotations.session,
             annotation=annotation,
             actor_id="creator",
-            change_source="api",
+            change_source=ChangeSource.API,
             owning_group_id="group-1",
             record_origin=AnnotationOrigin.DIRECT,
         )
@@ -215,7 +216,7 @@ def test_create_pins_actual_current_version_and_remains_pinned(
             version_two,
             expected_version=1,
             actor_id="editor",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         unit_of_work.commit()
 
@@ -240,7 +241,7 @@ def test_create_pins_actual_current_version_and_remains_pinned(
             version_three,
             expected_version=2,
             actor_id="editor",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         unit_of_work.commit()
 
@@ -395,7 +396,7 @@ def test_create_rejects_missing_and_deleted_annotations(
             annotation_id,
             expected_version=1,
             actor_id="deleter",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         unit_of_work.commit()
 
@@ -537,7 +538,7 @@ def test_comment_access_waits_for_an_in_progress_parent_deletion(
             annotation_id,
             expected_version=1,
             actor_id="deleter",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         contender.execute(text("SET LOCAL lock_timeout = '100ms'"))
         repository = AnnotationCommentRepository(contender)
@@ -597,7 +598,7 @@ def test_comment_access_refreshes_a_parent_deleted_after_an_earlier_read(
             annotation_id,
             expected_version=1,
             actor_id="deleter",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         holder.commit()
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from uuid import UUID
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
     PermissionAction,
@@ -30,7 +30,7 @@ from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFacto
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.resource_authorization import (
-    authorize_annotation,
+    load_authorized_annotation,
     ownership_filters,
 )
 
@@ -78,7 +78,7 @@ class AnnotationVersion:
     version: int
     is_deleted: bool
     actor_id: str
-    change_source: str
+    change_source: ChangeSource
     created_at: datetime
     annotation: Annotation
 
@@ -207,14 +207,11 @@ class AnnotationService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            record = unit_of_work.annotations.get(annotation_id)
-            if record is None:
-                raise AnnotationNotFoundError(annotation_id)
-            authorize_annotation(
+            record = load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.ANNOTATION_READ,
-                record,
+                annotation_id,
             )
             result = _current_annotation(record)
         return result
@@ -256,14 +253,11 @@ class AnnotationService:
             raise EmptyAnnotationPatchError
 
         with self._unit_of_work_factory() as unit_of_work:
-            current = unit_of_work.annotations.get(annotation_id)
-            if current is None:
-                raise AnnotationNotFoundError(annotation_id)
-            authorize_annotation(
+            current = load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.ANNOTATION_EDIT,
-                current,
+                annotation_id,
             )
             if current.current_version != expected_version:
                 raise StaleAnnotationVersionError(
@@ -312,14 +306,12 @@ class AnnotationService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_DELETE)
         with self._unit_of_work_factory() as unit_of_work:
-            current = unit_of_work.annotations.get(annotation_id, include_deleted=True)
-            if current is None:
-                raise AnnotationNotFoundError(annotation_id)
-            authorize_annotation(
+            load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.ANNOTATION_DELETE,
-                current,
+                annotation_id,
+                include_deleted=True,
             )
             record = unit_of_work.annotations.soft_delete(
                 annotation_id,
@@ -439,15 +431,13 @@ class AnnotationService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            current = unit_of_work.annotations.get(annotation_id, include_deleted=True)
-            if current is None:
-                raise AnnotationHistoryNotFoundError(annotation_id)
             try:
-                authorize_annotation(
+                load_authorized_annotation(
                     unit_of_work.annotations,
                     context,
                     PermissionAction.ANNOTATION_READ,
-                    current,
+                    annotation_id,
+                    include_deleted=True,
                 )
             except AnnotationNotFoundError:
                 raise AnnotationHistoryNotFoundError(annotation_id) from None
@@ -486,15 +476,13 @@ class AnnotationService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            current = unit_of_work.annotations.get(annotation_id, include_deleted=True)
-            if current is None:
-                raise AnnotationHistoryNotFoundError(annotation_id)
             try:
-                authorize_annotation(
+                load_authorized_annotation(
                     unit_of_work.annotations,
                     context,
                     PermissionAction.ANNOTATION_READ,
-                    current,
+                    annotation_id,
+                    include_deleted=True,
                 )
             except AnnotationNotFoundError:
                 raise AnnotationHistoryNotFoundError(annotation_id) from None

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.persistence.locks import (
     acquire_signature_locks,
@@ -136,7 +137,7 @@ def _create_annotation(
             session,
             annotation=annotation,
             actor_id="creator",
-            change_source="api",
+            change_source=ChangeSource.API,
             owning_group_id="group-1",
             record_origin=AnnotationOrigin.DIRECT,
         )
@@ -196,7 +197,7 @@ def test_waiter_reads_committed_update_after_acquiring_signature_lock(
             changed,
             expected_version=1,
             actor_id="editor-a",
-            change_source="api",
+            change_source=ChangeSource.API,
         )
         assert updated.annotation_data == expected_annotation_data
         update_flushed.set()

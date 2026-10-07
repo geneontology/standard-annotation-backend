@@ -14,7 +14,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
 from standard_annotation_backend.domain.duplicate_policy import (
     DuplicateKey,
     duplicate_key,
@@ -402,7 +402,7 @@ class OntologyRefreshService:
                     records_by_id[annotation_id],
                     proposals[annotation_id].annotation,
                     actor_id=actor_id,
-                    change_source="ontology_refresh",
+                    change_source=ChangeSource.ONTOLOGY_REFRESH,
                 )
                 audit.record_ontology_annotation_update(
                     actor_id=actor_id,

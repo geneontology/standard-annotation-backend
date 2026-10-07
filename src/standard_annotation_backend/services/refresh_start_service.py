@@ -18,7 +18,10 @@ from standard_annotation_backend.domain.auth import (
     PermissionAction,
     authorize_role,
 )
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.jobs import (
+    ACTIVE_JOB_STATUSES,
+    JobType,
+)
 from standard_annotation_backend.domain.refresh import (
     REFRESH_JOB_TYPES,
     RefreshFailureCode,
@@ -240,7 +243,7 @@ class RefreshStartService:
         """Dispatch an unfinished job; fail it only if this call created it."""
         # `find_active` only returns queued or running jobs, and new jobs are
         # queued, so this guard is defensive.
-        if item.job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
+        if item.job.status not in ACTIVE_JOB_STATUSES:
             return item.job
         try:
             # Sending a job twice is harmless: a worker that cannot take the

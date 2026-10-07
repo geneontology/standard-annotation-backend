@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
@@ -109,7 +110,7 @@ def _prepare(
                 uow.annotations.session,
                 annotation=annotation,
                 actor_id="creator",
-                change_source="test",
+                change_source=ChangeSource.API,
                 owning_group_id="group-1",
                 record_origin=AnnotationOrigin.DIRECT,
                 annotation_id=annotation_id,
@@ -167,7 +168,7 @@ def test_activation_replaces_all_occurrences_once_and_records_audits(
             annotation_id, limit=100, offset=0
         ).items
         assert len(versions) == 2
-        assert versions[-1].change_source == "ontology_refresh"
+        assert versions[-1].change_source is ChangeSource.ONTOLOGY_REFRESH
     with session_factory() as session:
         audits = _refresh_audits(session)
         assert [audit.action for audit in audits] == [
@@ -204,7 +205,7 @@ def test_activation_failure_rolls_back_snapshot_versions_and_audits(
         annotation: Annotation,
         *,
         actor_id: str,
-        change_source: str,
+        change_source: ChangeSource,
     ) -> AnnotationRecord:
         original(
             self,

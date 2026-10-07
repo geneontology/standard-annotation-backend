@@ -32,6 +32,7 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 from standard_annotation_backend.domain.annotations import (
     AnnotationOrigin,
     AnnotationStatus,
+    ChangeSource,
     new_annotation_id,
 )
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
@@ -724,7 +725,9 @@ class AnnotationVersionRecord(Base):
     annotation_data: Mapped[dict[str, object]] = mapped_column(JSONB)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     actor_id: Mapped[str] = mapped_column(Text)
-    change_source: Mapped[str] = mapped_column(String(100))
+    change_source: Mapped[ChangeSource] = mapped_column(
+        StrEnumColumn(ChangeSource, 100)
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

@@ -27,6 +27,7 @@ from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
+    ChangeSource,
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.ontology import (
@@ -160,7 +161,7 @@ def _prepare_load(
             unit_of_work.annotations.session,
             annotation=_annotation(OLD_TERM, object_id="UniProtKB:P12345"),
             actor_id="creator",
-            change_source="test",
+            change_source=ChangeSource.API,
             owning_group_id="group-1",
             record_origin=AnnotationOrigin.DIRECT,
             annotation_id=REPLACED_ANNOTATION_ID,
@@ -169,7 +170,7 @@ def _prepare_load(
             unit_of_work.annotations.session,
             annotation=_annotation(OTHER_TERM, object_id="UniProtKB:Q12345"),
             actor_id="creator",
-            change_source="test",
+            change_source=ChangeSource.API,
             owning_group_id="group-1",
             record_origin=AnnotationOrigin.DIRECT,
             annotation_id=OTHER_ANNOTATION_ID,
@@ -363,7 +364,7 @@ def test_activation_is_atomically_visible_and_blocks_ordinary_writes(
         annotation: Annotation,
         *,
         actor_id: str,
-        change_source: str,
+        change_source: ChangeSource,
     ) -> AnnotationRecord:
         updated = original(
             self,
@@ -449,7 +450,7 @@ def test_failed_activation_never_exposes_partial_state(
         annotation: Annotation,
         *,
         actor_id: str,
-        change_source: str,
+        change_source: ChangeSource,
     ) -> AnnotationRecord:
         original(
             self,

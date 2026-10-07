@@ -249,3 +249,25 @@ def test_review_request_models_and_stored_preview(client: TestClient) -> None:
         "expected_version",
         "current_version",
     } == set(schemas["StaleChangeSetDetails"]["required"])
+
+
+def test_change_set_responses_share_operation_and_state_vocabularies(
+    client: TestClient,
+) -> None:
+    """Responses reference one named schema for each change-set vocabulary."""
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    operation_ref = {"$ref": "#/components/schemas/ChangeSetOperation"}
+    assert schemas["ChangeSetResource"]["properties"]["operation"] == operation_ref
+    assert (
+        schemas["ChangeSetPreviewResource"]["properties"]["operation"] == operation_ref
+    )
+    assert schemas["ChangeSetResource"]["properties"]["state"] == {
+        "$ref": "#/components/schemas/ChangeSetState"
+    }
+    assert schemas["ChangeSetOperation"]["enum"] == ["create", "update", "delete"]
+    assert schemas["ChangeSetState"]["enum"] == [
+        "proposed",
+        "accepted",
+        "rejected",
+        "stale",
+    ]
