@@ -14,7 +14,10 @@ from seeding import insert_annotation
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.entities import (
     EntityCandidateConflictError,
@@ -25,7 +28,6 @@ from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import SourceDocument
 from standard_annotation_backend.gpi.parser import parse_gpi
 from standard_annotation_backend.persistence.models import (
-    AnnotationOrigin,
     AnnotationRecord,
     AnnotationVersionRecord,
     AuditEventRecord,

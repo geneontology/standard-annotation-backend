@@ -24,23 +24,21 @@ from standard_annotation_backend.domain.auth import (
     derive_creation_group,
 )
 from standard_annotation_backend.domain.change_sets import (
+    ChangeSetOperation,
+    ChangeSetState,
     InvalidChangeSetPatchError,
     apply_annotation_patch,
 )
+from standard_annotation_backend.domain.duplicate_policy import duplicate_key
 from standard_annotation_backend.domain.validation import (
     AnnotationValidationResult,
     ValidationIssue,
     validate_annotation,
 )
-from standard_annotation_backend.persistence.annotation_data import (
-    prepare_annotation_for_persistence,
-)
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
-    ChangeSetOperation,
     ChangeSetRecord,
-    ChangeSetState,
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationDeletedError,
@@ -644,7 +642,7 @@ def _accept_proposal(
             )
     preview = ChangeSetPreview(
         change_set_id=record.change_set_id,
-        operation=ChangeSetOperation(record.operation),
+        operation=record.operation,
         annotation_id=record.annotation_id,
         base_version=record.base_version,
         current_version=record.base_version,
@@ -777,7 +775,7 @@ def _build_preview(
     )
     return ChangeSetPreview(
         change_set_id=record.change_set_id,
-        operation=ChangeSetOperation(record.operation),
+        operation=record.operation,
         annotation_id=record.annotation_id,
         base_version=record.base_version,
         current_version=current_version,
@@ -844,10 +842,10 @@ def _duplicate_peers(
     exclude_annotation_id: UUID | None = None,
 ) -> tuple[UUID, ...]:
     """Look up active peers for advisory preview without performing a write."""
-    candidate = prepare_annotation_for_persistence(annotation)
+    key = duplicate_key(annotation)
     return repository.find_duplicate_peer_ids(
-        candidate.duplicate_base_signature,
-        candidate.canonical_references,
+        key.signature,
+        key.references,
         exclude_annotation_id=exclude_annotation_id,
     )
 

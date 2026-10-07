@@ -6,14 +6,16 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetOperation,
+    ChangeSetState,
+)
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
-    ChangeSetOperation,
     ChangeSetRecord,
-    ChangeSetState,
 )
 from standard_annotation_backend.persistence.repositories.annotations import (
     AnnotationNotFoundError,
@@ -95,7 +97,7 @@ class ChangeSetRepository:
                 )
             owning_group_id = target.owning_group_id
         record = ChangeSetRecord(
-            operation=operation.value,
+            operation=operation,
             owning_group_id=owning_group_id,
             annotation_id=annotation_id,
             base_version=base_version,
@@ -219,7 +221,7 @@ class ChangeSetRepository:
         reviewed_by: str,
         review_reason: str | None,
     ) -> ChangeSetRecord:
-        record.state = state.value
+        record.state = state
         record.reviewed_by = reviewed_by
         record.reviewed_at = datetime.now(UTC)
         record.review_reason = review_reason

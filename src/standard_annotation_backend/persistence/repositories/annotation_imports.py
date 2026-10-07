@@ -23,7 +23,11 @@ from standard_annotation_backend.domain.annotation_management import (
     RejectionReportBuilder,
     unknown_subject_rejection,
 )
-from standard_annotation_backend.domain.annotations import new_annotation_id
+from standard_annotation_backend.domain.annotations import (
+    AnnotationOrigin,
+    AnnotationStatus,
+    new_annotation_id,
+)
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import SourceProvenance
 from standard_annotation_backend.gpad.parser import ParsedAnnotation
@@ -38,12 +42,10 @@ from standard_annotation_backend.persistence.models import (
     AnnotationDuplicateReferenceRecord,
     AnnotationImportRecord,
     AnnotationMultivaluedFieldValueRecord,
-    AnnotationOrigin,
     AnnotationRecord,
     AnnotationStagingDuplicateReferenceRecord,
     AnnotationStagingMultivaluedValueRecord,
     AnnotationStagingRecord,
-    AnnotationStatus,
     AnnotationVersionRecord,
     AuditEventRecord,
     ChangeSetRecord,
@@ -52,9 +54,7 @@ from standard_annotation_backend.persistence.models import (
     JobRecord,
 )
 
-_GPAD_JOB_TYPES = frozenset(
-    {JobType.ANNOTATION_REFRESH.value, JobType.ANNOTATION_CUTOVER.value}
-)
+_GPAD_JOB_TYPES = frozenset({JobType.ANNOTATION_REFRESH, JobType.ANNOTATION_CUTOVER})
 _SYSTEM_CHANGE_SOURCES = ("ontology_refresh",)
 """Version sources that are system maintenance rather than local edits."""
 _INSERT_BATCH_SIZE = 5_000
@@ -236,7 +236,7 @@ class AnnotationImportRepository:
             # through an accepted change set, or left from an earlier import.
             group_annotations.where(
                 or_(
-                    AnnotationRecord.record_origin != AnnotationOrigin.IMPORT.value,
+                    AnnotationRecord.record_origin != AnnotationOrigin.IMPORT,
                     AnnotationRecord.source_import_job_id.is_distinct_from(
                         import_job_id
                     ),

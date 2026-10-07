@@ -10,7 +10,10 @@ import pytest
 from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationStatus,
+)
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
@@ -18,7 +21,6 @@ from standard_annotation_backend.domain.auth import (
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
-    AnnotationStatus,
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationRepository,

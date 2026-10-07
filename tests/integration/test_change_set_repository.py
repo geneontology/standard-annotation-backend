@@ -9,12 +9,14 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+)
 from standard_annotation_backend.persistence import models, repositories
 from standard_annotation_backend.persistence.locks import (
     GLOBAL_ANNOTATION_WRITE_LOCK_KEY,
 )
-from standard_annotation_backend.persistence.models import AnnotationOrigin
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 
 

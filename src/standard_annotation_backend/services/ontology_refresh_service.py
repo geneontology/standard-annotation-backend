@@ -15,6 +15,10 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.duplicate_policy import (
+    DuplicateKey,
+    duplicate_key,
+)
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
     AnnotationReplacementProposal,
@@ -43,10 +47,6 @@ from standard_annotation_backend.domain.refresh import (
 )
 from standard_annotation_backend.ontology.definitions import ontology_definition
 from standard_annotation_backend.ontology.obo_parser import parse_obo
-from standard_annotation_backend.persistence.annotation_data import (
-    AnnotationPersistenceData,
-    prepare_annotation_for_persistence,
-)
 from standard_annotation_backend.persistence.locks import (
     AdvisoryTryLock,
     LockNamespace,
@@ -325,7 +325,7 @@ class OntologyRefreshService:
             snapshot = _snapshot(candidate, candidate_terms)
             records = unit_of_work.annotations.lock_all_active_for_system_update()
             before = {
-                record.annotation_id: prepare_annotation_for_persistence(
+                record.annotation_id: duplicate_key(
                     Annotation.model_validate(record.annotation_data)
                 )
                 for record in records
@@ -349,8 +349,8 @@ class OntologyRefreshService:
                 for annotation_id, proposal in proposals.items()
                 if proposal.changed_paths
             }
-            proposed_data = {
-                annotation_id: prepare_annotation_for_persistence(proposal.annotation)
+            proposed_keys = {
+                annotation_id: duplicate_key(proposal.annotation)
                 for annotation_id, proposal in proposals.items()
                 if proposal.changed_paths
             }
@@ -359,11 +359,11 @@ class OntologyRefreshService:
             while True:
                 after = {
                     annotation_id: (
-                        proposed_data[annotation_id]
+                        proposed_keys[annotation_id]
                         if annotation_id in accepted
-                        else persistence_data
+                        else key
                     )
-                    for annotation_id, persistence_data in before.items()
+                    for annotation_id, key in before.items()
                 }
                 introduced = _duplicate_pairs(after) - before_pairs
                 newly_rejected = {
@@ -400,7 +400,7 @@ class OntologyRefreshService:
             for annotation_id in sorted(accepted):
                 updated = unit_of_work.annotations.apply_system_update(
                     records_by_id[annotation_id],
-                    proposed_data[annotation_id],
+                    proposals[annotation_id].annotation,
                     actor_id=actor_id,
                     change_source="ontology_refresh",
                 )
@@ -508,13 +508,13 @@ def _ontology_version(
 
 
 def _duplicate_pairs(
-    annotations: dict[UUID, AnnotationPersistenceData],
+    keys: dict[UUID, DuplicateKey],
 ) -> set[tuple[UUID, UUID]]:
     """Return all duplicate annotation ID pairs in the supplied candidate state."""
     indexed: dict[str, dict[str, list[UUID]]] = {}
-    for annotation_id, annotation in annotations.items():
-        references = indexed.setdefault(annotation.duplicate_base_signature, {})
-        for reference in set(annotation.canonical_references):
+    for annotation_id, key in keys.items():
+        references = indexed.setdefault(key.signature, {})
+        for reference in set(key.references):
             references.setdefault(reference, []).append(annotation_id)
 
     pairs: set[tuple[UUID, UUID]] = set()

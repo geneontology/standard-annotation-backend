@@ -11,12 +11,14 @@ from seeding import insert_annotation
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+)
 from standard_annotation_backend.persistence.locks import (
     acquire_signature_locks,
     signature_lock_key,
 )
-from standard_annotation_backend.persistence.models import AnnotationOrigin
 from standard_annotation_backend.persistence.repositories import AnnotationRepository
 
 LOW_SIGNATURE = "0123456789abcdef" * 4

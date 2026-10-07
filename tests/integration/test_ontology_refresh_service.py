@@ -16,7 +16,10 @@ from seeding import insert_annotation
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+)
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
     OntologyDocument,
@@ -24,12 +27,8 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
     OntologyTerm,
 )
-from standard_annotation_backend.persistence.annotation_data import (
-    AnnotationPersistenceData,
-)
 from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import (
-    AnnotationOrigin,
     AnnotationRecord,
     AuditEventRecord,
 )
@@ -202,7 +201,7 @@ def test_activation_failure_rolls_back_snapshot_versions_and_audits(
     def fail_after_update(
         self: AnnotationRepository,
         record: AnnotationRecord,
-        persistence_data: AnnotationPersistenceData,
+        annotation: Annotation,
         *,
         actor_id: str,
         change_source: str,
@@ -210,7 +209,7 @@ def test_activation_failure_rolls_back_snapshot_versions_and_audits(
         original(
             self,
             record,
-            persistence_data,
+            annotation,
             actor_id=actor_id,
             change_source=change_source,
         )

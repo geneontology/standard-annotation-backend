@@ -1,5 +1,6 @@
-"""Expose schema-generated annotation models and create SAB identifiers."""
+"""Expose schema-generated annotation models, SAB identifiers, and record states."""
 
+from enum import StrEnum
 from uuid import UUID, uuid4
 
 from go_standard_annotation_schema.datamodel.go_standard_annotation_schema import (
@@ -11,9 +12,25 @@ from go_standard_annotation_schema.datamodel.go_standard_annotation_schema impor
 __all__ = [
     "Annotation",
     "AnnotationExtension",
+    "AnnotationOrigin",
     "AnnotationProperties",
+    "AnnotationStatus",
     "new_annotation_id",
 ]
+
+
+class AnnotationStatus(StrEnum):
+    """Whether an annotation is current or soft-deleted."""
+
+    ACTIVE = "active"
+    DELETED = "deleted"
+
+
+class AnnotationOrigin(StrEnum):
+    """How an annotation entered SAB: created in SAB or imported from GPAD."""
+
+    DIRECT = "direct"
+    IMPORT = "import"
 
 
 def new_annotation_id() -> UUID:

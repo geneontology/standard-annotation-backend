@@ -9,7 +9,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+    AnnotationStatus,
+)
 from standard_annotation_backend.persistence.annotation_data import (
     prepare_annotation_for_persistence,
 )
@@ -17,9 +21,7 @@ from standard_annotation_backend.persistence.locks import acquire_signature_lock
 from standard_annotation_backend.persistence.models import (
     AnnotationDuplicateReferenceRecord,
     AnnotationMultivaluedFieldValueRecord,
-    AnnotationOrigin,
     AnnotationRecord,
-    AnnotationStatus,
     AnnotationVersionRecord,
     JobRecord,
 )

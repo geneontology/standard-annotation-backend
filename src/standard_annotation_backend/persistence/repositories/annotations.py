@@ -8,7 +8,12 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, delete, exists, select
 from sqlalchemy.orm import Session
 
-from standard_annotation_backend.domain.annotations import Annotation, new_annotation_id
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+    AnnotationStatus,
+    new_annotation_id,
+)
 from standard_annotation_backend.domain.ontology import OntologyKey
 from standard_annotation_backend.persistence.annotation_data import (
     AnnotationPersistenceData,
@@ -21,9 +26,7 @@ from standard_annotation_backend.persistence.locks import (
 from standard_annotation_backend.persistence.models import (
     AnnotationDuplicateReferenceRecord,
     AnnotationMultivaluedFieldValueRecord,
-    AnnotationOrigin,
     AnnotationRecord,
-    AnnotationStatus,
     AnnotationVersionRecord,
     OntologyClosureRecord,
     OntologyMetadataRecord,
@@ -186,7 +189,7 @@ class AnnotationRepository:
         )
         if not include_deleted:
             statement = statement.where(
-                AnnotationRecord.status == AnnotationStatus.ACTIVE.value
+                AnnotationRecord.status == AnnotationStatus.ACTIVE
             )
         return self.session.scalar(statement)
 
@@ -253,7 +256,7 @@ class AnnotationRepository:
             The selected annotation records and total number of matches.
         """
         statement = select(AnnotationRecord).where(
-            AnnotationRecord.status == AnnotationStatus.ACTIVE.value,
+            AnnotationRecord.status == AnnotationStatus.ACTIVE,
             *_ownership_conditions(filters.owning_group_id, filters.created_by),
         )
         for field_name in (
@@ -329,7 +332,7 @@ class AnnotationRepository:
         return tuple(
             self.session.scalars(
                 select(AnnotationRecord)
-                .where(AnnotationRecord.status == AnnotationStatus.ACTIVE.value)
+                .where(AnnotationRecord.status == AnnotationStatus.ACTIVE)
                 .order_by(AnnotationRecord.annotation_id)
                 .with_for_update()
                 .execution_options(populate_existing=True)
@@ -371,7 +374,7 @@ class AnnotationRepository:
                 == AnnotationDuplicateReferenceRecord.annotation_id,
             )
             .where(
-                AnnotationRecord.status == AnnotationStatus.ACTIVE.value,
+                AnnotationRecord.status == AnnotationStatus.ACTIVE,
                 AnnotationDuplicateReferenceRecord.duplicate_base_signature
                 == duplicate_base_signature,
                 AnnotationDuplicateReferenceRecord.canonical_reference.in_(references),
@@ -430,10 +433,10 @@ class AnnotationRepository:
         record = AnnotationRecord(
             annotation_id=annotation_id,
             current_version=1,
-            status=AnnotationStatus.ACTIVE.value,
+            status=AnnotationStatus.ACTIVE,
             deleted_at=None,
             owning_group_id=owning_group_id,
-            record_origin=AnnotationOrigin.DIRECT.value,
+            record_origin=AnnotationOrigin.DIRECT,
             source_import_job_id=None,
             **persistence_data.column_values(),
         )
@@ -580,7 +583,7 @@ class AnnotationRepository:
     def apply_system_update(
         self,
         record: AnnotationRecord,
-        persistence_data: AnnotationPersistenceData,
+        annotation: Annotation,
         *,
         actor_id: str,
         change_source: str,
@@ -589,10 +592,19 @@ class AnnotationRepository:
 
         The caller must hold the exclusive global annotation lock and evaluate
         duplicate safety for the complete batch before calling this method.
+
+        Args:
+            record: Current record of the annotation to update.
+            annotation: Validated replacement annotation.
+            actor_id: Identifier for the person or process making the change.
+            change_source: Workflow recorded in version history.
+
+        Returns:
+            The updated current annotation record.
         """
         return self._apply_update(
             record,
-            persistence_data,
+            prepare_annotation_for_persistence(annotation),
             actor_id=actor_id,
             change_source=change_source,
         )
@@ -666,7 +678,7 @@ class AnnotationRepository:
         next_version = record.current_version + 1
         now = datetime.now(UTC)
         record.current_version = next_version
-        record.status = AnnotationStatus.DELETED.value
+        record.status = AnnotationStatus.DELETED
         record.deleted_at = now
         record.updated_at = now
         self.session.add(
@@ -709,7 +721,7 @@ class AnnotationRepository:
 
     @staticmethod
     def _raise_if_deleted(record: AnnotationRecord) -> None:
-        if record.status == AnnotationStatus.DELETED.value:
+        if record.status == AnnotationStatus.DELETED:
             raise AnnotationDeletedError(
                 f"annotation {record.annotation_id} is already deleted"
             )

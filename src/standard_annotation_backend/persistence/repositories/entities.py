@@ -13,6 +13,9 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.annotations import (
+    AnnotationStatus,
+)
 from standard_annotation_backend.domain.entities import (
     EntityCandidateConflictError,
     EntityCatalog,
@@ -28,7 +31,6 @@ from standard_annotation_backend.persistence.locks import (
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
-    AnnotationStatus,
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
     EntitySourceRecord,
@@ -560,7 +562,7 @@ class EntityRepository:
                 select(AnnotationRecord.db_object_id, AnnotationRecord.annotation_id)
                 .where(
                     AnnotationRecord.db_object_id.in_([row["id"] for row in batch]),
-                    AnnotationRecord.status == AnnotationStatus.ACTIVE.value,
+                    AnnotationRecord.status == AnnotationStatus.ACTIVE,
                 )
                 .order_by(AnnotationRecord.db_object_id, AnnotationRecord.annotation_id)
             )

@@ -62,9 +62,9 @@ class AuditRepository:
             The newly stored audit event.
         """
         event = AuditEventRecord(
-            action=action.value,
+            action=action,
             actor_id=actor_id,
-            result=result.value,
+            result=result,
             token_id=token_id,
             token_name=token_name,
             selected_role=selected_role,

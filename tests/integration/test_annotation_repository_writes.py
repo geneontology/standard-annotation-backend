@@ -6,9 +6,14 @@ from uuid import UUID, uuid4
 import pytest
 from seeding import insert_annotation
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+)
 from standard_annotation_backend.persistence import repositories
-from standard_annotation_backend.persistence.models import AnnotationOrigin, JobRecord
+from standard_annotation_backend.persistence.models import (
+    JobRecord,
+)
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 UnitOfWorkFactory = Callable[[], SqlAlchemyUnitOfWork]

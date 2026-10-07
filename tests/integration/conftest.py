@@ -21,7 +21,10 @@ from standard_annotation_backend.api.dependencies import (
     get_authenticated_context,
     get_unit_of_work_factory,
 )
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+)
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
@@ -33,7 +36,6 @@ from standard_annotation_backend.persistence.database import (
     create_session_factory,
 )
 from standard_annotation_backend.persistence.models import (
-    AnnotationOrigin,
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
     JobRecord,

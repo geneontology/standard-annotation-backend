@@ -12,7 +12,12 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from standard_annotation_backend.domain.annotations import Annotation, new_annotation_id
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+    AnnotationStatus,
+    new_annotation_id,
+)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.persistence.annotation_data import (
@@ -21,9 +26,7 @@ from standard_annotation_backend.persistence.annotation_data import (
 from standard_annotation_backend.persistence.models import (
     AnnotationDuplicateReferenceRecord,
     AnnotationMultivaluedFieldValueRecord,
-    AnnotationOrigin,
     AnnotationRecord,
-    AnnotationStatus,
     AnnotationVersionRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory

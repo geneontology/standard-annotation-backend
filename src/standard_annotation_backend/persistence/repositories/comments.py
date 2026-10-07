@@ -6,13 +6,15 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.annotations import (
+    AnnotationStatus,
+)
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationCommentRecord,
     AnnotationRecord,
-    AnnotationStatus,
 )
 from standard_annotation_backend.persistence.repositories.annotations import (
     AnnotationDeletedError,
@@ -237,7 +239,7 @@ class AnnotationCommentRepository:
         annotation = self.session.scalar(statement)
         if annotation is None:
             raise AnnotationNotFoundError(f"annotation {annotation_id} was not found")
-        if annotation.status == AnnotationStatus.DELETED.value:
+        if annotation.status == AnnotationStatus.DELETED:
             raise AnnotationDeletedError(
                 f"annotation {annotation.annotation_id} is already deleted"
             )

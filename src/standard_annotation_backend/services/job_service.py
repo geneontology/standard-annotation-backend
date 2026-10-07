@@ -54,8 +54,8 @@ def job_from_record(record: JobRecord) -> Job:
     """Convert a stored job record to a service result."""
     return Job(
         job_id=record.job_id,
-        job_type=JobType(record.job_type),
-        status=JobStatus(record.status),
+        job_type=record.job_type,
+        status=record.status,
         requested_by=record.requested_by,
         parameters=dict(record.parameters),
         progress=dict(record.progress),

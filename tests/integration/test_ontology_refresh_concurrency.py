@@ -24,7 +24,10 @@ from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.config import get_settings
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+)
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.ontology import (
     OntologyDocument,
@@ -33,9 +36,6 @@ from standard_annotation_backend.domain.ontology import (
     OntologyTerm,
 )
 from standard_annotation_backend.domain.refresh import SourceDocument
-from standard_annotation_backend.persistence.annotation_data import (
-    AnnotationPersistenceData,
-)
 from standard_annotation_backend.persistence.locks import (
     GLOBAL_ANNOTATION_WRITE_LOCK_KEY,
     LockNamespace,
@@ -44,7 +44,6 @@ from standard_annotation_backend.persistence.locks import (
     try_advisory_lock,
 )
 from standard_annotation_backend.persistence.models import (
-    AnnotationOrigin,
     AnnotationRecord,
     JobRecord,
     OntologyMetadataRecord,
@@ -361,7 +360,7 @@ def test_activation_is_atomically_visible_and_blocks_ordinary_writes(
     def pause_after_update(
         self: AnnotationRepository,
         record: AnnotationRecord,
-        persistence_data: AnnotationPersistenceData,
+        annotation: Annotation,
         *,
         actor_id: str,
         change_source: str,
@@ -369,7 +368,7 @@ def test_activation_is_atomically_visible_and_blocks_ordinary_writes(
         updated = original(
             self,
             record,
-            persistence_data,
+            annotation,
             actor_id=actor_id,
             change_source=change_source,
         )
@@ -447,7 +446,7 @@ def test_failed_activation_never_exposes_partial_state(
     def fail_after_update(
         self: AnnotationRepository,
         record: AnnotationRecord,
-        persistence_data: AnnotationPersistenceData,
+        annotation: Annotation,
         *,
         actor_id: str,
         change_source: str,
@@ -455,7 +454,7 @@ def test_failed_activation_never_exposes_partial_state(
         original(
             self,
             record,
-            persistence_data,
+            annotation,
             actor_id=actor_id,
             change_source=change_source,
         )

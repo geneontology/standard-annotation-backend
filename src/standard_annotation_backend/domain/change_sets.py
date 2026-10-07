@@ -1,11 +1,29 @@
-"""Apply conservative JSON Patch updates to Standard Annotations."""
+"""Define change-set operations and states, and apply conservative JSON Patch updates."""
 
 from copy import deepcopy
 from dataclasses import dataclass
+from enum import StrEnum
 
 import jsonpatch
 
 from standard_annotation_backend.domain.annotations import Annotation
+
+
+class ChangeSetOperation(StrEnum):
+    """Operations that a proposal can request."""
+
+    CREATE = "create"
+    UPDATE = "update"
+    DELETE = "delete"
+
+
+class ChangeSetState(StrEnum):
+    """Review states of a change set."""
+
+    PROPOSED = "proposed"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    STALE = "stale"
 
 
 @dataclass(frozen=True, slots=True)

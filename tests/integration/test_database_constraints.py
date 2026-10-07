@@ -4,19 +4,60 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import CheckConstraint, Engine, insert, inspect, text
+from sqlalchemy import (
+    CheckConstraint,
+    Connection,
+    Engine,
+    String,
+    insert,
+    inspect,
+    text,
+)
+from sqlalchemy import (
+    column as sql_column,
+)
+from sqlalchemy import (
+    table as sql_table,
+)
 from sqlalchemy.exc import IntegrityError
 
+from standard_annotation_backend.domain.annotations import (
+    AnnotationOrigin,
+)
 from standard_annotation_backend.persistence import models
 from standard_annotation_backend.persistence.models import (
     AnnotationCommentRecord,
     AnnotationMultivaluedFieldValueRecord,
-    AnnotationOrigin,
     AnnotationRecord,
     AnnotationVersionRecord,
     JobRecord,
     OntologyMetadataRecord,
 )
+
+
+def _insert_unchecked(
+    connection: Connection, model: type[models.Base], values: dict[str, object]
+) -> None:
+    """Insert a row whose enum columns may hold any string.
+
+    The ORM rejects unknown enum values before a statement runs, so these tests
+    write those columns as plain `VARCHAR` values to show that the database's own
+    CHECK constraints reject them too.
+    """
+    columns = model.__table__.columns
+    untyped = sql_table(
+        model.__tablename__,
+        *(
+            sql_column(
+                name,
+                String()
+                if isinstance(columns[name].type, models.StrEnumColumn)
+                else columns[name].type,
+            )
+            for name in values
+        ),
+    )
+    connection.execute(insert(untyped), values)
 
 
 def _job_values(
@@ -60,7 +101,7 @@ def test_job_constraint_rejects_unimplemented_types(
 ) -> None:
     """The database rejects job types without an implemented worker."""
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
-        connection.execute(insert(JobRecord), _job_values(job_type=job_type))
+        _insert_unchecked(connection, JobRecord, _job_values(job_type=job_type))
 
 
 @pytest.mark.parametrize("status", ["queued", "running", "succeeded", "failed"])
@@ -121,7 +162,7 @@ def test_job_constraints_reject_invalid_shapes_and_transitions(
     """The database rejects unsupported values and impossible lifecycle rows."""
     values = _job_values() | changes
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
-        connection.execute(insert(JobRecord), values)
+        _insert_unchecked(connection, JobRecord, values)
 
 
 @pytest.mark.parametrize(
@@ -146,7 +187,7 @@ def test_job_constraints_reject_backwards_lifecycle_timestamps(
     }
     values.update(changes)
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
-        connection.execute(insert(JobRecord), values)
+        _insert_unchecked(connection, JobRecord, values)
 
 
 def test_active_ontology_snapshot_cannot_be_marked_pruned(
@@ -520,7 +561,7 @@ def test_change_set_constraints_reject_invalid_operation_and_review_shapes(
         "reason": "Evidence",
     } | changes
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
-        connection.execute(insert(models.ChangeSetRecord), values)
+        _insert_unchecked(connection, models.ChangeSetRecord, values)
 
 
 def test_change_set_database_generates_identity_and_proposal_time(
@@ -613,7 +654,7 @@ def test_targeted_change_set_constraints(
         "reason": "Evidence",
     } | changes
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
-        connection.execute(insert(models.ChangeSetRecord), values)
+        _insert_unchecked(connection, models.ChangeSetRecord, values)
 
 
 @pytest.mark.parametrize(
@@ -651,7 +692,7 @@ def test_annotation_constraints_reject_invalid_current_rows(
             )
 
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
-        connection.execute(insert(AnnotationRecord), values)
+        _insert_unchecked(connection, AnnotationRecord, values)
 
 
 def test_annotation_version_constraint_rejects_nonpositive_versions(

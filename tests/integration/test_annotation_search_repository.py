@@ -8,9 +8,11 @@ import pytest
 from seeding import insert_annotation
 from sqlalchemy import event
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+)
 from standard_annotation_backend.persistence import repositories
-from standard_annotation_backend.persistence.models import AnnotationOrigin
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 UnitOfWorkFactory = Callable[[], SqlAlchemyUnitOfWork]

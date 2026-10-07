@@ -8,7 +8,10 @@ from refresh_helpers import OboTerm, go_document, ignore_progress, obo, start_jo
 from seeding import insert_annotation
 from sqlalchemy import Engine
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+)
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
     OntologyDocument,
@@ -18,7 +21,6 @@ from standard_annotation_backend.domain.ontology import (
 )
 from standard_annotation_backend.ontology import obo_parser
 from standard_annotation_backend.persistence.locks import bind_try_lock
-from standard_annotation_backend.persistence.models import AnnotationOrigin
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,

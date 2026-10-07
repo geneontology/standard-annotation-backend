@@ -47,8 +47,8 @@ class JobRepository:
     ) -> JobRecord:
         """Store one queued job and flush its generated identifier."""
         record = JobRecord(
-            job_type=job_type.value,
-            status=JobStatus.QUEUED.value,
+            job_type=job_type,
+            status=JobStatus.QUEUED,
             requested_by=requested_by,
             parameters=parameters,
             progress={},
@@ -79,8 +79,8 @@ class JobRepository:
         return self.session.scalar(
             select(JobRecord)
             .where(
-                JobRecord.job_type == job_type.value,
-                JobRecord.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+                JobRecord.job_type == job_type,
+                JobRecord.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
                 JobRecord.parameters["source_key"].astext == source_key,
             )
             .order_by(JobRecord.created_at, JobRecord.job_id)
@@ -94,10 +94,10 @@ class JobRepository:
     def start(self, job_id: UUID, *, now: datetime) -> JobMutation:
         """Move a queued job to running under a row lock."""
         record = self._lock(job_id)
-        status = JobStatus(record.status)
+        status = record.status
         if status is not JobStatus.QUEUED:
             return JobMutation(record, False)
-        record.status = JobStatus.RUNNING.value
+        record.status = JobStatus.RUNNING
         record.started_at = now
         record.updated_at = now
         self.session.flush([record])
@@ -113,7 +113,7 @@ class JobRepository:
     ) -> JobMutation:
         """Replace progress for a running job under a row lock."""
         record = self._lock(job_id)
-        if JobStatus(record.status) is not JobStatus.RUNNING:
+        if record.status is not JobStatus.RUNNING:
             raise InvalidJobTransitionError("only running jobs can update progress")
         changed = record.progress != progress or tuple(record.warnings) != warnings
         if changed:
@@ -132,14 +132,14 @@ class JobRepository:
     ) -> JobMutation:
         """Finish a running job successfully under a row lock."""
         record = self._lock(job_id)
-        status = JobStatus(record.status)
+        status = record.status
         if status is JobStatus.SUCCEEDED:
             if record.result == result:
                 return JobMutation(record, False)
             raise InvalidJobTransitionError("job already succeeded with another result")
         if status is not JobStatus.RUNNING:
             raise InvalidJobTransitionError("only running jobs can succeed")
-        record.status = JobStatus.SUCCEEDED.value
+        record.status = JobStatus.SUCCEEDED
         record.result = result
         record.completed_at = now
         record.updated_at = now
@@ -156,14 +156,14 @@ class JobRepository:
     ) -> JobMutation:
         """Finish a queued or running job with a public error message."""
         record = self._lock(job_id)
-        status = JobStatus(record.status)
+        status = record.status
         if status is JobStatus.FAILED:
             if record.error == error:
                 return JobMutation(record, False)
             raise InvalidJobTransitionError("job already failed with another error")
         if status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
             raise InvalidJobTransitionError("terminal job outcome cannot change")
-        record.status = JobStatus.FAILED.value
+        record.status = JobStatus.FAILED
         record.error = error
         if progress is not None:
             record.progress = progress
