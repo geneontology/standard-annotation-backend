@@ -1,16 +1,100 @@
-"""Define token-management lifetime and expiration rules."""
+"""Define token-management lifetime and expiration rules and their errors."""
+
+from __future__ import annotations
 
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
 )
+from standard_annotation_backend.domain.errors import (
+    BadRequestError,
+    ErrorDetails,
+    ForbiddenError,
+    InvalidInputError,
+    NotFoundError,
+    UnauthenticatedError,
+)
+
+if TYPE_CHECKING:
+    from standard_annotation_backend.domain.validation import ValidationIssue
 
 TOKEN_MANAGEMENT_SESSION_TTL = timedelta(minutes=15)
+
+
+class OAuthStateError(BadRequestError):
+    """Reject a callback without the browser's matching OAuth state.
+
+    The state value binds a GitHub sign-in callback to the browser that started
+    it, which prevents another site from completing a sign-in on a user's behalf.
+    """
+
+    code = "invalid_oauth_state"
+    message = "OAuth state is invalid"
+
+
+class OAuthCallbackError(BadRequestError):
+    """Reject a denied or incomplete OAuth callback without reflecting its query."""
+
+    code = "invalid_oauth_callback"
+    message = "GitHub authentication was not completed"
+
+
+class OAuthIdentityNotAllowedError(ForbiddenError):
+    """Reject a GitHub login that is not in the synchronized authorization state."""
+
+    code = "github_identity_not_allowed"
+    message = "GitHub identity is not authorized for token management"
+
+
+class ManagementSessionRequiredError(UnauthenticatedError):
+    """Require a valid token-management session independently of bearer authority.
+
+    Token management authenticates with a short-lived browser session rather
+    than a bearer token, so this is distinct from `AuthenticationRequiredError`.
+    """
+
+    code = "management_session_required"
+    message = "A current token-management session is required"
+
+
+class TokenContextNotFoundError(NotFoundError):
+    """Hide missing and differently owned authorization contexts equally."""
+
+    code = "token_context_not_found"
+    message = "Token authorization context was not found"
+
+
+class TokenNotFoundError(NotFoundError):
+    """Hide missing and differently owned token IDs equally."""
+
+    code = "token_not_found"
+    message = "Token was not found"
+
+
+class InvalidTokenError(InvalidInputError):
+    """Report invalid token-creation input without retaining untrusted values.
+
+    Attributes:
+        errors: Located problems in the rejected name, context, or expiration.
+            They never include the submitted values.
+    """
+
+    code = "invalid_token"
+    message = "Token name, context, or expiration is invalid"
+
+    def __init__(self, errors: tuple[ValidationIssue, ...]) -> None:
+        self.errors = errors
+        super().__init__()
+
+    def details(self) -> ErrorDetails:
+        """Return the problems found in the rejected input."""
+        return self.errors
 
 
 @dataclass(frozen=True, slots=True)

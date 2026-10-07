@@ -81,7 +81,7 @@ def test_role_and_scope_matrix_has_literal_permission_outcomes(
     if permitted:
         authorize(context, PermissionAction(action), MATCHING_RESOURCE)
     else:
-        with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
+        with pytest.raises(PermissionDeniedError, match=r"^Permission denied$"):
             authorize(context, PermissionAction(action), MATCHING_RESOURCE)
 
 
@@ -118,7 +118,7 @@ def test_read_role_allows_each_read_action(action: PermissionAction) -> None:
 @pytest.mark.parametrize("role", [AuthorizationRole.READ, AuthorizationRole.EDIT])
 def test_job_reads_require_admin_role(role: AuthorizationRole) -> None:
     """Non-admin roles cannot read system-wide job state."""
-    with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
+    with pytest.raises(PermissionDeniedError, match=r"^Permission denied$"):
         authorize(
             _context(role, AuthorizationScope.GLOBAL),
             PermissionAction.JOB_READ,
@@ -152,7 +152,7 @@ def test_review_actions_require_admin_role() -> None:
     edit_context = _context(AuthorizationRole.EDIT, AuthorizationScope.GROUP)
     admin_context = _context(AuthorizationRole.ADMIN, AuthorizationScope.GROUP)
 
-    with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
+    with pytest.raises(PermissionDeniedError, match=r"^Permission denied$"):
         authorize(edit_context, PermissionAction.CHANGE_SET_REVIEW, MATCHING_RESOURCE)
 
     authorize(admin_context, PermissionAction.CHANGE_SET_REVIEW, MATCHING_RESOURCE)
@@ -171,7 +171,7 @@ def test_self_scope_requires_matching_creator_and_group(
 ) -> None:
     context = _context(AuthorizationRole.EDIT, AuthorizationScope.SELF)
 
-    with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
+    with pytest.raises(PermissionDeniedError, match=r"^Permission denied$"):
         authorize(context, PermissionAction.ANNOTATION_EDIT, resource)
 
 
@@ -187,7 +187,7 @@ def test_group_scope_requires_matching_owning_group(
 ) -> None:
     context = _context(AuthorizationRole.EDIT, AuthorizationScope.GROUP)
 
-    with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
+    with pytest.raises(PermissionDeniedError, match=r"^Permission denied$"):
         authorize(context, PermissionAction.ANNOTATION_EDIT, resource)
 
 
@@ -215,7 +215,7 @@ def test_group_restricted_creation_rejects_conflicting_ownership(
 ) -> None:
     context = _context(AuthorizationRole.EDIT, scope)
 
-    with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
+    with pytest.raises(PermissionDeniedError, match=r"^Permission denied$"):
         derive_creation_group(
             context,
             "other-group",
@@ -226,7 +226,7 @@ def test_group_restricted_creation_rejects_conflicting_ownership(
 def test_global_creation_requires_and_preserves_explicit_ownership() -> None:
     context = _context(AuthorizationRole.EDIT, AuthorizationScope.GLOBAL)
 
-    with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
+    with pytest.raises(PermissionDeniedError, match=r"^Permission denied$"):
         derive_creation_group(context, None, action=PermissionAction.ANNOTATION_CREATE)
 
     assert (
@@ -242,7 +242,7 @@ def test_global_creation_requires_and_preserves_explicit_ownership() -> None:
 def test_creation_ownership_enforces_role_before_scope() -> None:
     context = _context(AuthorizationRole.READ, AuthorizationScope.GLOBAL)
 
-    with pytest.raises(PermissionDeniedError, match=r"^permission denied$"):
+    with pytest.raises(PermissionDeniedError, match=r"^Permission denied$"):
         derive_creation_group(
             context,
             "requested-group",
@@ -265,8 +265,8 @@ def test_authentication_and_permission_errors_do_not_disclose_credentials() -> N
     authentication_error = AuthenticationRequiredError()
     permission_error = PermissionDeniedError()
 
-    assert str(authentication_error) == "authentication required"
-    assert str(permission_error) == "permission denied"
+    assert str(authentication_error) == "Authentication required"
+    assert str(permission_error) == "Permission denied"
     assert raw_credential not in repr(authentication_error)
     assert raw_credential not in repr(permission_error)
 

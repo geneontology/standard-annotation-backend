@@ -228,6 +228,8 @@ def test_annotation_openapi_documents_applicable_typed_errors(
     assert (
         responses["401"]["headers"]["WWW-Authenticate"]["schema"]["const"] == "Bearer"
     )
+    assert "`authentication_required`" in responses["401"]["description"]
+    assert "`permission_denied`" in responses["403"]["description"]
     assert "ApiErrorResponse" in schema["components"]["schemas"]
     for status_code, response in responses.items():
         if int(status_code) >= status.HTTP_400_BAD_REQUEST:

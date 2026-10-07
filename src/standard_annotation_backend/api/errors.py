@@ -8,7 +8,6 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from standard_annotation_backend.api.csrf import CsrfValidationError
 from standard_annotation_backend.api.models import (
     ApiErrorBody,
     ApiErrorDetails,
@@ -17,10 +16,6 @@ from standard_annotation_backend.api.models import (
     DuplicateAnnotationDetails,
     StaleAnnotationVersionDetails,
     StaleChangeSetDetails,
-)
-from standard_annotation_backend.auth.github_oauth import (
-    OAuthConfigurationError,
-    OAuthUpstreamError,
 )
 from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
@@ -53,33 +48,18 @@ from standard_annotation_backend.services.annotation_service import (
     UnsupportedClosureFieldError,
     UnsupportedClosurePredicateError,
 )
-from standard_annotation_backend.services.token_service import (
-    InvalidTokenError,
-    ManagementSessionRequiredError,
-    OAuthCallbackError,
-    OAuthIdentityNotAllowedError,
-    OAuthStateError,
-    TokenContextNotFoundError,
-    TokenNotFoundError,
-)
 
-BEARER_ERROR_RESPONSES = {
-    status.HTTP_401_UNAUTHORIZED: {
-        "model": ApiErrorResponse,
-        "description": "Authentication required",
-        "headers": {
-            "WWW-Authenticate": {"schema": {"type": "string", "const": "Bearer"}}
-        },
-    },
-    status.HTTP_403_FORBIDDEN: {
-        "model": ApiErrorResponse,
-        "description": "Permission denied",
-    },
-    status.HTTP_503_SERVICE_UNAVAILABLE: {
-        "model": ApiErrorResponse,
-        "description": "Credential storage is unavailable",
-    },
-}
+BEARER_ERRORS: tuple[type[SabError], ...] = (
+    AuthenticationRequiredError,
+    PermissionDeniedError,
+    CredentialPersistenceError,
+)
+"""Errors every bearer-protected route can return.
+
+A route that requires a bearer token can reject it, deny the caller's role or
+scope, or fail to reach credential storage, before its own work begins. Pass
+these to `error_responses` alongside the route's own errors.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,72 +297,6 @@ def install_exception_handlers(app: FastAPI) -> None:
     # "Fixed" means the response depends only on the exception type; no value
     # carried by the exception instance affects its status, body, or headers.
     fixed_errors: dict[type[Exception], _FixedErrorResponse] = {
-        AuthenticationRequiredError: _FixedErrorResponse(
-            status.HTTP_401_UNAUTHORIZED,
-            "authentication_required",
-            "Authentication required",
-            (("WWW-Authenticate", "Bearer"),),
-        ),
-        PermissionDeniedError: _FixedErrorResponse(
-            status.HTTP_403_FORBIDDEN,
-            "permission_denied",
-            "Permission denied",
-        ),
-        CsrfValidationError: _FixedErrorResponse(
-            status.HTTP_403_FORBIDDEN,
-            "invalid_csrf_token",
-            "Token-management request could not be verified",
-        ),
-        CredentialPersistenceError: _FixedErrorResponse(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "credential_storage_unavailable",
-            "Credential storage is unavailable",
-        ),
-        OAuthConfigurationError: _FixedErrorResponse(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "oauth_not_configured",
-            "GitHub authentication is not configured",
-        ),
-        OAuthUpstreamError: _FixedErrorResponse(
-            status.HTTP_502_BAD_GATEWAY,
-            "github_oauth_unavailable",
-            "GitHub authentication is unavailable",
-        ),
-        OAuthStateError: _FixedErrorResponse(
-            status.HTTP_400_BAD_REQUEST,
-            "invalid_oauth_state",
-            "OAuth state is invalid",
-        ),
-        OAuthCallbackError: _FixedErrorResponse(
-            status.HTTP_400_BAD_REQUEST,
-            "invalid_oauth_callback",
-            "GitHub authentication was not completed",
-        ),
-        OAuthIdentityNotAllowedError: _FixedErrorResponse(
-            status.HTTP_403_FORBIDDEN,
-            "github_identity_not_allowed",
-            "GitHub identity is not authorized for token management",
-        ),
-        ManagementSessionRequiredError: _FixedErrorResponse(
-            status.HTTP_401_UNAUTHORIZED,
-            "management_session_required",
-            "A current token-management session is required",
-        ),
-        TokenContextNotFoundError: _FixedErrorResponse(
-            status.HTTP_404_NOT_FOUND,
-            "token_context_not_found",
-            "Token authorization context was not found",
-        ),
-        TokenNotFoundError: _FixedErrorResponse(
-            status.HTTP_404_NOT_FOUND,
-            "token_not_found",
-            "Token was not found",
-        ),
-        InvalidTokenError: _FixedErrorResponse(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "invalid_token",
-            "Token name, context, or expiration is invalid",
-        ),
         ClosureTermRequiredError: _FixedErrorResponse(
             status.HTTP_400_BAD_REQUEST,
             "closure_term_required",

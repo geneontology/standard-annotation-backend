@@ -387,7 +387,7 @@ def test_unknown_token_service_error_has_no_secret(
 
     with pytest.raises(AuthenticationRequiredError) as raised:
         AuthenticationService(unit_of_work_factory).authenticate(RAW)
-    assert str(raised.value) == "authentication required"
+    assert str(raised.value) == "Authentication required"
 
 
 @pytest.mark.parametrize("failure_stage", ["flush", "commit"])

@@ -17,6 +17,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.auth import AuthenticationRequiredError
+from standard_annotation_backend.domain.tokens import InvalidTokenError
 from standard_annotation_backend.main import app
 from standard_annotation_backend.persistence.models import (
     ApiTokenRecord,
@@ -33,10 +34,7 @@ from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFacto
 from standard_annotation_backend.services.authentication_service import (
     AuthenticationService,
 )
-from standard_annotation_backend.services.token_service import (
-    InvalidTokenError,
-    TokenService,
-)
+from standard_annotation_backend.services.token_service import TokenService
 
 
 @pytest.fixture
@@ -354,13 +352,50 @@ def test_invalid_expiration_never_persists_token_or_audit(
         },
     )
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
-    assert response.json()["error"]["code"] in {
-        "invalid_token",
-        "request_validation_error",
-    }
+    error = response.json()["error"]
+    assert error["code"] in {"invalid_token", "request_validation_error"}
+    assert error["details"]
+    assert all("expires_at" in issue["location"] for issue in error["details"])
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(ApiTokenRecord)) == 0
         assert session.scalar(select(func.count()).select_from(AuditEventRecord)) == 0
+
+
+def test_out_of_range_expiration_reports_a_located_invalid_token_issue(
+    management_client: TestClient,
+    user_assignments: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expiration outside the allowed lifetime is reported at `expires_at`."""
+    monkeypatch.setattr(
+        "standard_annotation_backend.services.token_service._utc_now",
+        lambda: datetime(2026, 9, 16, tzinfo=UTC),
+    )
+    response = management_client.post(
+        "/tokens",
+        json={
+            "name": "Notebook",
+            "assignment_id": str(user_assignments["assignment_id"]),
+            "expires_at": "2026-09-15T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json() == {
+        "error": {
+            "code": "invalid_token",
+            "message": "Token name, context, or expiration is invalid",
+            "details": [
+                {
+                    "location": ["expires_at"],
+                    "message": (
+                        "expiration must be in the future and within one calendar year"
+                    ),
+                    "type": "invalid_token",
+                }
+            ],
+        }
+    }
 
 
 def test_cross_user_assignment_and_tokens_return_nondisclosing_404(
@@ -784,7 +819,7 @@ def test_creation_service_validates_names_without_an_http_boundary(
     """Non-HTTP callers cannot issue blank or overlong names through the service."""
     service = TokenService(unit_of_work_factory)
     raw = management_client.cookies["sab_token_management_session"]
-    with pytest.raises(InvalidTokenError):
+    with pytest.raises(InvalidTokenError) as raised:
         service.create_token(
             raw,
             {
@@ -793,6 +828,7 @@ def test_creation_service_validates_names_without_an_http_boundary(
                 "expires_at": _future_expiration(),
             },
         )
+    assert [issue["location"] for issue in raised.value.errors] == [("name",)]
     assert service.list_tokens(raw) == ()
 
 

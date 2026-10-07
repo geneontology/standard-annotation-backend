@@ -15,7 +15,7 @@ from standard_annotation_backend.api.dependencies import (
     require_expected_version,
 )
 from standard_annotation_backend.api.errors import (
-    BEARER_ERROR_RESPONSES,
+    BEARER_ERRORS,
     ApiError,
     RequestValidationFailedError,
     error_responses,
@@ -50,10 +50,7 @@ router = APIRouter(
     prefix="/annotations",
     tags=["annotations"],
     dependencies=[Depends(get_authenticated_context)],
-    responses={
-        **BEARER_ERROR_RESPONSES,
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
-    },
+    responses=error_responses(*BEARER_ERRORS, RequestValidationFailedError),
 )
 
 _ETAG_RESPONSE_HEADER = {

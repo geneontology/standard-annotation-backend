@@ -159,6 +159,10 @@ def test_job_read_documents_path_parameter_and_typed_errors(schema: dict) -> Non
         assert operation["responses"][code]["content"]["application/json"][
             "schema"
         ] == {"$ref": "#/components/schemas/ApiErrorResponse"}
+    responses = operation["responses"]
+    assert "`authentication_required`" in responses["401"]["description"]
+    assert "`permission_denied`" in responses["403"]["description"]
+    assert "`credential_storage_unavailable`" in responses["503"]["description"]
 
 
 @pytest.mark.parametrize("path", REFRESH_PATHS)

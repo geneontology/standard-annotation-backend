@@ -14,6 +14,7 @@ from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
 )
+from standard_annotation_backend.domain.errors import UnavailableError
 from standard_annotation_backend.domain.refresh import SourceProvenance
 from standard_annotation_backend.domain.tokens import TokenMetadata
 from standard_annotation_backend.persistence.locks import (
@@ -30,11 +31,11 @@ from standard_annotation_backend.persistence.models import (
 )
 
 
-class CredentialPersistenceError(Exception):
+class CredentialPersistenceError(UnavailableError):
     """Hide credential parameters and database diagnostics from error consumers."""
 
-    def __init__(self) -> None:
-        super().__init__("Credential storage is unavailable")
+    code = "credential_storage_unavailable"
+    message = "Credential storage is unavailable"
 
 
 def _protect_credential_errors[**P, T](operation: Callable[P, T]) -> Callable[P, T]:

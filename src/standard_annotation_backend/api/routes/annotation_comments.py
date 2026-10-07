@@ -12,7 +12,7 @@ from standard_annotation_backend.api.dependencies import (
     get_comment_service,
 )
 from standard_annotation_backend.api.errors import (
-    BEARER_ERROR_RESPONSES,
+    BEARER_ERRORS,
     RequestValidationFailedError,
     error_responses,
 )
@@ -37,15 +37,13 @@ router = APIRouter(
     prefix="/annotations/{annotation_id}/comments",
     tags=["annotation comments"],
     dependencies=[Depends(get_authenticated_context)],
-    responses={
-        **BEARER_ERROR_RESPONSES,
-        **error_responses(
-            AnnotationNotFoundError,
-            CommentNotFoundError,
-            InvalidCommentError,
-            RequestValidationFailedError,
-        ),
-    },
+    responses=error_responses(
+        *BEARER_ERRORS,
+        AnnotationNotFoundError,
+        CommentNotFoundError,
+        InvalidCommentError,
+        RequestValidationFailedError,
+    ),
 )
 
 

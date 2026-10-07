@@ -11,7 +11,7 @@ from standard_annotation_backend.api.dependencies import (
     get_unit_of_work_factory,
 )
 from standard_annotation_backend.api.errors import (
-    BEARER_ERROR_RESPONSES,
+    BEARER_ERRORS,
     RequestValidationFailedError,
     error_responses,
 )
@@ -49,7 +49,7 @@ router = APIRouter(
     prefix="/admin",
     tags=["admin operations"],
     dependencies=[Depends(get_authenticated_context)],
-    responses={**BEARER_ERROR_RESPONSES},
+    responses=error_responses(*BEARER_ERRORS),
 )
 
 _SHARED_DESCRIPTION = (

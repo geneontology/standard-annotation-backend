@@ -170,6 +170,9 @@ def test_change_set_routes_and_responses(
     assert (
         responses["401"]["headers"]["WWW-Authenticate"]["schema"]["const"] == "Bearer"
     )
+    assert "`authentication_required`" in responses["401"]["description"]
+    assert "`permission_denied`" in responses["403"]["description"]
+    assert "`credential_storage_unavailable`" in responses["503"]["description"]
     assert responses[str(success)]["content"]["application/json"]["schema"] == {
         "$ref": f"#/components/schemas/{model}"
     }

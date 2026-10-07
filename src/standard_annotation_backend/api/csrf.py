@@ -9,14 +9,19 @@ from hmac import compare_digest, new
 
 from fastapi import Request
 
+from standard_annotation_backend.domain.errors import ForbiddenError
+
 MANAGEMENT_CSRF_COOKIE = "sab_token_management_csrf"
 MANAGEMENT_CSRF_HEADER = "X-CSRF-Token"
 MANAGEMENT_SESSION_COOKIE = "sab_token_management_session"
 _CSRF_PREFIX = "sab_csrf_"
 
 
-class CsrfValidationError(RuntimeError):
+class CsrfValidationError(ForbiddenError):
     """Indicate that a token-management mutation lacks matching CSRF values."""
+
+    code = "invalid_csrf_token"
+    message = "Token-management request could not be verified"
 
 
 def management_csrf_token(raw_session: str, application_secret: str) -> str:

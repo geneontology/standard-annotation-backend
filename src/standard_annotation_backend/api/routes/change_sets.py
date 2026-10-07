@@ -10,7 +10,7 @@ from standard_annotation_backend.api.dependencies import (
     get_change_set_service,
 )
 from standard_annotation_backend.api.errors import (
-    BEARER_ERROR_RESPONSES,
+    BEARER_ERRORS,
     RequestValidationFailedError,
     error_responses,
 )
@@ -46,7 +46,7 @@ router = APIRouter(
     prefix="/change-sets",
     tags=["change-sets"],
     dependencies=[Depends(get_authenticated_context)],
-    responses={**BEARER_ERROR_RESPONSES},
+    responses=error_responses(*BEARER_ERRORS),
 )
 
 

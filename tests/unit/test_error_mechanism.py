@@ -6,7 +6,9 @@ from uuid import UUID
 
 from fastapi import status
 
+from standard_annotation_backend.api.csrf import CsrfValidationError
 from standard_annotation_backend.api.errors import (
+    BEARER_ERRORS,
     RequestValidationFailedError,
     error_responses,
     sab_error_response,
@@ -18,6 +20,10 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationNotFoundError,
     AnnotationVersionNotFoundError,
     EmptyAnnotationPatchError,
+)
+from standard_annotation_backend.domain.auth import (
+    AuthenticationRequiredError,
+    PermissionDeniedError,
 )
 from standard_annotation_backend.domain.comments import InvalidCommentError
 from standard_annotation_backend.domain.errors import (
@@ -36,6 +42,10 @@ from standard_annotation_backend.domain.errors import (
     UnauthenticatedError,
     UnavailableError,
     UpstreamError,
+)
+from standard_annotation_backend.domain.tokens import (
+    InvalidTokenError,
+    ManagementSessionRequiredError,
 )
 from standard_annotation_backend.domain.validation import ValidationIssue
 
@@ -221,3 +231,75 @@ def test_request_validation_failure_reports_each_issue() -> None:
             }
         ],
     }
+
+
+def test_only_missing_bearer_authentication_sends_a_bearer_challenge() -> None:
+    """Bearer failures challenge with `WWW-Authenticate`; management sessions do not."""
+    bearer = sab_error_response(AuthenticationRequiredError())
+    session = sab_error_response(ManagementSessionRequiredError())
+
+    assert bearer.status_code == session.status_code == status.HTTP_401_UNAUTHORIZED
+    assert bearer.headers["WWW-Authenticate"] == "Bearer"
+    assert "WWW-Authenticate" not in session.headers
+    assert _body(AuthenticationRequiredError()) == {
+        "error": {
+            "code": "authentication_required",
+            "message": "Authentication required",
+        }
+    }
+    assert _body(ManagementSessionRequiredError()) == {
+        "error": {
+            "code": "management_session_required",
+            "message": "A current token-management session is required",
+        }
+    }
+
+
+def test_denied_permission_and_csrf_disclose_no_details() -> None:
+    """Forbidden responses carry only their code and fixed message."""
+    assert sab_error_response(PermissionDeniedError()).status_code == 403
+    assert sab_error_response(CsrfValidationError()).status_code == 403
+    assert _body(PermissionDeniedError()) == {
+        "error": {"code": "permission_denied", "message": "Permission denied"}
+    }
+    assert _body(CsrfValidationError()) == {
+        "error": {
+            "code": "invalid_csrf_token",
+            "message": "Token-management request could not be verified",
+        }
+    }
+
+
+def test_invalid_token_reports_the_rejected_input_issues() -> None:
+    """Invalid token input returns the located problems found in that input."""
+    issue: ValidationIssue = {
+        "location": ("name",),
+        "message": "String should have at least 1 character",
+        "type": "string_too_short",
+    }
+
+    assert _body(InvalidTokenError((issue,)))["error"] == {
+        "code": "invalid_token",
+        "message": "Token name, context, or expiration is invalid",
+        "details": [
+            {
+                "location": ["name"],
+                "message": "String should have at least 1 character",
+                "type": "string_too_short",
+            }
+        ],
+    }
+
+
+def test_bearer_error_docs_list_each_code_and_the_challenge_header() -> None:
+    """Bearer-protected routes document 401, 403, and 503 with their codes."""
+    responses = error_responses(*BEARER_ERRORS)
+
+    assert set(responses) == {401, 403, 503}
+    assert "`authentication_required`" in responses[401]["description"]
+    assert responses[401]["headers"]["WWW-Authenticate"]["schema"] == {
+        "type": "string",
+        "const": "Bearer",
+    }
+    assert "`permission_denied`" in responses[403]["description"]
+    assert "`credential_storage_unavailable`" in responses[503]["description"]

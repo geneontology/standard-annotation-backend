@@ -27,8 +27,19 @@ from standard_annotation_backend.domain.auth import (
 )
 from standard_annotation_backend.domain.tokens import (
     TOKEN_MANAGEMENT_SESSION_TTL,
+    InvalidTokenError,
+    ManagementSessionRequiredError,
+    OAuthCallbackError,
+    OAuthIdentityNotAllowedError,
+    OAuthStateError,
+    TokenContextNotFoundError,
     TokenMetadata,
+    TokenNotFoundError,
     resolve_expiration,
+)
+from standard_annotation_backend.domain.validation import (
+    ValidationIssue,
+    validation_issues,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
@@ -36,34 +47,6 @@ from standard_annotation_backend.persistence.unit_of_work import (
     credential_unit_of_work,
 )
 from standard_annotation_backend.services.audit_service import AuditService
-
-
-class OAuthStateError(Exception):
-    """Reject a callback without the browser's matching OAuth state."""
-
-
-class OAuthCallbackError(Exception):
-    """Reject a denied or incomplete OAuth callback without reflecting its query."""
-
-
-class OAuthIdentityNotAllowedError(Exception):
-    """Reject a GitHub login that is not in the synchronized authorization state."""
-
-
-class ManagementSessionRequiredError(Exception):
-    """Require a valid token-management session independently of bearer authority."""
-
-
-class TokenContextNotFoundError(Exception):
-    """Hide missing and differently owned authorization contexts equally."""
-
-
-class TokenNotFoundError(Exception):
-    """Hide missing and differently owned token IDs equally."""
-
-
-class InvalidTokenError(Exception):
-    """Report invalid creation input without retaining untrusted values."""
 
 
 class TokenCreateInput(BaseModel):
@@ -269,9 +252,17 @@ class TokenService:
             user_id = self._user_id(uow, raw_session, now)
             try:
                 data = TokenCreateInput.model_validate(payload)
+            except ValidationError as error:
+                raise InvalidTokenError(validation_issues(error)) from None
+            try:
                 expires_at = resolve_expiration(data.expires_at, now)
-            except (ValidationError, ValueError):
-                raise InvalidTokenError from None
+            except ValueError as error:
+                issue = ValidationIssue(
+                    location=("expires_at",),
+                    message=str(error),
+                    type=InvalidTokenError.code,
+                )
+                raise InvalidTokenError((issue,)) from None
             assignment = uow.auth.get_active_assignment(user_id, data.assignment_id)
             if assignment is None:
                 raise TokenContextNotFoundError

@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, status
+from fastapi import APIRouter, Depends, Path
 
 from standard_annotation_backend.api.dependencies import (
     PageLimit,
@@ -12,13 +12,13 @@ from standard_annotation_backend.api.dependencies import (
     get_authenticated_context,
 )
 from standard_annotation_backend.api.errors import (
-    BEARER_ERROR_RESPONSES,
+    BEARER_ERRORS,
+    RequestValidationFailedError,
     error_responses,
 )
 from standard_annotation_backend.api.models import (
     AnnotationVersionPageResponse,
     AnnotationVersionResource,
-    ApiErrorResponse,
 )
 from standard_annotation_backend.domain.annotations import (
     AnnotationNotFoundError,
@@ -31,10 +31,7 @@ router = APIRouter(
     prefix="/annotations",
     tags=["annotations"],
     dependencies=[Depends(get_authenticated_context)],
-    responses={
-        **BEARER_ERROR_RESPONSES,
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
-    },
+    responses=error_responses(*BEARER_ERRORS, RequestValidationFailedError),
 )
 
 

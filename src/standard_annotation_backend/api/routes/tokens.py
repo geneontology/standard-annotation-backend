@@ -10,10 +10,15 @@ from fastapi.security import APIKeyCookie
 from standard_annotation_backend.api.csrf import (
     MANAGEMENT_CSRF_COOKIE,
     MANAGEMENT_SESSION_COOKIE,
+    CsrfValidationError,
     management_csrf_token,
     require_management_csrf,
 )
 from standard_annotation_backend.api.dependencies import get_unit_of_work_factory
+from standard_annotation_backend.api.errors import (
+    RequestValidationFailedError,
+    error_responses,
+)
 from standard_annotation_backend.api.models import (
     ApiErrorResponse,
     TokenContextListResponse,
@@ -23,9 +28,25 @@ from standard_annotation_backend.api.models import (
     TokenListResponse,
     TokenResource,
 )
-from standard_annotation_backend.auth.github_oauth import GitHubOAuthClient
+from standard_annotation_backend.auth.github_oauth import (
+    GitHubOAuthClient,
+    OAuthConfigurationError,
+    OAuthUpstreamError,
+)
 from standard_annotation_backend.auth.secrets import generate_secret
-from standard_annotation_backend.domain.tokens import TOKEN_MANAGEMENT_SESSION_TTL
+from standard_annotation_backend.domain.tokens import (
+    TOKEN_MANAGEMENT_SESSION_TTL,
+    InvalidTokenError,
+    ManagementSessionRequiredError,
+    OAuthCallbackError,
+    OAuthIdentityNotAllowedError,
+    OAuthStateError,
+    TokenContextNotFoundError,
+    TokenNotFoundError,
+)
+from standard_annotation_backend.persistence.repositories.auth import (
+    CredentialPersistenceError,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.token_service import TokenService
 
@@ -112,7 +133,7 @@ def get_github_oauth_client(request: Request) -> GitHubOAuthClient:
     status_code=status.HTTP_302_FOUND,
     responses={
         status.HTTP_302_FOUND: {"headers": _REDIRECT_HEADERS},
-        status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ApiErrorResponse},
+        **error_responses(OAuthConfigurationError),
     },
 )
 def github_login(
@@ -141,12 +162,18 @@ def github_login(
     response_class=RedirectResponse,
     status_code=status.HTTP_303_SEE_OTHER,
     responses={
-        status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ApiErrorResponse},
-        status.HTTP_400_BAD_REQUEST: {"model": ApiErrorResponse},
-        status.HTTP_403_FORBIDDEN: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
-        status.HTTP_502_BAD_GATEWAY: {"model": ApiErrorResponse},
-        status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ApiErrorResponse},
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "model": ApiErrorResponse,
+            "description": "Internal server error: `oauth_callback_failed`.",
+        },
+        **error_responses(
+            OAuthStateError,
+            OAuthCallbackError,
+            OAuthIdentityNotAllowedError,
+            OAuthUpstreamError,
+            OAuthConfigurationError,
+            CredentialPersistenceError,
+        ),
     },
 )
 def github_callback(
@@ -197,10 +224,9 @@ def github_callback(
 @router.get(
     "/tokens/contexts",
     response_model=TokenContextListResponse,
-    responses={
-        status.HTTP_401_UNAUTHORIZED: {"model": ApiErrorResponse},
-        status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ApiErrorResponse},
-    },
+    responses=error_responses(
+        ManagementSessionRequiredError, CredentialPersistenceError
+    ),
 )
 def list_token_contexts(
     raw_session: Annotated[str | None, Depends(management_cookie)],
@@ -218,10 +244,9 @@ def list_token_contexts(
 @router.get(
     "/tokens",
     response_model=TokenListResponse,
-    responses={
-        status.HTTP_401_UNAUTHORIZED: {"model": ApiErrorResponse},
-        status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ApiErrorResponse},
-    },
+    responses=error_responses(
+        ManagementSessionRequiredError, CredentialPersistenceError
+    ),
 )
 def list_tokens(
     raw_session: Annotated[str | None, Depends(management_cookie)],
@@ -242,10 +267,14 @@ def list_tokens(
     status_code=status.HTTP_201_CREATED,
     responses={
         status.HTTP_201_CREATED: {"headers": _PRIVATE_HEADERS},
-        status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ApiErrorResponse},
-        status.HTTP_401_UNAUTHORIZED: {"model": ApiErrorResponse},
-        status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
+        **error_responses(
+            ManagementSessionRequiredError,
+            CsrfValidationError,
+            TokenContextNotFoundError,
+            InvalidTokenError,
+            RequestValidationFailedError,
+            CredentialPersistenceError,
+        ),
     },
     dependencies=[Depends(require_management_csrf)],
 )
@@ -265,12 +294,13 @@ def create_token(
 @router.delete(
     "/tokens/{token_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses={
-        status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ApiErrorResponse},
-        status.HTTP_401_UNAUTHORIZED: {"model": ApiErrorResponse},
-        status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
-    },
+    responses=error_responses(
+        ManagementSessionRequiredError,
+        CsrfValidationError,
+        TokenNotFoundError,
+        RequestValidationFailedError,
+        CredentialPersistenceError,
+    ),
     dependencies=[Depends(require_management_csrf)],
 )
 def revoke_token(

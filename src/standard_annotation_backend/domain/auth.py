@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+from standard_annotation_backend.domain.errors import (
+    ForbiddenError,
+    UnauthenticatedError,
+)
+
 
 class AuthorizationRole(StrEnum):
     """Describe which kinds of application actions an identity may perform."""
@@ -79,18 +84,23 @@ class ResourceOwnership:
     owning_group_id: str | None
 
 
-class AuthenticationRequiredError(Exception):
-    """Report that an authenticated identity is required without disclosing details."""
+class AuthenticationRequiredError(UnauthenticatedError):
+    """Report that a valid bearer token is required, without saying why it failed.
 
-    def __init__(self) -> None:
-        super().__init__("authentication required")
+    Missing, malformed, unknown, expired, and revoked tokens, and tokens whose
+    authorization has changed, all produce this same error, so clients cannot
+    learn why a credential was rejected.
+    """
+
+    code = "authentication_required"
+    message = "Authentication required"
 
 
-class PermissionDeniedError(Exception):
+class PermissionDeniedError(ForbiddenError):
     """Report a denied authorization decision without disclosing details."""
 
-    def __init__(self) -> None:
-        super().__init__("permission denied")
+    code = "permission_denied"
+    message = "Permission denied"
 
 
 _READ_ACTIONS = frozenset(
