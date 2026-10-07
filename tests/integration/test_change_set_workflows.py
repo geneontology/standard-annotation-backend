@@ -9,7 +9,11 @@ from seeding import insert_annotation
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    ChangeSource,
+    DuplicateAnnotationError,
+)
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
@@ -23,7 +27,6 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationRepository,
-    DuplicateAnnotationError,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,

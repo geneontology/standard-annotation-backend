@@ -29,7 +29,6 @@ from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
     PermissionDeniedError,
 )
-from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
 from standard_annotation_backend.domain.errors import (
     BadRequestError,
     ConflictError,
@@ -50,22 +49,15 @@ from standard_annotation_backend.domain.errors import (
 from standard_annotation_backend.domain.refresh import UnknownSourceError
 from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.repositories import (
-    AnnotationDeletedError,
-    AnnotationNotFoundError,
     CommentNotFoundError,
-    DuplicateAnnotationError,
     InvalidCommentError,
     JobNotFoundError,
-    StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.repositories.auth import (
     CredentialPersistenceError,
 )
 from standard_annotation_backend.services.annotation_service import (
-    AnnotationHistoryNotFoundError,
     ClosureTermRequiredError,
-    EmptyAnnotationPatchError,
-    InvalidAnnotationPayloadError,
     OntologyUnavailableError,
     UnsupportedClosureFieldError,
     UnsupportedClosurePredicateError,
@@ -102,14 +94,6 @@ BEARER_ERROR_RESPONSES = {
         "model": ApiErrorResponse,
         "description": "Credential storage is unavailable",
     },
-}
-
-ANNOTATION_WRITE_VALIDATION_RESPONSE = {
-    "model": ApiErrorResponse,
-    "description": (
-        "Request or annotation validation failed. An inactive db_object_id returns "
-        "unknown_db_object_id with one validation issue at db_object_id."
-    ),
 }
 
 
@@ -207,6 +191,31 @@ _STATUS_DESCRIPTIONS = {
 }
 
 _BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
+
+
+class RequestValidationFailedError(InvalidInputError):
+    """Report a request that FastAPI rejected before it reached a route.
+
+    FastAPI checks the body, path, query, and header values against each route's
+    declared types and raises its own `RequestValidationError` when they do not
+    match. This error carries the same problems in SAB's error form, so those
+    failures share the standard response and can be listed in route
+    documentation. It lives in the API layer because only FastAPI produces it.
+
+    Attributes:
+        errors: The located problems FastAPI reported.
+    """
+
+    code = "request_validation_error"
+    message = "Request validation failed"
+
+    def __init__(self, errors: tuple[ValidationIssue, ...]) -> None:
+        self.errors = errors
+        super().__init__()
+
+    def details(self) -> ErrorDetails:
+        """Return every problem FastAPI reported."""
+        return self.errors
 
 
 def status_for(error_type: type[SabError]) -> int:
@@ -405,11 +414,6 @@ def install_exception_handlers(app: FastAPI) -> None:
             "change_set_not_proposed",
             "Change set is no longer proposed",
         ),
-        EmptyAnnotationPatchError: _FixedErrorResponse(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "empty_annotation_patch",
-            "Annotation patch must include at least one field",
-        ),
         ClosureTermRequiredError: _FixedErrorResponse(
             status.HTTP_400_BAD_REQUEST,
             "closure_term_required",
@@ -429,16 +433,6 @@ def install_exception_handlers(app: FastAPI) -> None:
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "ontology_unavailable",
             "The ontology required for closure search is unavailable",
-        ),
-        AnnotationNotFoundError: _FixedErrorResponse(
-            status.HTTP_404_NOT_FOUND,
-            "annotation_not_found",
-            "Annotation was not found",
-        ),
-        AnnotationDeletedError: _FixedErrorResponse(
-            status.HTTP_404_NOT_FOUND,
-            "annotation_not_found",
-            "Annotation was not found",
         ),
         CommentNotFoundError: _FixedErrorResponse(
             status.HTTP_404_NOT_FOUND,
@@ -474,24 +468,6 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     for error_type, error_response in fixed_errors.items():
         app.add_exception_handler(error_type, fixed_error_handler(error_response))
-
-    @app.exception_handler(UnknownDbObjectIdError)
-    def handle_unknown_db_object_id(
-        _request: Request, _error: UnknownDbObjectIdError
-    ) -> JSONResponse:
-        message = "Annotation db_object_id is not in the active entity catalog"
-        return _error_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code="unknown_db_object_id",
-            message=message,
-            details=[
-                ApiValidationIssue(
-                    location=("db_object_id",),
-                    message=message,
-                    type="unknown_db_object_id",
-                )
-            ],
-        )
 
     @app.exception_handler(UnknownSourceError)
     def handle_unknown_source(
@@ -552,74 +528,12 @@ def install_exception_handlers(app: FastAPI) -> None:
         _request: Request,
         error: RequestValidationError,
     ) -> JSONResponse:
-        details = [
-            ApiValidationIssue(
-                location=detail["loc"],
+        issues = tuple(
+            ValidationIssue(
+                location=tuple(detail["loc"]),
                 message=detail["msg"],
                 type=detail["type"],
             )
             for detail in error.errors()
-        ]
-        return _error_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code="request_validation_error",
-            message="Request validation failed",
-            details=details,
         )
-
-    @app.exception_handler(InvalidAnnotationPayloadError)
-    def handle_invalid_annotation_payload(
-        _request: Request,
-        error: InvalidAnnotationPayloadError,
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code="invalid_annotation",
-            message="Annotation payload is invalid",
-            details=_validation_details(error.errors),
-        )
-
-    @app.exception_handler(AnnotationHistoryNotFoundError)
-    def handle_annotation_history_not_found(
-        _request: Request,
-        error: AnnotationHistoryNotFoundError,
-    ) -> JSONResponse:
-        if error.version is None:
-            return _error_response(
-                status_code=status.HTTP_404_NOT_FOUND,
-                code="annotation_not_found",
-                message="Annotation was not found",
-            )
-        return _error_response(
-            status_code=status.HTTP_404_NOT_FOUND,
-            code="version_not_found",
-            message="Annotation version was not found",
-        )
-
-    @app.exception_handler(DuplicateAnnotationError)
-    def handle_duplicate_annotation(
-        _request: Request,
-        error: DuplicateAnnotationError,
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=status.HTTP_409_CONFLICT,
-            code="duplicate_annotation",
-            message="Annotation conflicts with active duplicates",
-            details=DuplicateAnnotationDetails(peer_ids=error.peer_ids),
-        )
-
-    @app.exception_handler(StaleAnnotationVersionError)
-    def handle_stale_annotation_version(
-        _request: Request,
-        error: StaleAnnotationVersionError,
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            code="stale_annotation_version",
-            message="Annotation version does not match If-Match",
-            details=StaleAnnotationVersionDetails(
-                annotation_id=error.annotation_id,
-                expected_version=error.expected_version,
-                current_version=error.current_version,
-            ),
-        )
+        return sab_error_response(RequestValidationFailedError(issues))

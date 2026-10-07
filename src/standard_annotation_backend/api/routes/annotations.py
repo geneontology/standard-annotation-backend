@@ -15,9 +15,10 @@ from standard_annotation_backend.api.dependencies import (
     require_expected_version,
 )
 from standard_annotation_backend.api.errors import (
-    ANNOTATION_WRITE_VALIDATION_RESPONSE,
     BEARER_ERROR_RESPONSES,
     ApiError,
+    RequestValidationFailedError,
+    error_responses,
 )
 from standard_annotation_backend.api.examples import (
     ANNOTATION_CREATE_EXAMPLES,
@@ -30,7 +31,16 @@ from standard_annotation_backend.api.models import (
     AnnotationResource,
     ApiErrorResponse,
 )
+from standard_annotation_backend.domain.annotations import (
+    AnnotationDeletedError,
+    AnnotationNotFoundError,
+    DuplicateAnnotationError,
+    EmptyAnnotationPatchError,
+    InvalidAnnotationPayloadError,
+    StaleAnnotationVersionError,
+)
 from standard_annotation_backend.domain.auth import RequestContext
+from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
 from standard_annotation_backend.services.annotation_service import (
     AnnotationService,
     UnsupportedClosureFieldError,
@@ -203,8 +213,12 @@ def list_annotations(
                 },
             }
         },
-        status.HTTP_409_CONFLICT: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: ANNOTATION_WRITE_VALIDATION_RESPONSE,
+        **error_responses(
+            DuplicateAnnotationError,
+            InvalidAnnotationPayloadError,
+            UnknownDbObjectIdError,
+            RequestValidationFailedError,
+        ),
     },
 )
 def create_annotation(
@@ -242,7 +256,7 @@ def create_annotation(
     response_model=AnnotationResource,
     responses={
         status.HTTP_200_OK: {"headers": {"ETag": _ETAG_RESPONSE_HEADER}},
-        status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
+        **error_responses(AnnotationNotFoundError),
     },
 )
 def get_annotation(
@@ -274,10 +288,16 @@ def get_annotation(
     responses={
         status.HTTP_200_OK: {"headers": {"ETag": _ETAG_RESPONSE_HEADER}},
         status.HTTP_400_BAD_REQUEST: {"model": ApiErrorResponse},
-        status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
-        status.HTTP_409_CONFLICT: {"model": ApiErrorResponse},
-        status.HTTP_412_PRECONDITION_FAILED: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: ANNOTATION_WRITE_VALIDATION_RESPONSE,
+        **error_responses(
+            AnnotationNotFoundError,
+            AnnotationDeletedError,
+            DuplicateAnnotationError,
+            StaleAnnotationVersionError,
+            EmptyAnnotationPatchError,
+            InvalidAnnotationPayloadError,
+            UnknownDbObjectIdError,
+            RequestValidationFailedError,
+        ),
         status.HTTP_428_PRECONDITION_REQUIRED: {"model": ApiErrorResponse},
     },
 )
@@ -321,8 +341,11 @@ def patch_annotation(
     openapi_extra=IF_MATCH_OPENAPI,
     responses={
         status.HTTP_400_BAD_REQUEST: {"model": ApiErrorResponse},
-        status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
-        status.HTTP_412_PRECONDITION_FAILED: {"model": ApiErrorResponse},
+        **error_responses(
+            AnnotationNotFoundError,
+            AnnotationDeletedError,
+            StaleAnnotationVersionError,
+        ),
         status.HTTP_428_PRECONDITION_REQUIRED: {"model": ApiErrorResponse},
     },
 )

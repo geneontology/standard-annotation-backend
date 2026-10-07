@@ -12,7 +12,13 @@ from pydantic import (
     ValidationError,
 )
 
-from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationDeletedError,
+    AnnotationNotFoundError,
+    ChangeSource,
+    StaleAnnotationVersionError,
+)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
     PermissionAction,
@@ -42,10 +48,7 @@ from standard_annotation_backend.persistence.models import (
     ChangeSetRecord,
 )
 from standard_annotation_backend.persistence.repositories import (
-    AnnotationDeletedError,
-    AnnotationNotFoundError,
     AnnotationRepository,
-    StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.repositories import (
     ChangeSetNotFoundError as RepositoryChangeSetNotFoundError,

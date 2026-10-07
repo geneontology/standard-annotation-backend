@@ -10,8 +10,9 @@ from standard_annotation_backend.api.dependencies import (
     get_change_set_service,
 )
 from standard_annotation_backend.api.errors import (
-    ANNOTATION_WRITE_VALIDATION_RESPONSE,
     BEARER_ERROR_RESPONSES,
+    RequestValidationFailedError,
+    error_responses,
 )
 from standard_annotation_backend.api.examples import (
     CHANGE_SET_ACCEPT_EXAMPLES,
@@ -29,6 +30,7 @@ from standard_annotation_backend.api.models import (
     ChangeSetUpdateRequest,
 )
 from standard_annotation_backend.domain.auth import RequestContext
+from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
 from standard_annotation_backend.services.change_set_service import ChangeSetService
 
 router = APIRouter(
@@ -126,7 +128,7 @@ def preview_change_set(
     response_model=AcceptedChangeSetResource,
     responses={
         status.HTTP_409_CONFLICT: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: ANNOTATION_WRITE_VALIDATION_RESPONSE,
+        **error_responses(UnknownDbObjectIdError, RequestValidationFailedError),
     },
 )
 def accept_change_set(

@@ -13,6 +13,7 @@ from uuid import UUID
 
 from go_standard_annotation_schema.datamodel import Entity
 
+from standard_annotation_backend.domain.errors import InvalidInputError
 from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     SourceProvenance,
@@ -57,12 +58,23 @@ class EntityCatalog:
     warnings: tuple[str, ...]
 
 
-class UnknownDbObjectIdError(ValueError):
-    """Report a `db_object_id` that is not in the active entity catalog."""
+class UnknownDbObjectIdError(InvalidInputError):
+    """Report a `db_object_id` that is not in the active entity catalog.
+
+    Attributes:
+        db_object_id: The identifier that is not in the catalog.
+    """
+
+    code = "unknown_db_object_id"
+    message = "Annotation db_object_id is not in the active entity catalog"
 
     def __init__(self, db_object_id: str) -> None:
         self.db_object_id = db_object_id
-        super().__init__("db_object_id is not present in the active entity catalog")
+        super().__init__()
+
+    def issue_location(self) -> tuple[str | int, ...]:
+        """Return the `db_object_id` field."""
+        return ("db_object_id",)
 
 
 class EntityCandidateConflictError(TerminalRefreshError):

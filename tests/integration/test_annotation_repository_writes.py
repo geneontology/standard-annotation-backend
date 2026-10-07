@@ -8,10 +8,12 @@ from seeding import insert_annotation
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
+    AnnotationDeletedError,
     AnnotationOrigin,
     ChangeSource,
+    DuplicateAnnotationError,
+    StaleAnnotationVersionError,
 )
-from standard_annotation_backend.persistence import repositories
 from standard_annotation_backend.persistence.models import (
     JobRecord,
 )
@@ -93,7 +95,7 @@ def test_create_rejects_an_active_duplicate(
 
     with (
         unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.DuplicateAnnotationError) as raised,
+        pytest.raises(DuplicateAnnotationError) as raised,
     ):
         unit_of_work.annotations.create(
             annotation=validated_annotation,
@@ -113,7 +115,7 @@ def test_update_rejects_a_stale_expected_version(
 
     with (
         unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.StaleAnnotationVersionError) as raised,
+        pytest.raises(StaleAnnotationVersionError) as raised,
     ):
         unit_of_work.annotations.update(
             annotation_id,
@@ -157,7 +159,7 @@ def test_update_rejects_only_a_new_duplicate_peer(
 
     with (
         unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.DuplicateAnnotationError) as raised,
+        pytest.raises(DuplicateAnnotationError) as raised,
     ):
         unit_of_work.annotations.update(
             candidate_id,
@@ -190,7 +192,7 @@ def test_update_rejects_expansion_of_a_legacy_peer_set(
 
     with (
         unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.DuplicateAnnotationError) as raised,
+        pytest.raises(DuplicateAnnotationError) as raised,
     ):
         unit_of_work.annotations.update(
             first_id,
@@ -221,7 +223,7 @@ def test_soft_delete_requires_the_current_version(
 
     with (
         unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.StaleAnnotationVersionError),
+        pytest.raises(StaleAnnotationVersionError),
     ):
         unit_of_work.annotations.soft_delete(
             annotation_id,
@@ -273,7 +275,7 @@ def test_soft_delete_rejects_an_already_deleted_annotation(
 
     with (
         unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.AnnotationDeletedError),
+        pytest.raises(AnnotationDeletedError),
     ):
         unit_of_work.annotations.soft_delete(
             annotation_id,

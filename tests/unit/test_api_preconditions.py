@@ -22,20 +22,21 @@ from standard_annotation_backend.api.models import (
     AnnotationVersionPageResponse,
     AnnotationVersionResource,
 )
-from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
-from standard_annotation_backend.domain.auth import PermissionDeniedError
-from standard_annotation_backend.persistence.repositories import (
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
     AnnotationDeletedError,
     AnnotationNotFoundError,
+    AnnotationVersionNotFoundError,
+    ChangeSource,
     DuplicateAnnotationError,
-    StaleAnnotationVersionError,
-)
-from standard_annotation_backend.services.annotation_service import (
-    AnnotationHistoryNotFoundError,
-    AnnotationVersion,
-    CurrentAnnotation,
     EmptyAnnotationPatchError,
     InvalidAnnotationPayloadError,
+    StaleAnnotationVersionError,
+)
+from standard_annotation_backend.domain.auth import PermissionDeniedError
+from standard_annotation_backend.services.annotation_service import (
+    AnnotationVersion,
+    CurrentAnnotation,
 )
 from standard_annotation_backend.services.pagination import ResultPage
 
@@ -262,12 +263,12 @@ def test_resource_models_convert_all_service_results() -> None:
             "annotation_not_found",
         ),
         (
-            AnnotationHistoryNotFoundError(ANNOTATION_ID),
+            AnnotationNotFoundError(ANNOTATION_ID),
             status.HTTP_404_NOT_FOUND,
             "annotation_not_found",
         ),
         (
-            AnnotationHistoryNotFoundError(ANNOTATION_ID, 7),
+            AnnotationVersionNotFoundError(ANNOTATION_ID, 7),
             status.HTTP_404_NOT_FOUND,
             "version_not_found",
         ),

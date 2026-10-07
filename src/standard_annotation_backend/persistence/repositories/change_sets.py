@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.annotations import AnnotationNotFoundError
 from standard_annotation_backend.domain.change_sets import (
     ChangeSetOperation,
     ChangeSetState,
@@ -16,9 +17,6 @@ from standard_annotation_backend.persistence.locks import (
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     ChangeSetRecord,
-)
-from standard_annotation_backend.persistence.repositories.annotations import (
-    AnnotationNotFoundError,
 )
 
 
@@ -78,7 +76,8 @@ class ChangeSetRepository:
 
         Raises:
             AnnotationNotFoundError: If a targeted annotation does not exist.
-            ValueError: If the operation or required ownership is invalid.
+            ValueError: If the operation, required ownership, or required target
+                is invalid.
         """
         operation = ChangeSetOperation(operation)
         acquire_global_annotation_write_lock(self.session)
@@ -86,15 +85,15 @@ class ChangeSetRepository:
             if owning_group_id is None:
                 raise ValueError("create proposals require an owning group")
         else:
+            if annotation_id is None:
+                raise ValueError("update and delete proposals require a target")
             target = self.session.scalar(
                 select(AnnotationRecord)
                 .where(AnnotationRecord.annotation_id == annotation_id)
                 .execution_options(populate_existing=True)
             )
             if target is None:
-                raise AnnotationNotFoundError(
-                    f"annotation {annotation_id} was not found"
-                )
+                raise AnnotationNotFoundError(annotation_id)
             owning_group_id = target.owning_group_id
         record = ChangeSetRecord(
             operation=operation,

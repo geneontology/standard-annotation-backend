@@ -4,12 +4,8 @@ from standard_annotation_backend.persistence.repositories.annotation_imports imp
     AnnotationImportRepository,
 )
 from standard_annotation_backend.persistence.repositories.annotations import (
-    AnnotationDeletedError,
-    AnnotationNotFoundError,
     AnnotationRepository,
     AnnotationSearchFilters,
-    DuplicateAnnotationError,
-    StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.repositories.audit import AuditRepository
 from standard_annotation_backend.persistence.repositories.auth import AuthRepository
@@ -39,9 +35,7 @@ from standard_annotation_backend.persistence.repositories.pagination import Page
 
 __all__ = [
     "AnnotationCommentRepository",
-    "AnnotationDeletedError",
     "AnnotationImportRepository",
-    "AnnotationNotFoundError",
     "AnnotationRepository",
     "AnnotationSearchFilters",
     "AuditRepository",
@@ -49,7 +43,6 @@ __all__ = [
     "ChangeSetNotFoundError",
     "ChangeSetRepository",
     "CommentNotFoundError",
-    "DuplicateAnnotationError",
     "EntityRepository",
     "InvalidChangeSetStateError",
     "InvalidCommentError",
@@ -59,5 +52,4 @@ __all__ = [
     "OntologyRepository",
     "OntologySnapshotPrunedError",
     "Page",
-    "StaleAnnotationVersionError",
 ]

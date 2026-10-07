@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
+    AnnotationDeletedError,
+    AnnotationNotFoundError,
     AnnotationOrigin,
     ChangeSource,
 )
@@ -25,8 +27,6 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationCommentRepository,
-    AnnotationDeletedError,
-    AnnotationNotFoundError,
     AnnotationRepository,
     CommentNotFoundError,
     InvalidCommentError,

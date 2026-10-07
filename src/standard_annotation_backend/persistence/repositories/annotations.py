@@ -10,9 +10,13 @@ from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
+    AnnotationDeletedError,
+    AnnotationNotFoundError,
     AnnotationOrigin,
     AnnotationStatus,
     ChangeSource,
+    DuplicateAnnotationError,
+    StaleAnnotationVersionError,
     new_annotation_id,
 )
 from standard_annotation_backend.domain.ontology import OntologyKey
@@ -76,47 +80,6 @@ class AnnotationSearchFilters:
     interacting_taxon_id: tuple[str, ...] = ()
     owning_group_id: str | None = None
     created_by: str | None = None
-
-
-class AnnotationNotFoundError(LookupError):
-    """Raised when an annotation write targets an unknown identifier."""
-
-
-class AnnotationDeletedError(RuntimeError):
-    """Raised when an annotation write targets a soft-deleted annotation."""
-
-
-class DuplicateAnnotationError(RuntimeError):
-    """Report a requested change that would create an active duplicate.
-
-    Attributes:
-        peer_ids: Identifiers of active annotations equivalent to the proposed data.
-    """
-
-    def __init__(self, peer_ids: Iterable[UUID]) -> None:
-        self.peer_ids = tuple(peer_ids)
-        super().__init__("annotation conflicts with an active duplicate")
-
-
-class StaleAnnotationVersionError(RuntimeError):
-    """Report that an annotation changed after a client last read it.
-
-    Attributes:
-        annotation_id: Identifier of the annotation being changed.
-        expected_version: Version supplied by the client.
-        current_version: Version stored when the change was attempted.
-    """
-
-    def __init__(
-        self,
-        annotation_id: UUID,
-        expected_version: int,
-        current_version: int,
-    ) -> None:
-        self.annotation_id = annotation_id
-        self.expected_version = expected_version
-        self.current_version = current_version
-        super().__init__(f"annotation {annotation_id} is at version {current_version}")
 
 
 def _ownership_conditions(
@@ -717,15 +680,13 @@ class AnnotationRepository:
         )
         record = self.session.scalar(statement)
         if record is None:
-            raise AnnotationNotFoundError(f"annotation {annotation_id} was not found")
+            raise AnnotationNotFoundError(annotation_id)
         return record
 
     @staticmethod
     def _raise_if_deleted(record: AnnotationRecord) -> None:
         if record.status == AnnotationStatus.DELETED:
-            raise AnnotationDeletedError(
-                f"annotation {record.annotation_id} is already deleted"
-            )
+            raise AnnotationDeletedError(record.annotation_id)
 
     @staticmethod
     def _update_current_record(

@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+from standard_annotation_backend.domain.annotations import AnnotationNotFoundError
 from standard_annotation_backend.domain.auth import (
     AuthorizationContext,
     AuthorizationScope,
@@ -12,7 +13,6 @@ from standard_annotation_backend.domain.auth import (
 )
 from standard_annotation_backend.persistence.models import AnnotationRecord
 from standard_annotation_backend.persistence.repositories import (
-    AnnotationNotFoundError,
     AnnotationRepository,
     AnnotationSearchFilters,
 )

@@ -8,7 +8,14 @@ from uuid import UUID
 
 import pytest
 
-from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationNotFoundError,
+    AnnotationVersionNotFoundError,
+    ChangeSource,
+    EmptyAnnotationPatchError,
+    InvalidAnnotationPayloadError,
+)
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
@@ -17,16 +24,12 @@ from standard_annotation_backend.domain.auth import (
     RequestContext,
 )
 from standard_annotation_backend.persistence.repositories import (
-    AnnotationNotFoundError,
     AnnotationSearchFilters,
     Page,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_service import (
-    AnnotationHistoryNotFoundError,
     AnnotationService,
-    EmptyAnnotationPatchError,
-    InvalidAnnotationPayloadError,
 )
 
 FIXED_ID = UUID("00000000-0000-0000-0000-000000000301")
@@ -650,13 +653,12 @@ def test_list_versions_raises_when_annotation_history_is_unknown(
 ) -> None:
     service_harness.repository.annotation_is_known = False
 
-    with pytest.raises(AnnotationHistoryNotFoundError) as raised:
+    with pytest.raises(AnnotationNotFoundError) as raised:
         service_harness.service.list_versions(
             FIXED_ID, limit=50, offset=0, context=REQUEST_CONTEXT
         )
 
     assert raised.value.annotation_id == FIXED_ID
-    assert raised.value.version is None
     assert service_harness.unit_of_work.commit_count == 0
 
 
@@ -680,18 +682,18 @@ def test_get_version_returns_a_deleted_snapshot_without_committing(
 def test_get_version_distinguishes_unknown_history_from_an_unknown_version(
     service_harness: ServiceHarness,
 ) -> None:
-    with pytest.raises(AnnotationHistoryNotFoundError) as missing_version:
+    with pytest.raises(AnnotationVersionNotFoundError) as missing_version:
         service_harness.service.get_version(FIXED_ID, 9, context=REQUEST_CONTEXT)
 
     assert missing_version.value.annotation_id == FIXED_ID
     assert missing_version.value.version == 9
 
     service_harness.repository.annotation_is_known = False
-    with pytest.raises(AnnotationHistoryNotFoundError) as missing_history:
+    with pytest.raises(AnnotationNotFoundError) as missing_history:
         service_harness.service.get_version(FIXED_ID, 1, context=REQUEST_CONTEXT)
 
     assert missing_history.value.annotation_id == FIXED_ID
-    assert missing_history.value.version is None
+    assert not isinstance(missing_history.value, AnnotationVersionNotFoundError)
     assert service_harness.unit_of_work.commit_count == 0
 
 
@@ -743,12 +745,7 @@ def test_out_of_scope_annotation_operations_hide_resource_and_never_mutate(
 ) -> None:
     """Ownership denial hides existing annotation data and stops all writes."""
     context = replace(REQUEST_CONTEXT, scope=scope, actor_id=actor, group_id=group)
-    expected_error = (
-        AnnotationHistoryNotFoundError
-        if "version" in operation
-        else AnnotationNotFoundError
-    )
-    with pytest.raises(expected_error):
+    with pytest.raises(AnnotationNotFoundError):
         if operation == "get_version":
             service_harness.service.get_version(FIXED_ID, 1, context=context)
         elif operation == "patch":

@@ -7,11 +7,18 @@ from uuid import UUID
 from fastapi import status
 
 from standard_annotation_backend.api.errors import (
+    RequestValidationFailedError,
     error_responses,
     sab_error_response,
     status_for,
 )
 from standard_annotation_backend.api.models import ApiErrorResponse
+from standard_annotation_backend.domain.annotations import (
+    AnnotationDeletedError,
+    AnnotationNotFoundError,
+    AnnotationVersionNotFoundError,
+    EmptyAnnotationPatchError,
+)
 from standard_annotation_backend.domain.errors import (
     BadRequestError,
     ConflictError,
@@ -29,6 +36,7 @@ from standard_annotation_backend.domain.errors import (
     UnavailableError,
     UpstreamError,
 )
+from standard_annotation_backend.domain.validation import ValidationIssue
 
 ANNOTATION_ID = UUID("00000000-0000-0000-0000-000000000001")
 CHANGE_SET_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -149,3 +157,51 @@ def test_error_responses_group_codes_by_status() -> None:
     assert responses[404]["model"] is ApiErrorResponse
     assert "`thing_not_found`" in responses[404]["description"]
     assert "`bad_thing`" in responses[422]["description"]
+
+
+def test_deleted_and_missing_annotations_are_indistinguishable() -> None:
+    """A deleted annotation returns exactly what a missing one returns."""
+    assert _body(AnnotationDeletedError(ANNOTATION_ID)) == _body(
+        AnnotationNotFoundError(ANNOTATION_ID)
+    )
+    assert sab_error_response(AnnotationDeletedError(ANNOTATION_ID)).status_code == 404
+
+
+def test_missing_version_has_its_own_code() -> None:
+    """A missing version of an existing annotation is reported distinctly."""
+    assert _body(AnnotationVersionNotFoundError(ANNOTATION_ID, 3))["error"] == {
+        "code": "version_not_found",
+        "message": "Annotation version was not found",
+    }
+
+
+def test_empty_patch_names_the_request_body() -> None:
+    """An empty patch is invalid input located at the request body."""
+    assert _body(EmptyAnnotationPatchError())["error"]["details"] == [
+        {
+            "location": ["body"],
+            "message": "Annotation patch must include at least one field",
+            "type": "empty_annotation_patch",
+        }
+    ]
+
+
+def test_request_validation_failure_reports_each_issue() -> None:
+    """A request FastAPI cannot validate reports every located issue."""
+    issue: ValidationIssue = {
+        "location": ("body", "annotation", "relation"),
+        "message": "Field required",
+        "type": "missing",
+    }
+
+    assert _body(RequestValidationFailedError((issue,)))["error"] == {
+        "code": "request_validation_error",
+        "message": "Request validation failed",
+        "details": [
+            {
+                "location": ["body", "annotation", "relation"],
+                "message": "Field required",
+                "type": "missing",
+            }
+        ],
+    }

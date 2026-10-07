@@ -7,6 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotations import (
+    AnnotationDeletedError,
+    AnnotationNotFoundError,
     AnnotationStatus,
 )
 from standard_annotation_backend.persistence.locks import (
@@ -15,10 +17,6 @@ from standard_annotation_backend.persistence.locks import (
 from standard_annotation_backend.persistence.models import (
     AnnotationCommentRecord,
     AnnotationRecord,
-)
-from standard_annotation_backend.persistence.repositories.annotations import (
-    AnnotationDeletedError,
-    AnnotationNotFoundError,
 )
 from standard_annotation_backend.persistence.repositories.pagination import (
     Page,
@@ -238,11 +236,9 @@ class AnnotationCommentRepository:
         )
         annotation = self.session.scalar(statement)
         if annotation is None:
-            raise AnnotationNotFoundError(f"annotation {annotation_id} was not found")
+            raise AnnotationNotFoundError(annotation_id)
         if annotation.status == AnnotationStatus.DELETED:
-            raise AnnotationDeletedError(
-                f"annotation {annotation.annotation_id} is already deleted"
-            )
+            raise AnnotationDeletedError(annotation.annotation_id)
         return annotation
 
     def _get_active_comment_for_change(

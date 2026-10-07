@@ -309,6 +309,13 @@ def test_patch_rejects_an_empty_body(integration_api_client: TestClient) -> None
         "error": {
             "code": "empty_annotation_patch",
             "message": "Annotation patch must include at least one field",
+            "details": [
+                {
+                    "location": ["body"],
+                    "message": "Annotation patch must include at least one field",
+                    "type": "empty_annotation_patch",
+                }
+            ],
         }
     }
 

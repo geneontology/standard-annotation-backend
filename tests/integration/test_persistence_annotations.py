@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
+    AnnotationDeletedError,
+    AnnotationNotFoundError,
     AnnotationOrigin,
     AnnotationStatus,
     ChangeSource,
@@ -27,8 +29,6 @@ from standard_annotation_backend.persistence.models import (
     JobRecord,
 )
 from standard_annotation_backend.persistence.repositories import (
-    AnnotationDeletedError,
-    AnnotationNotFoundError,
     AnnotationRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork

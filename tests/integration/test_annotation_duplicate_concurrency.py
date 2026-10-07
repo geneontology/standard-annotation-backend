@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationStatus,
+    DuplicateAnnotationError,
+    StaleAnnotationVersionError,
 )
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
@@ -24,8 +26,6 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationRepository,
-    DuplicateAnnotationError,
-    StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     create_unit_of_work_factory,

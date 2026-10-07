@@ -300,3 +300,20 @@ def test_owning_group_has_reusable_field_example(client: TestClient) -> None:
     assert schemas["ChangeSetCreateRequest"]["properties"]["owning_group_id"][
         "examples"
     ] == ["GO_Central"]
+
+
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [
+        ("/annotations", "post"),
+        ("/annotations/{annotation_id}", "patch"),
+        ("/change-sets/{change_set_id}/accept", "post"),
+    ],
+)
+def test_write_422_docs_include_request_validation_failures(
+    client: TestClient, path: str, method: str
+) -> None:
+    """Write routes document that malformed requests return `request_validation_error`."""
+    responses = client.get("/openapi.json").json()["paths"][path][method]["responses"]
+
+    assert "`request_validation_error`" in responses["422"]["description"]

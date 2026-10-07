@@ -4,7 +4,14 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from uuid import UUID
 
-from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationVersionNotFoundError,
+    ChangeSource,
+    EmptyAnnotationPatchError,
+    InvalidAnnotationPayloadError,
+    StaleAnnotationVersionError,
+)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
     PermissionAction,
@@ -13,19 +20,12 @@ from standard_annotation_backend.domain.auth import (
     derive_creation_group,
 )
 from standard_annotation_backend.domain.ontology import OntologyKey
-from standard_annotation_backend.domain.validation import (
-    ValidationIssue,
-    validate_annotation,
-)
+from standard_annotation_backend.domain.validation import validate_annotation
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
 )
-from standard_annotation_backend.persistence.repositories import (
-    AnnotationNotFoundError,
-    AuditRepository,
-    StaleAnnotationVersionError,
-)
+from standard_annotation_backend.persistence.repositories import AuditRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.pagination import ResultPage
@@ -83,22 +83,6 @@ class AnnotationVersion:
     annotation: Annotation
 
 
-class InvalidAnnotationPayloadError(ValueError):
-    """Report annotation data that does not satisfy the annotation schema.
-
-    Attributes:
-        errors: Validation problems found in the submitted annotation data.
-    """
-
-    def __init__(self, errors: tuple[ValidationIssue, ...]) -> None:
-        self.errors = errors
-        super().__init__("annotation payload is invalid")
-
-
-class EmptyAnnotationPatchError(ValueError):
-    """Report an update request that does not supply any fields to replace."""
-
-
 class ClosureTermRequiredError(ValueError):
     """Report that a closure predicate was supplied without an ontology term."""
 
@@ -113,24 +97,6 @@ class UnsupportedClosurePredicateError(ValueError):
 
 class OntologyUnavailableError(RuntimeError):
     """Report that closure search has no active ontology snapshot."""
-
-
-class AnnotationHistoryNotFoundError(LookupError):
-    """Report an annotation or saved version that does not exist.
-
-    Attributes:
-        annotation_id: Identifier of the requested annotation.
-        version: Requested version number, or `None` for the complete history.
-    """
-
-    def __init__(self, annotation_id: UUID, version: int | None = None) -> None:
-        self.annotation_id = annotation_id
-        self.version = version
-        if version is None:
-            message = f"annotation history {annotation_id} was not found"
-        else:
-            message = f"annotation {annotation_id} has no version {version}"
-        super().__init__(message)
 
 
 class AnnotationService:
@@ -250,7 +216,7 @@ class AnnotationService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_EDIT)
         if not changes:
-            raise EmptyAnnotationPatchError
+            raise EmptyAnnotationPatchError()
 
         with self._unit_of_work_factory() as unit_of_work:
             current = load_authorized_annotation(
@@ -424,20 +390,18 @@ class AnnotationService:
             The requested versions and pagination information.
 
         Raises:
-            AnnotationHistoryNotFoundError: If the annotation does not exist.
+            AnnotationNotFoundError: If the annotation does not exist or is
+                outside the selected ownership scope.
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            try:
-                load_authorized_annotation(
-                    unit_of_work.annotations,
-                    context,
-                    PermissionAction.ANNOTATION_READ,
-                    annotation_id,
-                    include_deleted=True,
-                )
-            except AnnotationNotFoundError:
-                raise AnnotationHistoryNotFoundError(annotation_id) from None
+            load_authorized_annotation(
+                unit_of_work.annotations,
+                context,
+                PermissionAction.ANNOTATION_READ,
+                annotation_id,
+                include_deleted=True,
+            )
             page = unit_of_work.annotations.list_versions_page(
                 annotation_id,
                 limit=limit,
@@ -466,23 +430,22 @@ class AnnotationService:
             The annotation data and change information saved for that version.
 
         Raises:
-            AnnotationHistoryNotFoundError: If the annotation or version does not exist.
+            AnnotationNotFoundError: If the annotation does not exist or is
+                outside the selected ownership scope.
+            AnnotationVersionNotFoundError: If the annotation has no such version.
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            try:
-                load_authorized_annotation(
-                    unit_of_work.annotations,
-                    context,
-                    PermissionAction.ANNOTATION_READ,
-                    annotation_id,
-                    include_deleted=True,
-                )
-            except AnnotationNotFoundError:
-                raise AnnotationHistoryNotFoundError(annotation_id) from None
+            load_authorized_annotation(
+                unit_of_work.annotations,
+                context,
+                PermissionAction.ANNOTATION_READ,
+                annotation_id,
+                include_deleted=True,
+            )
             record = unit_of_work.annotations.get_version(annotation_id, version)
             if record is None:
-                raise AnnotationHistoryNotFoundError(annotation_id, version)
+                raise AnnotationVersionNotFoundError(annotation_id, version)
             result = _annotation_version(record)
         return result
 
