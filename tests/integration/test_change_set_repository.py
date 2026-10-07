@@ -14,6 +14,11 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationOrigin,
     ChangeSource,
 )
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetNotFoundError,
+    ChangeSetState,
+    ChangeSetStateError,
+)
 from standard_annotation_backend.persistence import models, repositories
 from standard_annotation_backend.persistence.locks import (
     GLOBAL_ANNOTATION_WRITE_LOCK_KEY,
@@ -194,13 +199,17 @@ def test_terminal_transition_cannot_be_repeated_or_changed(
         )
         unit_of_work.commit()
     with unit_of_work_factory() as unit_of_work:
-        with pytest.raises(repositories.InvalidChangeSetStateError):
+        with pytest.raises(ChangeSetStateError) as raised:
             getattr(unit_of_work.change_sets, second)(
                 change_set_id,
                 reviewed_by="second-reviewer",
                 review_reason="Second decision",
                 **({"result_annotation_version": 2} if second == "accept" else {}),
             )
+        assert raised.value.change_set_id == change_set_id
+        assert raised.value.state == ChangeSetState(
+            {"accept": "accepted", "reject": "rejected", "mark_stale": "stale"}[first]
+        )
         unit_of_work.commit()
     with unit_of_work_factory() as unit_of_work:
         stored = unit_of_work.change_sets.get(change_set_id)
@@ -233,8 +242,9 @@ def test_missing_lookup_and_writes(
                 kwargs["result_annotation_version"] = 1
             if method == "reject":
                 kwargs["review_reason"] = "No target"
-            with pytest.raises(repositories.ChangeSetNotFoundError):
+            with pytest.raises(ChangeSetNotFoundError) as raised:
                 getattr(unit_of_work.change_sets, method)(missing_id, **kwargs)
+            assert raised.value.change_set_id == missing_id
 
 
 def test_repository_changes_roll_back_without_unit_of_work_commit(
@@ -332,7 +342,7 @@ def test_review_lock_blocks_an_independent_reviewer_and_refreshes_cached_state(
         holder.commit()
         refreshed = contender_repo.lock_for_review(change_set_id)
         assert refreshed.state == "rejected"
-        with pytest.raises(repositories.InvalidChangeSetStateError):
+        with pytest.raises(ChangeSetStateError):
             contender_repo.accept(
                 change_set_id,
                 reviewed_by="second-reviewer",

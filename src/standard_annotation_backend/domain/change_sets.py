@@ -1,12 +1,26 @@
-"""Define change-set operations and states, and apply conservative JSON Patch updates."""
+"""Define change-set operations, states, and errors, and apply JSON Patch updates."""
+
+from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
+from uuid import UUID
 
 import jsonpatch
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.errors import (
+    ConflictError,
+    ErrorDetails,
+    InvalidInputError,
+    NotFoundError,
+    StaleChangeSet,
+)
+
+if TYPE_CHECKING:
+    from standard_annotation_backend.domain.validation import ValidationIssue
 
 
 class ChangeSetOperation(StrEnum):
@@ -52,6 +66,77 @@ class InvalidChangeSetPatchError(ValueError):
     def __init__(self, issue: ChangeSetPatchIssue) -> None:
         self.issue = issue
         super().__init__("change-set patch is invalid")
+
+
+class ChangeSetNotFoundError(NotFoundError):
+    """Report a change set that is missing or outside the caller's scope."""
+
+    code = "change_set_not_found"
+    message = "Change set was not found"
+
+    def __init__(self, change_set_id: UUID) -> None:
+        self.change_set_id = change_set_id
+        super().__init__()
+
+
+class ChangeSetStateError(ConflictError):
+    """Report a review attempted after the change set was already reviewed."""
+
+    code = "change_set_not_proposed"
+    message = "Change set is no longer proposed"
+
+    def __init__(self, change_set_id: UUID, state: ChangeSetState) -> None:
+        self.change_set_id = change_set_id
+        self.state = state
+        super().__init__()
+
+
+class InvalidChangeSetError(InvalidInputError):
+    """Report validation issues in a proposal or its candidate annotation."""
+
+    code = "invalid_change_set"
+    message = "Change set is invalid"
+
+    def __init__(self, errors: tuple[ValidationIssue, ...]) -> None:
+        self.errors = errors
+        super().__init__()
+
+    def details(self) -> ErrorDetails:
+        """Return the validation issues found in the proposal."""
+        return self.errors
+
+
+class StaleChangeSetError(ConflictError):
+    """Report that the target annotation changed after the change set's base version.
+
+    Acceptance raises this only after it has marked the change set stale and
+    saved that outcome, so the change set cannot be accepted later.
+    """
+
+    code = "stale_change_set"
+    message = "Annotation changed after the change set's base version"
+
+    def __init__(
+        self,
+        change_set_id: UUID,
+        annotation_id: UUID,
+        expected_version: int,
+        current_version: int,
+    ) -> None:
+        self.change_set_id = change_set_id
+        self.annotation_id = annotation_id
+        self.expected_version = expected_version
+        self.current_version = current_version
+        super().__init__()
+
+    def details(self) -> ErrorDetails:
+        """Return the change set, its target, and the expected and current versions."""
+        return StaleChangeSet(
+            change_set_id=self.change_set_id,
+            annotation_id=self.annotation_id,
+            expected_version=self.expected_version,
+            current_version=self.current_version,
+        )
 
 
 _ALLOWED_OPERATIONS = frozenset({"add", "remove", "replace", "move", "copy", "test"})

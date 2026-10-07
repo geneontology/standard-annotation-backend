@@ -60,12 +60,6 @@ from standard_annotation_backend.services.annotation_service import (
     UnsupportedClosureFieldError,
     UnsupportedClosurePredicateError,
 )
-from standard_annotation_backend.services.change_set_service import (
-    ChangeSetNotFoundError,
-    ChangeSetStateError,
-    InvalidChangeSetError,
-    StaleChangeSetError,
-)
 from standard_annotation_backend.services.token_service import (
     InvalidTokenError,
     ManagementSessionRequiredError,
@@ -402,16 +396,6 @@ def install_exception_handlers(app: FastAPI) -> None:
             "invalid_token",
             "Token name, context, or expiration is invalid",
         ),
-        ChangeSetNotFoundError: _FixedErrorResponse(
-            status.HTTP_404_NOT_FOUND,
-            "change_set_not_found",
-            "Change set was not found",
-        ),
-        ChangeSetStateError: _FixedErrorResponse(
-            status.HTTP_409_CONFLICT,
-            "change_set_not_proposed",
-            "Change set is no longer proposed",
-        ),
         ClosureTermRequiredError: _FixedErrorResponse(
             status.HTTP_400_BAD_REQUEST,
             "closure_term_required",
@@ -473,33 +457,6 @@ def install_exception_handlers(app: FastAPI) -> None:
                     type="unknown_source",
                 )
             ],
-        )
-
-    @app.exception_handler(InvalidChangeSetError)
-    def handle_invalid_change_set(
-        _request: Request, error: InvalidChangeSetError
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            code="invalid_change_set",
-            message="Change set is invalid",
-            details=_validation_details(error.errors),
-        )
-
-    @app.exception_handler(StaleChangeSetError)
-    def handle_stale_change_set(
-        _request: Request, error: StaleChangeSetError
-    ) -> JSONResponse:
-        return _error_response(
-            status_code=status.HTTP_409_CONFLICT,
-            code="stale_change_set",
-            message="Annotation changed after the change set's base version",
-            details=StaleChangeSetDetails(
-                change_set_id=error.change_set_id,
-                annotation_id=error.annotation_id,
-                expected_version=error.expected_version,
-                current_version=error.current_version,
-            ),
         )
 
     @app.exception_handler(ApiError)

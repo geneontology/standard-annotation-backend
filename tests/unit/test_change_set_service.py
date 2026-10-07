@@ -12,6 +12,9 @@ from standard_annotation_backend.domain.auth import (
     PermissionDeniedError,
     RequestContext,
 )
+from standard_annotation_backend.domain.change_sets import (
+    InvalidChangeSetError,
+)
 
 
 def _unopened_transaction() -> NoReturn:
@@ -36,7 +39,7 @@ def test_invalid_create_envelope_is_rejected_before_transaction(
     """Malformed JSON payloads and blank proposal metadata never reach storage."""
     module = import_module("standard_annotation_backend.services.change_set_service")
     service = module.ChangeSetService(_unopened_transaction)
-    with pytest.raises(module.InvalidChangeSetError) as error:
+    with pytest.raises(InvalidChangeSetError) as error:
         service.propose_create(
             payload=payload,
             owning_group_id=group,
@@ -60,7 +63,7 @@ def test_rejection_requires_nonblank_reason_without_opening_transaction(
     """A blank review explanation cannot start a rejection workflow."""
     module = import_module("standard_annotation_backend.services.change_set_service")
     service = module.ChangeSetService(_unopened_transaction)
-    with pytest.raises(module.InvalidChangeSetError) as error:
+    with pytest.raises(InvalidChangeSetError) as error:
         service.reject(
             uuid4(),
             review_reason=reason,
@@ -135,7 +138,7 @@ def test_proposals_require_strict_positive_base_version(
     """Invalid version metadata fails before a repository transaction is opened."""
     module = import_module("standard_annotation_backend.services.change_set_service")
     service = module.ChangeSetService(_unopened_transaction)
-    with pytest.raises(module.InvalidChangeSetError) as error:
+    with pytest.raises(InvalidChangeSetError) as error:
         getattr(service, f"propose_{operation}")(
             uuid4(),
             base_version=version,
@@ -164,7 +167,7 @@ def test_acceptance_rejects_nontext_review_reason_before_transaction(
     """Malformed optional review metadata cannot reach the acceptance transaction."""
     module = import_module("standard_annotation_backend.services.change_set_service")
     service = module.ChangeSetService(_unopened_transaction)
-    with pytest.raises(module.InvalidChangeSetError) as error:
+    with pytest.raises(InvalidChangeSetError) as error:
         service.accept(
             uuid4(),
             review_reason=cast(str, reason),

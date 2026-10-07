@@ -21,6 +21,10 @@ from standard_annotation_backend.domain.auth import (
     AuthorizationScope,
     RequestContext,
 )
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetStateError,
+    StaleChangeSetError,
+)
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
 )
@@ -42,8 +46,6 @@ from standard_annotation_backend.services.annotation_service import AnnotationSe
 from standard_annotation_backend.services.change_set_service import (
     AcceptedChangeSet,
     ChangeSetService,
-    ChangeSetStateError,
-    StaleChangeSetError,
 )
 
 

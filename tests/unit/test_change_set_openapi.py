@@ -271,3 +271,71 @@ def test_change_set_responses_share_operation_and_state_vocabularies(
         "rejected",
         "stale",
     ]
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "documented"),
+    [
+        (
+            "/change-sets",
+            "post",
+            {
+                "404": {"annotation_not_found"},
+                "422": {"invalid_change_set", "request_validation_error"},
+            },
+        ),
+        (
+            "/change-sets/{change_set_id}",
+            "get",
+            {
+                "404": {"change_set_not_found"},
+                "422": {"request_validation_error"},
+            },
+        ),
+        (
+            "/change-sets/{change_set_id}/preview",
+            "post",
+            {
+                "404": {"change_set_not_found"},
+                "409": {"change_set_not_proposed"},
+                "422": {"request_validation_error"},
+            },
+        ),
+        (
+            "/change-sets/{change_set_id}/accept",
+            "post",
+            {
+                "404": {"change_set_not_found"},
+                "409": {
+                    "change_set_not_proposed",
+                    "stale_change_set",
+                    "duplicate_annotation",
+                },
+                "422": {
+                    "invalid_change_set",
+                    "unknown_db_object_id",
+                    "request_validation_error",
+                },
+            },
+        ),
+        (
+            "/change-sets/{change_set_id}/reject",
+            "post",
+            {
+                "404": {"change_set_not_found"},
+                "409": {"change_set_not_proposed"},
+                "422": {"invalid_change_set", "request_validation_error"},
+            },
+        ),
+    ],
+)
+def test_change_set_error_docs_list_their_codes(
+    client: TestClient, path: str, method: str, documented: dict[str, set[str]]
+) -> None:
+    """Each change-set error status documents every code the route can return."""
+    responses = client.get("/openapi.json").json()["paths"][path][method]["responses"]
+
+    for status_code, codes in documented.items():
+        description = responses[status_code]["description"]
+        for code in codes:
+            assert f"`{code}`" in description

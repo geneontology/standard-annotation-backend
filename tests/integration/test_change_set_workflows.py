@@ -1,6 +1,5 @@
 """Verify atomic change-set review workflows with PostgreSQL."""
 
-from importlib import import_module
 from types import TracebackType
 from uuid import UUID, uuid4
 
@@ -19,6 +18,12 @@ from standard_annotation_backend.domain.auth import (
     AuthorizationScope,
     RequestContext,
 )
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetNotFoundError,
+    ChangeSetStateError,
+    InvalidChangeSetError,
+    StaleChangeSetError,
+)
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
@@ -36,7 +41,6 @@ from standard_annotation_backend.services.annotation_service import AnnotationSe
 from standard_annotation_backend.services.change_set_service import (
     ChangeSet,
     ChangeSetService,
-    InvalidChangeSetError,
 )
 
 PROPOSER = RequestContext(
@@ -150,8 +154,7 @@ def test_invalid_create_preview_reports_validation_and_remains_reviewable(
     assert any(
         issue["location"] == ("db_object_id",) for issue in preview.validation_errors
     )
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.InvalidChangeSetError):
+    with pytest.raises(InvalidChangeSetError):
         service.accept(proposed.change_set_id, context=REVIEWER)
     assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
@@ -360,8 +363,7 @@ def test_update_preview_reports_invalid_post_patch_annotation(
     preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert not preview.can_accept
     assert preview.validation_errors[0]["location"] == ("db_object_id",)
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.InvalidChangeSetError):
+    with pytest.raises(InvalidChangeSetError):
         service.accept(proposed.change_set_id, context=REVIEWER)
     assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
@@ -486,8 +488,7 @@ def test_update_proposal_rejects_unusable_patch_before_persistence(
         owning_group_id="group",
         context=PROPOSER,
     )
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.InvalidChangeSetError) as error:
+    with pytest.raises(InvalidChangeSetError) as error:
         _service(unit_of_work_factory).propose_update(
             target.annotation_id,
             base_version=1,
@@ -510,8 +511,7 @@ def test_update_proposal_requires_existing_base_version(
         owning_group_id="group",
         context=PROPOSER,
     )
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.InvalidChangeSetError) as error:
+    with pytest.raises(InvalidChangeSetError) as error:
         _service(unit_of_work_factory).propose_update(
             target.annotation_id,
             base_version=99,
@@ -675,9 +675,8 @@ def test_stale_acceptance_commits_review_and_audit_before_raising(
             exits.append(exc_type)
             super().__exit__(exc_type, exc_value, traceback)
 
-    module = import_module("standard_annotation_backend.services.change_set_service")
     observed_service = _service(lambda: ObservedUnitOfWork(session_factory))
-    with pytest.raises(module.StaleChangeSetError) as error:
+    with pytest.raises(StaleChangeSetError) as error:
         observed_service.accept(proposal.change_set_id, context=REVIEWER)
     assert exits == [None]
     assert error.value.change_set_id == proposal.change_set_id
@@ -721,7 +720,6 @@ def test_terminal_proposals_reject_further_review_operations(
     proposal = service.propose_delete(
         target.annotation_id, base_version=1, reason="Withdraw", context=PROPOSER
     )
-    module = import_module("standard_annotation_backend.services.change_set_service")
     if state == "accepted":
         service.accept(proposal.change_set_id, context=REVIEWER)
     elif state == "rejected":
@@ -733,9 +731,9 @@ def test_terminal_proposals_reject_further_review_operations(
             expected_version=1,
             context=PROPOSER,
         )
-        with pytest.raises(module.StaleChangeSetError):
+        with pytest.raises(StaleChangeSetError):
             service.accept(proposal.change_set_id, context=REVIEWER)
-    with pytest.raises(module.ChangeSetStateError) as error:
+    with pytest.raises(ChangeSetStateError) as error:
         getattr(service, operation)(
             proposal.change_set_id,
             context=REVIEWER,
@@ -752,9 +750,8 @@ def test_unknown_change_set_has_transport_neutral_not_found_error(
 ) -> None:
     """Read, preview, and review operations expose the missing change-set identifier."""
     service = _service(unit_of_work_factory)
-    module = import_module("standard_annotation_backend.services.change_set_service")
     missing_id = uuid4()
-    with pytest.raises(module.ChangeSetNotFoundError) as error:
+    with pytest.raises(ChangeSetNotFoundError) as error:
         getattr(service, operation)(
             missing_id,
             context=REVIEWER,
@@ -800,12 +797,11 @@ def test_delete_proposal_requires_existing_active_base_snapshot(
     )
     annotations.delete(target.annotation_id, expected_version=1, context=PROPOSER)
     service = _service(unit_of_work_factory)
-    module = import_module("standard_annotation_backend.services.change_set_service")
     for version, issue_type in [
         (99, "base_version_not_found"),
         (2, "base_version_deleted"),
     ]:
-        with pytest.raises(module.InvalidChangeSetError) as error:
+        with pytest.raises(InvalidChangeSetError) as error:
             service.propose_delete(
                 target.annotation_id,
                 base_version=version,
@@ -897,8 +893,7 @@ def test_repository_detected_stale_write_is_persisted_after_intervening_transact
         monkeypatch.setattr(AnnotationRepository, "update", interrupted_update)
     else:
         monkeypatch.setattr(AnnotationRepository, "soft_delete", interrupted_delete)
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.StaleChangeSetError) as error:
+    with pytest.raises(StaleChangeSetError) as error:
         service.accept(proposal.change_set_id, context=REVIEWER)
     assert error.value.current_version == 2
     stored = service.get(proposal.change_set_id, context=PROPOSER)

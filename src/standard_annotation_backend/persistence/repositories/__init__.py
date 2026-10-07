@@ -10,9 +10,7 @@ from standard_annotation_backend.persistence.repositories.annotations import (
 from standard_annotation_backend.persistence.repositories.audit import AuditRepository
 from standard_annotation_backend.persistence.repositories.auth import AuthRepository
 from standard_annotation_backend.persistence.repositories.change_sets import (
-    ChangeSetNotFoundError,
     ChangeSetRepository,
-    InvalidChangeSetStateError,
 )
 from standard_annotation_backend.persistence.repositories.comments import (
     AnnotationCommentRepository,
@@ -38,10 +36,8 @@ __all__ = [
     "AnnotationSearchFilters",
     "AuditRepository",
     "AuthRepository",
-    "ChangeSetNotFoundError",
     "ChangeSetRepository",
     "EntityRepository",
-    "InvalidChangeSetStateError",
     "InvalidJobTransitionError",
     "JobNotFoundError",
     "JobRepository",

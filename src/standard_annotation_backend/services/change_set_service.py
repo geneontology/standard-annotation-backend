@@ -30,9 +30,13 @@ from standard_annotation_backend.domain.auth import (
     derive_creation_group,
 )
 from standard_annotation_backend.domain.change_sets import (
+    ChangeSetNotFoundError,
     ChangeSetOperation,
     ChangeSetState,
+    ChangeSetStateError,
+    InvalidChangeSetError,
     InvalidChangeSetPatchError,
+    StaleChangeSetError,
     apply_annotation_patch,
 )
 from standard_annotation_backend.domain.duplicate_policy import duplicate_key
@@ -49,9 +53,6 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationRepository,
-)
-from standard_annotation_backend.persistence.repositories import (
-    ChangeSetNotFoundError as RepositoryChangeSetNotFoundError,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
@@ -123,50 +124,6 @@ class AcceptedChangeSet(BaseModel):
     version: int
     is_deleted: bool
     annotation: Annotation
-
-
-class ChangeSetNotFoundError(LookupError):
-    """Report a change-set ID that does not exist."""
-
-    def __init__(self, change_set_id: UUID) -> None:
-        self.change_set_id = change_set_id
-        super().__init__(f"change set {change_set_id} was not found")
-
-
-class InvalidChangeSetError(ValueError):
-    """Report stable validation issues in a proposal or its candidate annotation."""
-
-    def __init__(self, errors: tuple[ValidationIssue, ...]) -> None:
-        self.errors = errors
-        super().__init__("change set is invalid")
-
-
-class ChangeSetStateError(RuntimeError):
-    """Report a review operation attempted after a proposal became terminal."""
-
-    def __init__(self, change_set_id: UUID, state: str) -> None:
-        self.change_set_id = change_set_id
-        self.state = state
-        super().__init__(f"change set {change_set_id} is already {state}")
-
-
-class StaleChangeSetError(RuntimeError):
-    """Report a stale proposal after its state and audit event have committed."""
-
-    def __init__(
-        self,
-        change_set_id: UUID,
-        annotation_id: UUID,
-        expected_version: int,
-        current_version: int,
-    ) -> None:
-        self.change_set_id = change_set_id
-        self.annotation_id = annotation_id
-        self.expected_version = expected_version
-        self.current_version = current_version
-        super().__init__(
-            f"change set {change_set_id} targets an older annotation version"
-        )
 
 
 class _CreateProposal(BaseModel):
@@ -827,10 +784,7 @@ def _lock_proposal(
         ChangeSetNotFoundError: If the proposal is missing or inaccessible.
         ChangeSetStateError: If the proposal has already been reviewed.
     """
-    try:
-        record = unit_of_work.change_sets.lock_for_review(change_set_id)
-    except RepositoryChangeSetNotFoundError:
-        raise ChangeSetNotFoundError(change_set_id) from None
+    record = unit_of_work.change_sets.lock_for_review(change_set_id)
     _authorize_change_set(unit_of_work.annotations, record, context, action)
     if record.state != ChangeSetState.PROPOSED:
         raise ChangeSetStateError(change_set_id, record.state)
