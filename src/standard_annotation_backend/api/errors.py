@@ -1,7 +1,6 @@
 """Convert expected application failures into consistent HTTP responses."""
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -42,12 +41,6 @@ from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.repositories.auth import (
     CredentialPersistenceError,
 )
-from standard_annotation_backend.services.annotation_service import (
-    ClosureTermRequiredError,
-    OntologyUnavailableError,
-    UnsupportedClosureFieldError,
-    UnsupportedClosurePredicateError,
-)
 
 BEARER_ERRORS: tuple[type[SabError], ...] = (
     AuthenticationRequiredError,
@@ -60,23 +53,6 @@ A route that requires a bearer token can reject it, deny the caller's role or
 scope, or fail to reach credential storage, before its own work begins. Pass
 these to `error_responses` alongside the route's own errors.
 """
-
-
-@dataclass(frozen=True, slots=True)
-class _FixedErrorResponse:
-    """Describe an error response determined entirely by exception type.
-
-    Attributes:
-        status_code: HTTP status code for the response.
-        code: Stable machine-readable error identifier.
-        message: Plain-language explanation safe for clients.
-        headers: Additional response headers as name-value pairs.
-    """
-
-    status_code: int
-    code: str
-    message: str
-    headers: tuple[tuple[str, str], ...] = ()
 
 
 class ApiError(RuntimeError):
@@ -293,49 +269,6 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(SabError)
     def handle_sab_error(_request: Request, error: SabError) -> JSONResponse:
         return sab_error_response(error)
-
-    # "Fixed" means the response depends only on the exception type; no value
-    # carried by the exception instance affects its status, body, or headers.
-    fixed_errors: dict[type[Exception], _FixedErrorResponse] = {
-        ClosureTermRequiredError: _FixedErrorResponse(
-            status.HTTP_400_BAD_REQUEST,
-            "closure_term_required",
-            "ontology_class_id is required for closure search",
-        ),
-        UnsupportedClosureFieldError: _FixedErrorResponse(
-            status.HTTP_400_BAD_REQUEST,
-            "unsupported_closure_field",
-            "Closure search is supported only for ontology_class_id",
-        ),
-        UnsupportedClosurePredicateError: _FixedErrorResponse(
-            status.HTTP_400_BAD_REQUEST,
-            "unsupported_closure_predicate",
-            "Closure predicate is not loaded for the active ontology",
-        ),
-        OntologyUnavailableError: _FixedErrorResponse(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "ontology_unavailable",
-            "The ontology required for closure search is unavailable",
-        ),
-    }
-
-    def fixed_error_handler(
-        error_response: _FixedErrorResponse,
-    ) -> Callable[[Request, Exception], JSONResponse]:
-        def handle_fixed_error(_request: Request, _error: Exception) -> JSONResponse:
-            response = _error_response(
-                status_code=error_response.status_code,
-                code=error_response.code,
-                message=error_response.message,
-            )
-            for name, value in error_response.headers:
-                response.headers[name] = value
-            return response
-
-        return handle_fixed_error
-
-    for error_type, error_response in fixed_errors.items():
-        app.add_exception_handler(error_type, fixed_error_handler(error_response))
 
     @app.exception_handler(ApiError)
     def handle_api_error(_request: Request, error: ApiError) -> JSONResponse:

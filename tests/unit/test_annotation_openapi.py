@@ -147,7 +147,6 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
             "get",
             _openapi_statuses(
                 status.HTTP_200_OK,
-                status.HTTP_400_BAD_REQUEST,
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
             ),
         ),
@@ -174,7 +173,6 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
             "patch",
             _openapi_statuses(
                 status.HTTP_200_OK,
-                status.HTTP_400_BAD_REQUEST,
                 status.HTTP_404_NOT_FOUND,
                 status.HTTP_409_CONFLICT,
                 status.HTTP_412_PRECONDITION_FAILED,
@@ -187,7 +185,6 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
             "delete",
             _openapi_statuses(
                 status.HTTP_204_NO_CONTENT,
-                status.HTTP_400_BAD_REQUEST,
                 status.HTTP_404_NOT_FOUND,
                 status.HTTP_412_PRECONDITION_FAILED,
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -318,4 +315,39 @@ def test_write_422_docs_include_request_validation_failures(
     """Write routes document that malformed requests return `request_validation_error`."""
     responses = client.get("/openapi.json").json()["paths"][path][method]["responses"]
 
+    assert "`request_validation_error`" in responses["422"]["description"]
+
+
+def test_annotation_search_docs_list_query_errors_and_both_unavailable_causes(
+    client: TestClient,
+) -> None:
+    """Search documents its located query errors and every 503 cause."""
+    responses = client.get("/openapi.json").json()["paths"]["/annotations"]["get"][
+        "responses"
+    ]
+
+    for code in (
+        "unknown_query_parameter",
+        "unsupported_filter",
+        "closure_term_required",
+        "unsupported_closure_field",
+        "unsupported_closure_predicate",
+        "request_validation_error",
+    ):
+        assert f"`{code}`" in responses["422"]["description"]
+    for code in ("credential_storage_unavailable", "ontology_unavailable"):
+        assert f"`{code}`" in responses["503"]["description"]
+
+
+@pytest.mark.parametrize("method", ["patch", "delete"])
+def test_annotation_write_docs_list_if_match_errors(
+    client: TestClient, method: str
+) -> None:
+    """Versioned writes document missing and malformed `If-Match` errors."""
+    responses = client.get("/openapi.json").json()["paths"][
+        "/annotations/{annotation_id}"
+    ][method]["responses"]
+
+    assert "`precondition_required`" in responses["428"]["description"]
+    assert "`malformed_precondition`" in responses["422"]["description"]
     assert "`request_validation_error`" in responses["422"]["description"]

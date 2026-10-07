@@ -150,7 +150,7 @@ def test_patch_rejects_missing_or_malformed_if_match(
     assert response.status_code == (
         status.HTTP_428_PRECONDITION_REQUIRED
         if if_match is None
-        else status.HTTP_400_BAD_REQUEST
+        else status.HTTP_422_UNPROCESSABLE_CONTENT
     )
     assert response.json()["error"]["code"] == (
         "precondition_required" if if_match is None else "malformed_precondition"
@@ -183,11 +183,19 @@ def test_mutation_rejects_malformed_preconditions_without_changing_state(
         json={"assigned_by": "MGI"} if method == "patch" else None,
     )
 
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    message = "If-Match must be one quoted positive integer"
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert response.json() == {
         "error": {
             "code": "malformed_precondition",
-            "message": "If-Match must be one quoted positive integer",
+            "message": message,
+            "details": [
+                {
+                    "location": ["header", "If-Match"],
+                    "message": message,
+                    "type": "malformed_precondition",
+                }
+            ],
         }
     }
     current = integration_api_client.get(path)

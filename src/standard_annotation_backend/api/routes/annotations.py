@@ -8,6 +8,8 @@ from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 
 from standard_annotation_backend.api.dependencies import (
     IF_MATCH_OPENAPI,
+    IfMatchRequiredError,
+    MalformedIfMatchError,
     PageLimit,
     PageOffset,
     get_annotation_service,
@@ -16,7 +18,6 @@ from standard_annotation_backend.api.dependencies import (
 )
 from standard_annotation_backend.api.errors import (
     BEARER_ERRORS,
-    ApiError,
     RequestValidationFailedError,
     error_responses,
 )
@@ -29,7 +30,14 @@ from standard_annotation_backend.api.models import (
     AnnotationPageResponse,
     AnnotationPatchRequest,
     AnnotationResource,
-    ApiErrorResponse,
+)
+from standard_annotation_backend.domain.annotation_search import (
+    ClosureTermRequiredError,
+    OntologyUnavailableError,
+    UnknownQueryParameterError,
+    UnsupportedClosureFieldError,
+    UnsupportedClosurePredicateError,
+    UnsupportedFilterError,
 )
 from standard_annotation_backend.domain.annotations import (
     AnnotationDeletedError,
@@ -41,10 +49,7 @@ from standard_annotation_backend.domain.annotations import (
 )
 from standard_annotation_backend.domain.auth import RequestContext
 from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
-from standard_annotation_backend.services.annotation_service import (
-    AnnotationService,
-    UnsupportedClosureFieldError,
-)
+from standard_annotation_backend.services.annotation_service import AnnotationService
 
 router = APIRouter(
     prefix="/annotations",
@@ -92,39 +97,36 @@ def _reject_unknown_query_parameters(request: Request) -> None:
         None,
     )
     if unsupported_closure is not None:
-        raise UnsupportedClosureFieldError
+        raise UnsupportedClosureFieldError(unsupported_closure)
 
     unsupported_name = next(
         (name for name in names if name in _UNSUPPORTED_FILTER_NAMES),
         None,
     )
     if unsupported_name is not None:
-        raise ApiError(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code="unsupported_filter",
-            message=f"Unsupported annotation filter: {unsupported_name}",
-        )
+        raise UnsupportedFilterError(unsupported_name)
 
     unknown_name = next((name for name in names if name not in allowed_names), None)
     if unknown_name is not None:
-        raise ApiError(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code="unknown_query_parameter",
-            message=f"Unknown query parameter: {unknown_name}",
-        )
+        raise UnknownQueryParameterError(unknown_name)
 
 
 @router.get(
     "",
     response_model=AnnotationPageResponse,
     dependencies=[Depends(_reject_unknown_query_parameters)],
-    responses={
-        status.HTTP_400_BAD_REQUEST: {"model": ApiErrorResponse},
-        status.HTTP_503_SERVICE_UNAVAILABLE: {
-            "model": ApiErrorResponse,
-            "description": "The ontology required for closure search is unavailable",
-        },
-    },
+    # Route-level entries replace the router's entries for the same status, so
+    # the bearer and request-validation errors are listed again here.
+    responses=error_responses(
+        *BEARER_ERRORS,
+        UnknownQueryParameterError,
+        UnsupportedFilterError,
+        ClosureTermRequiredError,
+        UnsupportedClosureFieldError,
+        UnsupportedClosurePredicateError,
+        OntologyUnavailableError,
+        RequestValidationFailedError,
+    ),
 )
 def list_annotations(
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
@@ -284,18 +286,18 @@ def get_annotation(
     openapi_extra=IF_MATCH_OPENAPI,
     responses={
         status.HTTP_200_OK: {"headers": {"ETag": _ETAG_RESPONSE_HEADER}},
-        status.HTTP_400_BAD_REQUEST: {"model": ApiErrorResponse},
         **error_responses(
             AnnotationNotFoundError,
             AnnotationDeletedError,
             DuplicateAnnotationError,
             StaleAnnotationVersionError,
+            IfMatchRequiredError,
+            MalformedIfMatchError,
             EmptyAnnotationPatchError,
             InvalidAnnotationPayloadError,
             UnknownDbObjectIdError,
             RequestValidationFailedError,
         ),
-        status.HTTP_428_PRECONDITION_REQUIRED: {"model": ApiErrorResponse},
     },
 )
 def patch_annotation(
@@ -336,15 +338,14 @@ def patch_annotation(
     "/{annotation_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     openapi_extra=IF_MATCH_OPENAPI,
-    responses={
-        status.HTTP_400_BAD_REQUEST: {"model": ApiErrorResponse},
-        **error_responses(
-            AnnotationNotFoundError,
-            AnnotationDeletedError,
-            StaleAnnotationVersionError,
-        ),
-        status.HTTP_428_PRECONDITION_REQUIRED: {"model": ApiErrorResponse},
-    },
+    responses=error_responses(
+        AnnotationNotFoundError,
+        AnnotationDeletedError,
+        StaleAnnotationVersionError,
+        IfMatchRequiredError,
+        MalformedIfMatchError,
+        RequestValidationFailedError,
+    ),
 )
 def delete_annotation(
     annotation_id: UUID,

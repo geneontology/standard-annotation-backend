@@ -288,29 +288,30 @@ def test_annotation_search_api_filter_combines_fields_with_and(
     assert [item["annotation_id"] for item in response.json()["items"]] == [matching_id]
 
 
+_UNKNOWN_PARAMETER_MESSAGE = "Query parameter is not recognized"
+_UNSUPPORTED_FILTER_MESSAGE = "Annotation filter is not supported"
+
+
+def _located_error(code: str, message: str, parameter: str) -> dict[str, object]:
+    return {
+        "error": {
+            "code": code,
+            "message": message,
+            "details": [
+                {"location": ["query", parameter], "message": message, "type": code}
+            ],
+        }
+    }
+
+
 @pytest.mark.parametrize(
     ("parameter", "expected_code", "expected_message"),
     [
-        (
-            "annotation_extensions",
-            "unsupported_filter",
-            "Unsupported annotation filter: annotation_extensions",
-        ),
-        (
-            "annotation_properties",
-            "unsupported_filter",
-            "Unsupported annotation filter: annotation_properties",
-        ),
-        (
-            "unexpected",
-            "unknown_query_parameter",
-            "Unknown query parameter: unexpected",
-        ),
-        (
-            "referneces",
-            "unknown_query_parameter",
-            "Unknown query parameter: referneces",
-        ),
+        ("annotation_extensions", "unsupported_filter", _UNSUPPORTED_FILTER_MESSAGE),
+        ("annotation_properties", "unsupported_filter", _UNSUPPORTED_FILTER_MESSAGE),
+        ("unexpected", "unknown_query_parameter", _UNKNOWN_PARAMETER_MESSAGE),
+        ("referneces", "unknown_query_parameter", _UNKNOWN_PARAMETER_MESSAGE),
+        ("colour", "unknown_query_parameter", _UNKNOWN_PARAMETER_MESSAGE),
     ],
 )
 def test_annotation_search_api_filter_rejects_unsupported_and_unknown_names(
@@ -319,21 +320,21 @@ def test_annotation_search_api_filter_rejects_unsupported_and_unknown_names(
     expected_code: str,
     expected_message: str,
 ) -> None:
-    """Search distinguishes unsupported filters from unknown parameter names."""
+    """Search distinguishes unsupported filters from unknown parameter names.
+
+    The response locates the offending parameter in its details and keeps the
+    message fixed, so the client-supplied name never appears in the message.
+    """
     _create_annotation(integration_api_client, "UniProtKB:U1001")
 
     response = integration_api_client.get(
         "/annotations",
-        params={parameter: "value"},
+        params={parameter: "red"},
     )
 
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert response.json() == {
-        "error": {
-            "code": expected_code,
-            "message": expected_message,
-        }
-    }
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json() == _located_error(expected_code, expected_message, parameter)
+    assert parameter not in response.json()["error"]["message"]
 
 
 def test_annotation_search_api_unknown_name_precedes_known_value_validation(
@@ -345,13 +346,10 @@ def test_annotation_search_api_unknown_name_precedes_known_value_validation(
         params={"unexpected": "x", "limit": 0},
     )
 
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert response.json() == {
-        "error": {
-            "code": "unknown_query_parameter",
-            "message": "Unknown query parameter: unexpected",
-        }
-    }
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json() == _located_error(
+        "unknown_query_parameter", _UNKNOWN_PARAMETER_MESSAGE, "unexpected"
+    )
 
 
 def test_annotation_search_api_unsupported_name_precedes_all_other_validation(
@@ -367,13 +365,10 @@ def test_annotation_search_api_unsupported_name_precedes_all_other_validation(
         ],
     )
 
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert response.json() == {
-        "error": {
-            "code": "unsupported_filter",
-            "message": "Unsupported annotation filter: annotation_extensions",
-        }
-    }
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json() == _located_error(
+        "unsupported_filter", _UNSUPPORTED_FILTER_MESSAGE, "annotation_extensions"
+    )
 
 
 def test_annotation_search_api_known_invalid_value_remains_validation_error(

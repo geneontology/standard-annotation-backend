@@ -4,6 +4,11 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from uuid import UUID
 
+from standard_annotation_backend.domain.annotation_search import (
+    ClosureTermRequiredError,
+    OntologyUnavailableError,
+    UnsupportedClosurePredicateError,
+)
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationVersionNotFoundError,
@@ -81,22 +86,6 @@ class AnnotationVersion:
     change_source: ChangeSource
     created_at: datetime
     annotation: Annotation
-
-
-class ClosureTermRequiredError(ValueError):
-    """Report that a closure predicate was supplied without an ontology term."""
-
-
-class UnsupportedClosureFieldError(ValueError):
-    """Report that closure search was requested for an unsupported field."""
-
-
-class UnsupportedClosurePredicateError(ValueError):
-    """Report that the active ontology does not support a closure predicate."""
-
-
-class OntologyUnavailableError(RuntimeError):
-    """Report that closure search has no active ontology snapshot."""
 
 
 class AnnotationService:
@@ -357,7 +346,7 @@ class AnnotationService:
                 if active is None:
                     raise OntologyUnavailableError
                 if ontology_class_id_closure not in active.loaded_predicates:
-                    raise UnsupportedClosurePredicateError
+                    raise UnsupportedClosurePredicateError("ontology_class_id_closure")
             page = unit_of_work.annotations.list_active(
                 filters,
                 limit=limit,

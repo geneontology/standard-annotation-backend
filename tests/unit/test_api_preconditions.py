@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from standard_annotation_backend.api.dependencies import (
+    MalformedIfMatchError,
     parse_if_match,
     require_expected_version,
 )
@@ -59,65 +60,10 @@ def _valid_annotation_payload() -> dict[str, object]:
     }
 
 
-@pytest.mark.parametrize(
-    ("header", "expected_status", "expected_code", "expected_message"),
-    [
-        (
-            None,
-            status.HTTP_428_PRECONDITION_REQUIRED,
-            "precondition_required",
-            "If-Match is required",
-        ),
-        (
-            "1",
-            status.HTTP_400_BAD_REQUEST,
-            "malformed_precondition",
-            "If-Match must be one quoted positive integer",
-        ),
-        (
-            'W/"1"',
-            status.HTTP_400_BAD_REQUEST,
-            "malformed_precondition",
-            "If-Match must be one quoted positive integer",
-        ),
-        (
-            "*",
-            status.HTTP_400_BAD_REQUEST,
-            "malformed_precondition",
-            "If-Match must be one quoted positive integer",
-        ),
-        (
-            '"1", "2"',
-            status.HTTP_400_BAD_REQUEST,
-            "malformed_precondition",
-            "If-Match must be one quoted positive integer",
-        ),
-        (
-            '"0"',
-            status.HTTP_400_BAD_REQUEST,
-            "malformed_precondition",
-            "If-Match must be one quoted positive integer",
-        ),
-        (
-            '"-1"',
-            status.HTTP_400_BAD_REQUEST,
-            "malformed_precondition",
-            "If-Match must be one quoted positive integer",
-        ),
-        (
-            '"abc"',
-            status.HTTP_400_BAD_REQUEST,
-            "malformed_precondition",
-            "If-Match must be one quoted positive integer",
-        ),
-    ],
-)
-def test_if_match_rejects_missing_or_malformed_values(
-    header: str | None,
-    expected_status: int,
-    expected_code: str,
-    expected_message: str,
-) -> None:
+_MALFORMED_IF_MATCH_MESSAGE = "If-Match must be one quoted positive integer"
+
+
+def _if_match_app() -> FastAPI:
     app = FastAPI()
     install_exception_handlers(app)
 
@@ -127,12 +73,42 @@ def test_if_match_rejects_missing_or_malformed_values(
     ) -> dict[str, int]:
         return {"expected_version": expected_version}
 
-    headers = {} if header is None else {"If-Match": header}
-    response = TestClient(app).patch("/resource", headers=headers)
+    return app
 
-    assert response.status_code == expected_status
+
+def test_if_match_requires_the_header() -> None:
+    """A missing `If-Match` header returns 428 `precondition_required`."""
+    response = TestClient(_if_match_app()).patch("/resource")
+
+    assert response.status_code == status.HTTP_428_PRECONDITION_REQUIRED
     assert response.json() == {
-        "error": {"code": expected_code, "message": expected_message}
+        "error": {"code": "precondition_required", "message": "If-Match is required"}
+    }
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["1", 'W/"1"', "*", '"1", "2"', '"0"', '"-1"', '"abc"'],
+)
+def test_if_match_rejects_malformed_values(header: str) -> None:
+    """A malformed `If-Match` value returns 422 located at the header."""
+    response = TestClient(_if_match_app()).patch(
+        "/resource", headers={"If-Match": header}
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json() == {
+        "error": {
+            "code": "malformed_precondition",
+            "message": _MALFORMED_IF_MATCH_MESSAGE,
+            "details": [
+                {
+                    "location": ["header", "If-Match"],
+                    "message": _MALFORMED_IF_MATCH_MESSAGE,
+                    "type": "malformed_precondition",
+                }
+            ],
+        }
     }
 
 
@@ -141,11 +117,8 @@ def test_if_match_returns_the_quoted_positive_version() -> None:
 
 
 def test_if_match_rejects_an_integer_exceeding_the_runtime_conversion_limit() -> None:
-    with pytest.raises(ApiError) as raised:
+    with pytest.raises(MalformedIfMatchError):
         parse_if_match('"' + "9" * 4301 + '"')
-
-    assert raised.value.status_code == status.HTTP_400_BAD_REQUEST
-    assert raised.value.code == "malformed_precondition"
 
 
 def test_create_request_model_rejects_blank_owning_group_with_stable_error() -> None:

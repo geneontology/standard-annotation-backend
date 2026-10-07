@@ -3,13 +3,16 @@
 import re
 from typing import Annotated
 
-from fastapi import Depends, Query, Request, status
+from fastapi import Depends, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from standard_annotation_backend.api.errors import ApiError
 from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
     RequestContext,
+)
+from standard_annotation_backend.domain.errors import (
+    InvalidInputError,
+    PreconditionRequiredError,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_service import AnnotationService
@@ -38,7 +41,7 @@ IF_MATCH_OPENAPI = {
             "required": True,
             "description": (
                 "Exactly one quoted, positive-integer annotation version. "
-                "Missing values return 428; malformed or repeated values return 400."
+                "Missing values return 428; malformed or repeated values return 422."
             ),
             "schema": {
                 "type": "string",
@@ -50,12 +53,30 @@ IF_MATCH_OPENAPI = {
 }
 
 
-def _malformed_precondition() -> ApiError:
-    return ApiError(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        code="malformed_precondition",
-        message="If-Match must be one quoted positive integer",
-    )
+class IfMatchRequiredError(PreconditionRequiredError):
+    """Report a versioned write sent without an `If-Match` header.
+
+    Versioned writes must name the annotation version they expect, so a client
+    cannot overwrite changes it has not seen.
+    """
+
+    code = "precondition_required"
+    message = "If-Match is required"
+
+
+class MalformedIfMatchError(InvalidInputError):
+    """Report an `If-Match` header that is not exactly one quoted positive integer.
+
+    Repeated headers, entity-tag lists, weak tags, and wildcards are all
+    rejected this way.
+    """
+
+    code = "malformed_precondition"
+    message = "If-Match must be one quoted positive integer"
+
+    def issue_location(self) -> tuple[str | int, ...]:
+        """Return the location of the `If-Match` header."""
+        return ("header", "If-Match")
 
 
 def parse_if_match(if_match: str | None) -> int:
@@ -71,22 +92,19 @@ def parse_if_match(if_match: str | None) -> int:
         The positive annotation version contained in the header.
 
     Raises:
-        ApiError: If the header is missing or is not one quoted positive integer.
+        IfMatchRequiredError: If the header is missing.
+        MalformedIfMatchError: If the header is not one quoted positive integer.
     """
     if if_match is None:
-        raise ApiError(
-            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
-            code="precondition_required",
-            message="If-Match is required",
-        )
+        raise IfMatchRequiredError
 
     match = _IF_MATCH_PATTERN.fullmatch(if_match)
     if match is None:
-        raise _malformed_precondition()
+        raise MalformedIfMatchError
     try:
         return int(match.group(1))
     except ValueError as error:
-        raise _malformed_precondition() from error
+        raise MalformedIfMatchError from error
 
 
 def require_expected_version(request: Request) -> int:
@@ -99,11 +117,12 @@ def require_expected_version(request: Request) -> int:
         The annotation version that the client expects to modify.
 
     Raises:
-        ApiError: If the header is missing, repeated, or malformed.
+        IfMatchRequiredError: If the header is missing.
+        MalformedIfMatchError: If the header is repeated or malformed.
     """
     values = request.headers.getlist("If-Match")
     if len(values) > 1:
-        raise _malformed_precondition()
+        raise MalformedIfMatchError
     return parse_if_match(values[0] if values else None)
 
 
