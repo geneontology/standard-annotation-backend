@@ -197,7 +197,7 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
 
     def write_other_group() -> None:
         with unit_of_work_factory() as uow:
-            uow.annotations.create_direct(
+            uow.annotations.create(
                 annotation=Annotation.model_validate(
                     {
                         "db_object_id": "UniProtKB:Q99999",

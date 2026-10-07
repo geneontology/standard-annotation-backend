@@ -306,13 +306,13 @@ def _apply_local_change(
         return
     with unit_of_work_factory() as uow:
         if change == "direct_create":
-            uow.annotations.create_direct(
+            uow.annotations.create(
                 annotation=_annotation("UniProtKB:Q99999"),
                 actor_id="curator",
                 owning_group_id=GROUP,
             )
         elif change == "edit":
-            uow.annotations.update_direct(
+            uow.annotations.update(
                 imported,
                 _annotation("UniProtKB:Q99999"),
                 expected_version=1,
@@ -320,7 +320,7 @@ def _apply_local_change(
                 change_source="api",
             )
         elif change == "soft_delete":
-            uow.annotations.soft_delete_direct(
+            uow.annotations.soft_delete(
                 imported, expected_version=1, actor_id="curator", change_source="api"
             )
         else:
@@ -390,7 +390,7 @@ def test_ontology_term_replacement_does_not_force_a_reimport(
     run(GOOD)
     [imported] = annotations_of(session_factory)
     with unit_of_work_factory() as uow:
-        uow.annotations.update_direct(
+        uow.annotations.update(
             imported.annotation_id,
             _annotation("UniProtKB:P12345").model_copy(
                 update={"ontology_class_id": "GO:0003674"}
@@ -469,14 +469,14 @@ def test_refresh_replaces_only_the_target_groups_annotations_and_history(
     edited = seed_annotation("UniProtKB:Q99999")
     soft_deleted = seed_annotation("UniProtKB:Q99999")
     with unit_of_work_factory() as uow:
-        uow.annotations.update_direct(
+        uow.annotations.update(
             edited,
             _annotation("UniProtKB:Q99999"),
             expected_version=1,
             actor_id="curator",
             change_source="api",
         )
-        uow.annotations.soft_delete_direct(
+        uow.annotations.soft_delete(
             soft_deleted, expected_version=1, actor_id="curator", change_source="api"
         )
         uow.comments.create(edited, body="note", created_by="curator")

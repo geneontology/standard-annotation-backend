@@ -150,13 +150,13 @@ class AnnotationRepository:
     The repository flushes changes so database errors are raised promptly, but
     the caller remains responsible for committing or rolling back the session.
 
-    The `_direct` mutation methods serve both direct API writes and change-set
-    acceptance. They enforce an active entity catalog subject, duplicate
-    prevention, and expected-version checks. `apply_system_update` serves
-    system-wide updates such as ontology refresh, whose caller holds the exclusive
-    annotation lock and checks duplicates for the whole batch. All of them use
-    shared private helpers for the underlying database writes so annotations and
-    their version histories remain consistent.
+    `create`, `update`, and `soft_delete` serve both direct API writes and
+    change-set acceptance. They enforce an active entity catalog subject,
+    duplicate prevention, and expected-version checks. `apply_system_update`
+    serves system-wide updates such as ontology refresh, whose caller holds the
+    exclusive annotation lock and checks duplicates for the whole batch. All of
+    them use shared private helpers for the underlying database writes so
+    annotations and their version histories remain consistent.
 
     Args:
         session: Session used for every query and write.
@@ -386,7 +386,7 @@ class AnnotationRepository:
             )
         return tuple(self.session.scalars(statement))
 
-    def create_direct(
+    def create(
         self,
         *,
         annotation: Annotation,
@@ -453,7 +453,7 @@ class AnnotationRepository:
         self.session.flush()
         return record
 
-    def update_direct(
+    def update(
         self,
         annotation_id: UUID,
         annotation: Annotation,
@@ -483,7 +483,7 @@ class AnnotationRepository:
             StaleAnnotationVersionError: If `expected_version` is not current.
             TypeError: If `annotation` is not a validated `Annotation`.
         """
-        # Same lock order as `create_direct`: catalog membership first.
+        # Same lock order as `create`: catalog membership first.
         self._entities.require_active(annotation.db_object_id)
         candidate = prepare_annotation_for_persistence(annotation)
         acquire_global_annotation_write_lock(self.session)
@@ -597,7 +597,7 @@ class AnnotationRepository:
             change_source=change_source,
         )
 
-    def soft_delete_direct(
+    def soft_delete(
         self,
         annotation_id: UUID,
         *,

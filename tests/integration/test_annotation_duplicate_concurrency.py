@@ -58,7 +58,7 @@ def _changed(annotation: Annotation, **changes: object) -> Annotation:
 
 def _create(annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
-        AnnotationRepository(session).create_direct(
+        AnnotationRepository(session).create(
             annotation=annotation,
             actor_id="concurrent-creator",
             owning_group_id="group-1",
@@ -69,7 +69,7 @@ def _create(annotation: Annotation) -> Mutation:
 
 def _update(annotation_id: UUID, annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
-        AnnotationRepository(session).update_direct(
+        AnnotationRepository(session).update(
             annotation_id,
             annotation,
             expected_version=1,
@@ -234,7 +234,7 @@ def test_conflicting_creates_cannot_both_succeed(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    # Removing create_direct's signature lock allows both uncommitted creates.
+    # Removing create's signature lock allows both uncommitted creates.
     outcomes, blocked = _run_coordinated_mutations(
         session_factory, _create(validated_annotation), _create(validated_annotation)
     )
@@ -257,12 +257,12 @@ def test_distinct_record_updates_cannot_introduce_the_same_duplicate(
 ) -> None:
     with session_factory() as session:
         repository = AnnotationRepository(session)
-        first = repository.create_direct(
+        first = repository.create(
             annotation=_changed(validated_annotation, db_object_id="UniProtKB:FIRST"),
             actor_id="seed",
             owning_group_id="group-1",
         )
-        second = repository.create_direct(
+        second = repository.create(
             annotation=_changed(validated_annotation, db_object_id="UniProtKB:SECOND"),
             actor_id="seed",
             owning_group_id="group-1",
@@ -270,7 +270,7 @@ def test_distinct_record_updates_cannot_introduce_the_same_duplicate(
         session.commit()
         first_id, second_id = first.annotation_id, second.annotation_id
 
-    # Removing update_direct's candidate signature lock permits both updates.
+    # Removing update's candidate signature lock permits both updates.
     outcomes, blocked = _run_coordinated_mutations(
         session_factory,
         _update(first_id, validated_annotation),
@@ -290,7 +290,7 @@ def test_same_record_update_race_rejects_the_stale_version(
     validated_annotation: Annotation,
 ) -> None:
     with session_factory() as session:
-        record = AnnotationRepository(session).create_direct(
+        record = AnnotationRepository(session).create(
             annotation=validated_annotation, actor_id="seed", owning_group_id="group-1"
         )
         session.commit()
@@ -327,7 +327,7 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
     validated_annotation: Annotation,
 ) -> None:
     with session_factory() as session:
-        record = AnnotationRepository(session).create_direct(
+        record = AnnotationRepository(session).create(
             annotation=validated_annotation,
             actor_id="seed",
             owning_group_id="group-1",
@@ -344,7 +344,7 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
             nonlocal writer_calls
             writer_calls += 1
             with session_factory() as writer:
-                AnnotationRepository(writer).update_direct(
+                AnnotationRepository(writer).update(
                     annotation_id,
                     _changed(validated_annotation, assigned_by="Concurrent"),
                     expected_version=1,

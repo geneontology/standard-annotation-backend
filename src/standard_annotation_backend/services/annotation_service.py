@@ -176,7 +176,7 @@ class AnnotationService:
         )
         annotation = _validated_annotation(payload)
         with self._unit_of_work_factory() as unit_of_work:
-            record = unit_of_work.annotations.create_direct(
+            record = unit_of_work.annotations.create(
                 annotation=annotation,
                 actor_id=context.actor_id,
                 owning_group_id=group,
@@ -275,7 +275,7 @@ class AnnotationService:
             merged = current.annotation_data.copy()
             merged.update(changes)
             annotation = _validated_annotation(merged)
-            updated = unit_of_work.annotations.update_direct(
+            updated = unit_of_work.annotations.update(
                 annotation_id,
                 annotation,
                 expected_version=expected_version,
@@ -321,7 +321,7 @@ class AnnotationService:
                 PermissionAction.ANNOTATION_DELETE,
                 current,
             )
-            record = unit_of_work.annotations.soft_delete_direct(
+            record = unit_of_work.annotations.soft_delete(
                 annotation_id,
                 expected_version=expected_version,
                 actor_id=context.actor_id,

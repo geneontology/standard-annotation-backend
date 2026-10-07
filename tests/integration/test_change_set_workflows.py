@@ -232,7 +232,7 @@ def test_create_audit_failure_rolls_back_entire_workflow(
 
 
 @pytest.mark.parametrize("change_source", ["api", "change_set"])
-def test_direct_repository_create_records_selected_workflow(
+def test_repository_create_records_selected_workflow(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
     change_source: str,
@@ -240,7 +240,7 @@ def test_direct_repository_create_records_selected_workflow(
     """The shared duplicate-safe write retains API defaults and explicit workflow."""
     with unit_of_work_factory() as unit_of_work:
         kwargs = {} if change_source == "api" else {"change_source": change_source}
-        created = unit_of_work.annotations.create_direct(
+        created = unit_of_work.annotations.create(
             annotation=validated_annotation,
             actor_id="writer",
             owning_group_id="group",
@@ -516,18 +516,18 @@ def test_update_proposal_requires_existing_base_version(
 
 
 @pytest.mark.parametrize("change_source", ["api", "change_set"])
-def test_direct_repository_update_records_selected_workflow(
+def test_repository_update_records_selected_workflow(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
     change_source: str,
 ) -> None:
     """Shared update policy retains the default API source or the selected source."""
     with unit_of_work_factory() as unit_of_work:
-        target = unit_of_work.annotations.create_direct(
+        target = unit_of_work.annotations.create(
             annotation=validated_annotation, actor_id="writer", owning_group_id="group"
         )
         kwargs = {} if change_source == "api" else {"change_source": change_source}
-        unit_of_work.annotations.update_direct(
+        unit_of_work.annotations.update(
             target.annotation_id,
             validated_annotation,
             actor_id="writer",
@@ -753,18 +753,18 @@ def test_unknown_change_set_has_transport_neutral_not_found_error(
 
 
 @pytest.mark.parametrize("change_source", ["api", "change_set"])
-def test_direct_repository_delete_records_selected_workflow(
+def test_repository_delete_records_selected_workflow(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
     change_source: str,
 ) -> None:
     """Shared delete policy preserves the API default and explicit review source."""
     with unit_of_work_factory() as unit_of_work:
-        target = unit_of_work.annotations.create_direct(
+        target = unit_of_work.annotations.create(
             annotation=validated_annotation, actor_id="writer", owning_group_id="group"
         )
         kwargs = {} if change_source == "api" else {"change_source": change_source}
-        unit_of_work.annotations.soft_delete_direct(
+        unit_of_work.annotations.soft_delete(
             target.annotation_id, actor_id="writer", expected_version=1, **kwargs
         )
         version = unit_of_work.annotations.get_version(target.annotation_id, 2)
@@ -825,8 +825,8 @@ def test_repository_detected_stale_write_is_persisted_after_intervening_transact
             else {}
         ),
     )
-    original_update = AnnotationRepository.update_direct
-    original_delete = AnnotationRepository.soft_delete_direct
+    original_update = AnnotationRepository.update
+    original_delete = AnnotationRepository.soft_delete
     candidate = Annotation.model_validate(
         {**validated_annotation.model_dump(mode="json"), "assigned_by": "CONCURRENT"}
     )
@@ -879,11 +879,9 @@ def test_repository_detected_stale_write_is_persisted_after_intervening_transact
         )
 
     if operation == "update":
-        monkeypatch.setattr(AnnotationRepository, "update_direct", interrupted_update)
+        monkeypatch.setattr(AnnotationRepository, "update", interrupted_update)
     else:
-        monkeypatch.setattr(
-            AnnotationRepository, "soft_delete_direct", interrupted_delete
-        )
+        monkeypatch.setattr(AnnotationRepository, "soft_delete", interrupted_delete)
     module = import_module("standard_annotation_backend.services.change_set_service")
     with pytest.raises(module.StaleChangeSetError) as error:
         service.accept(proposal.change_set_id, context=REVIEWER)

@@ -455,7 +455,7 @@ def test_same_payload_create_acceptances_cannot_both_succeed(
     """Conflicting acceptances create one annotation and keep the losing proposal open."""
     first_id = _propose_create(unit_of_work_factory, validated_annotation)
     second_id = _propose_create(unit_of_work_factory, validated_annotation)
-    # Removing create_direct's signature lock lets both transactions find no peer.
+    # Removing create's signature lock lets both transactions find no peer.
     outcomes, blocked = _run_review_race(
         session_factory,
         _accept(first_id, FIRST_REVIEWER),
@@ -548,7 +548,7 @@ def test_conflicting_update_acceptances_cannot_both_succeed(
         target_ids.append(created.annotation_id)
         proposal_ids.append(proposed.change_set_id)
 
-    # Removing update_direct's signature locks permits both unrelated row locks
+    # Removing update's signature locks permits both unrelated row locks
     # to check the candidate before the other's uncommitted write is visible.
     outcomes, blocked = _run_review_race(
         session_factory,

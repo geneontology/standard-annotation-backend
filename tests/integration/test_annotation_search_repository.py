@@ -230,7 +230,7 @@ def test_scalar_search_excludes_soft_deleted_rows_from_items_and_total(
             )
         unit_of_work.commit()
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete_direct(
+        unit_of_work.annotations.soft_delete(
             deleted_id,
             expected_version=1,
             actor_id="deleter",
@@ -408,7 +408,7 @@ def test_version_queries_include_deleted_annotation_and_paginate_oldest_first(
         )
         unit_of_work.commit()
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.update_direct(
+        unit_of_work.annotations.update(
             annotation_id,
             _changed(validated_annotation, assigned_by="MGI"),
             expected_version=1,
@@ -417,7 +417,7 @@ def test_version_queries_include_deleted_annotation_and_paginate_oldest_first(
         )
         unit_of_work.commit()
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete_direct(
+        unit_of_work.annotations.soft_delete(
             annotation_id,
             expected_version=2,
             actor_id="deleter",
@@ -473,7 +473,7 @@ def test_version_page_total_and_items_share_one_database_snapshot(
             nonlocal writer_calls
             writer_calls += 1
             with unit_of_work_factory() as writer:
-                writer.annotations.update_direct(
+                writer.annotations.update(
                     annotation_id,
                     _changed(validated_annotation, assigned_by="MGI"),
                     expected_version=1,

@@ -393,7 +393,7 @@ def test_activation_is_atomically_visible_and_blocks_ordinary_writes(
         assert other is not None
         changed_data = dict(other.annotation_data)
         changed_data["assigned_by"] = "Writer_After_Load"
-        AnnotationRepository(session).update_direct(
+        AnnotationRepository(session).update(
             OTHER_ANNOTATION_ID,
             Annotation.model_validate(changed_data),
             expected_version=1,

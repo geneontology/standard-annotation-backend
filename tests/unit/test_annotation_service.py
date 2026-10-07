@@ -165,7 +165,7 @@ class FakeAnnotationRepository:
         self.get_count = 0
         self.last_include_deleted: bool | None = None
 
-    def create_direct(
+    def create(
         self,
         *,
         annotation: Annotation,
@@ -199,7 +199,7 @@ class FakeAnnotationRepository:
             return None
         return self.current_record
 
-    def update_direct(
+    def update(
         self,
         annotation_id: UUID,
         annotation: Annotation,
@@ -216,7 +216,7 @@ class FakeAnnotationRepository:
         self.current_record.current_version += 1
         return self.current_record
 
-    def soft_delete_direct(
+    def soft_delete(
         self,
         annotation_id: UUID,
         *,

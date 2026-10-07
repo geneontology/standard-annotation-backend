@@ -208,7 +208,7 @@ def test_create_pins_actual_current_version_and_remains_pinned(
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     version_two = _changed_annotation(validated_annotation, assigned_by="Version_Two")
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.update_direct(
+        unit_of_work.annotations.update(
             annotation_id,
             version_two,
             expected_version=1,
@@ -233,7 +233,7 @@ def test_create_pins_actual_current_version_and_remains_pinned(
         validated_annotation, assigned_by="Version_Three"
     )
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.update_direct(
+        unit_of_work.annotations.update(
             annotation_id,
             version_three,
             expected_version=2,
@@ -389,7 +389,7 @@ def test_create_rejects_missing_and_deleted_annotations(
 
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete_direct(
+        unit_of_work.annotations.soft_delete(
             annotation_id,
             expected_version=1,
             actor_id="deleter",
@@ -531,7 +531,7 @@ def test_comment_access_waits_for_an_in_progress_parent_deletion(
         comment_id = comment.comment_id
 
     with session_factory() as holder, session_factory() as contender:
-        AnnotationRepository(holder).soft_delete_direct(
+        AnnotationRepository(holder).soft_delete(
             annotation_id,
             expected_version=1,
             actor_id="deleter",
@@ -591,7 +591,7 @@ def test_comment_access_refreshes_a_parent_deleted_after_an_earlier_read(
         preloaded_parent = contender.get(AnnotationRecord, annotation_id)
         assert preloaded_parent is not None
 
-        AnnotationRepository(holder).soft_delete_direct(
+        AnnotationRepository(holder).soft_delete(
             annotation_id,
             expected_version=1,
             actor_id="deleter",

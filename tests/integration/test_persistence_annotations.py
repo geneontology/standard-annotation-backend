@@ -47,12 +47,12 @@ def active_subjects(seed_active_subjects: Callable[..., None]) -> None:
     )
 
 
-def _create_direct(
+def _create_annotation(
     unit_of_work_factory: UnitOfWorkFactory,
     annotation: Annotation,
 ) -> UUID:
     with unit_of_work_factory() as unit_of_work:
-        record = unit_of_work.annotations.create_direct(
+        record = unit_of_work.annotations.create(
             annotation=annotation,
             actor_id="creator",
             owning_group_id="group-1",
@@ -83,7 +83,7 @@ def test_direct_create_stores_current_version_and_derived_values(
 ) -> None:
     persistence_data = prepare_annotation_for_persistence(validated_annotation)
 
-    annotation_id = _create_direct(unit_of_work_factory, validated_annotation)
+    annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
 
     with session_factory() as session:
         current = session.get(AnnotationRecord, annotation_id)
@@ -189,7 +189,7 @@ def test_update_appends_version_and_replaces_current_derived_values(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    annotation_id = _create_direct(unit_of_work_factory, validated_annotation)
+    annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     changed = _changed_annotation(
         validated_annotation,
         assigned_by="Updated_Source",
@@ -200,7 +200,7 @@ def test_update_appends_version_and_replaces_current_derived_values(
     changed_persistence_data = prepare_annotation_for_persistence(changed)
 
     with unit_of_work_factory() as unit_of_work:
-        record = unit_of_work.annotations.update_direct(
+        record = unit_of_work.annotations.update(
             annotation_id,
             changed,
             expected_version=1,
@@ -258,7 +258,7 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    annotation_id = _create_direct(unit_of_work_factory, validated_annotation)
+    annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     original_signature = prepare_annotation_for_persistence(
         validated_annotation
     ).duplicate_base_signature
@@ -280,7 +280,7 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
         assert retained.duplicate_base_signature == original_signature
 
         with unit_of_work_factory() as unit_of_work:
-            unit_of_work.annotations.update_direct(
+            unit_of_work.annotations.update(
                 annotation_id,
                 intervening,
                 expected_version=1,
@@ -295,7 +295,7 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
             acquire_signature_locks(blocker_session, [intervening_signature])
 
             with pytest.raises(DBAPIError, match="lock timeout"):
-                AnnotationRepository(retained_session).update_direct(
+                AnnotationRepository(retained_session).update(
                     annotation_id,
                     candidate,
                     expected_version=2,
@@ -309,7 +309,7 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    annotation_id = _create_direct(unit_of_work_factory, validated_annotation)
+    annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     original_signature = prepare_annotation_for_persistence(
         validated_annotation
     ).duplicate_base_signature
@@ -327,7 +327,7 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
         assert retained.duplicate_base_signature == original_signature
 
         with unit_of_work_factory() as unit_of_work:
-            unit_of_work.annotations.update_direct(
+            unit_of_work.annotations.update(
                 annotation_id,
                 intervening,
                 expected_version=1,
@@ -342,7 +342,7 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
             acquire_signature_locks(blocker_session, [intervening_signature])
 
             with pytest.raises(DBAPIError, match="lock timeout"):
-                AnnotationRepository(retained_session).soft_delete_direct(
+                AnnotationRepository(retained_session).soft_delete(
                     annotation_id,
                     expected_version=2,
                     actor_id="deleter",
@@ -355,10 +355,10 @@ def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    annotation_id = _create_direct(unit_of_work_factory, validated_annotation)
+    annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
 
     with unit_of_work_factory() as unit_of_work:
-        deleted = unit_of_work.annotations.soft_delete_direct(
+        deleted = unit_of_work.annotations.soft_delete(
             annotation_id,
             expected_version=1,
             actor_id="deleter",
@@ -406,9 +406,9 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    annotation_id = _create_direct(unit_of_work_factory, validated_annotation)
+    annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete_direct(
+        unit_of_work.annotations.soft_delete(
             annotation_id,
             expected_version=1,
             actor_id="deleter",
@@ -418,7 +418,7 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
 
     with unit_of_work_factory() as unit_of_work:
         with pytest.raises(AnnotationDeletedError):
-            unit_of_work.annotations.update_direct(
+            unit_of_work.annotations.update(
                 annotation_id,
                 validated_annotation,
                 expected_version=2,
@@ -426,7 +426,7 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
                 change_source="api",
             )
         with pytest.raises(AnnotationDeletedError):
-            unit_of_work.annotations.soft_delete_direct(
+            unit_of_work.annotations.soft_delete(
                 annotation_id,
                 expected_version=2,
                 actor_id="deleter",
@@ -436,7 +436,7 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
     missing_id = uuid4()
     with unit_of_work_factory() as unit_of_work:
         with pytest.raises(AnnotationNotFoundError):
-            unit_of_work.annotations.update_direct(
+            unit_of_work.annotations.update(
                 missing_id,
                 validated_annotation,
                 expected_version=1,
@@ -444,7 +444,7 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
                 change_source="api",
             )
         with pytest.raises(AnnotationNotFoundError):
-            unit_of_work.annotations.soft_delete_direct(
+            unit_of_work.annotations.soft_delete(
                 missing_id,
                 expected_version=1,
                 actor_id="deleter",
@@ -458,7 +458,7 @@ def test_unit_of_work_rolls_back_without_explicit_commit(
     validated_annotation: Annotation,
 ) -> None:
     with unit_of_work_factory() as unit_of_work:
-        annotation_id = unit_of_work.annotations.create_direct(
+        annotation_id = unit_of_work.annotations.create(
             annotation=validated_annotation,
             actor_id="creator",
             owning_group_id="group-1",

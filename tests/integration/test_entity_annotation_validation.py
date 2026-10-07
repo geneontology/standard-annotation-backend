@@ -73,11 +73,11 @@ def test_repository_writes_reject_an_unknown_subject_without_writes(
 
     with unit_of_work_factory() as uow, pytest.raises(UnknownDbObjectIdError):
         if operation == "create":
-            uow.annotations.create_direct(
+            uow.annotations.create(
                 annotation=unknown, actor_id="curator", owning_group_id="MGI"
             )
         else:
-            uow.annotations.update_direct(
+            uow.annotations.update(
                 existing, unknown, expected_version=1, actor_id="curator"
             )
 

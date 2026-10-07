@@ -189,7 +189,7 @@ def test_waiter_reads_committed_update_after_acquiring_signature_lock(
     waiter_acquired_lock = Event()
 
     def update_then_commit(session: Session) -> None:
-        updated = AnnotationRepository(session).update_direct(
+        updated = AnnotationRepository(session).update(
             annotation_id,
             changed,
             expected_version=1,

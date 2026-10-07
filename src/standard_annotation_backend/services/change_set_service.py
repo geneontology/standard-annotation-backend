@@ -619,7 +619,7 @@ def _accept_proposal(
     if validation.annotation is None:
         raise InvalidChangeSetError(validation.errors)
     if record.operation == ChangeSetOperation.CREATE:
-        changed = unit_of_work.annotations.create_direct(
+        changed = unit_of_work.annotations.create(
             annotation=validation.annotation,
             owning_group_id=record.owning_group_id,
             actor_id=record.proposed_by,
@@ -628,7 +628,7 @@ def _accept_proposal(
     else:
         assert record.annotation_id is not None and record.base_version is not None
         if record.operation == ChangeSetOperation.UPDATE:
-            changed = unit_of_work.annotations.update_direct(
+            changed = unit_of_work.annotations.update(
                 record.annotation_id,
                 validation.annotation,
                 expected_version=record.base_version,
@@ -636,7 +636,7 @@ def _accept_proposal(
                 change_source="change_set",
             )
         else:
-            changed = unit_of_work.annotations.soft_delete_direct(
+            changed = unit_of_work.annotations.soft_delete(
                 record.annotation_id,
                 expected_version=record.base_version,
                 actor_id=record.proposed_by,
