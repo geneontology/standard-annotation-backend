@@ -200,15 +200,12 @@ def test_redelivered_retirement_recovers_result_without_second_audit(
         received_job_id: UUID,
         *,
         result: dict[str, object],
-        artifact_uri: str | None = None,
     ) -> Job:
         nonlocal failures
         if failures:
             failures -= 1
             raise RuntimeError("connection dropped after retirement")
-        return original_succeed(
-            service, received_job_id, result=result, artifact_uri=artifact_uri
-        )
+        return original_succeed(service, received_job_id, result=result)
 
     monkeypatch.setattr(JobService, "succeed", fail_once)
 

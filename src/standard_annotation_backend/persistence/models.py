@@ -341,7 +341,6 @@ class JobRecord(Base):
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
     result: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
-    artifact_uri: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

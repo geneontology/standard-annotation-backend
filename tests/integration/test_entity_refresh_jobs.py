@@ -478,15 +478,12 @@ def test_entity_refresh_job_redelivery_recovers_published_result(
         received_job_id: UUID,
         *,
         result: dict[str, object],
-        artifact_uri: str | None = None,
     ) -> Job:
         nonlocal failures
         if failures:
             failures -= 1
             raise RuntimeError("connection dropped after publication")
-        return original_succeed(
-            service, received_job_id, result=result, artifact_uri=artifact_uri
-        )
+        return original_succeed(service, received_job_id, result=result)
 
     monkeypatch.setattr(JobService, "succeed", fail_once)
 

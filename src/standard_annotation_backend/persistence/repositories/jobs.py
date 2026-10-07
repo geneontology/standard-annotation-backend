@@ -128,21 +128,19 @@ class JobRepository:
         job_id: UUID,
         *,
         result: dict[str, object],
-        artifact_uri: str | None,
         now: datetime,
     ) -> JobMutation:
         """Finish a running job successfully under a row lock."""
         record = self._lock(job_id)
         status = JobStatus(record.status)
         if status is JobStatus.SUCCEEDED:
-            if record.result == result and record.artifact_uri == artifact_uri:
+            if record.result == result:
                 return JobMutation(record, False)
             raise InvalidJobTransitionError("job already succeeded with another result")
         if status is not JobStatus.RUNNING:
             raise InvalidJobTransitionError("only running jobs can succeed")
         record.status = JobStatus.SUCCEEDED.value
         record.result = result
-        record.artifact_uri = artifact_uri
         record.completed_at = now
         record.updated_at = now
         self.session.flush([record])

@@ -43,7 +43,6 @@ class Job:
     progress: dict[str, object]
     warnings: tuple[str, ...]
     result: dict[str, object] | None
-    artifact_uri: str | None
     error: str | None
     created_at: datetime
     updated_at: datetime
@@ -62,7 +61,6 @@ def job_from_record(record: JobRecord) -> Job:
         progress=dict(record.progress),
         warnings=tuple(record.warnings),
         result=None if record.result is None else dict(record.result),
-        artifact_uri=record.artifact_uri,
         error=record.error,
         created_at=record.created_at,
         updated_at=record.updated_at,
@@ -162,14 +160,12 @@ class JobService:
         job_id: UUID,
         *,
         result: dict[str, object],
-        artifact_uri: str | None = None,
     ) -> Job:
         """Commit a running job's successful terminal result."""
         with self._unit_of_work_factory() as unit_of_work:
             mutation = unit_of_work.jobs.succeed(
                 job_id,
                 result=result,
-                artifact_uri=artifact_uri,
                 now=datetime.now(UTC),
             )
             if mutation.changed:

@@ -104,7 +104,6 @@ def test_job_resource_documents_exact_fields_and_vocabulary(schema: dict) -> Non
         "progress",
         "warnings",
         "result",
-        "artifact_uri",
         "error",
         "created_at",
         "updated_at",

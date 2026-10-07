@@ -245,7 +245,6 @@ class JobResource(BaseModel):
         ),
         examples=[{"unchanged": False, "warning_count": 0, "warnings": []}],
     )
-    artifact_uri: str | None
     error: str | None
     created_at: datetime
     updated_at: datetime
@@ -263,7 +262,6 @@ class JobResource(BaseModel):
             progress=job.progress,
             warnings=job.warnings,
             result=job.result,
-            artifact_uri=job.artifact_uri,
             error=job.error,
             created_at=job.created_at,
             updated_at=job.updated_at,
