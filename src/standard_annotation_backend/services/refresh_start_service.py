@@ -13,6 +13,11 @@ from standard_annotation_backend.domain.annotation_management import (
     GroupSabManagedError,
 )
 from standard_annotation_backend.domain.audit import AuditAction
+from standard_annotation_backend.domain.auth import (
+    AuthorizationContext,
+    PermissionAction,
+    authorize_role,
+)
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import (
     REFRESH_JOB_TYPES,
@@ -67,7 +72,7 @@ class RefreshStartService:
         self,
         kind: RefreshKindName,
         *,
-        requested_by: str,
+        context: AuthorizationContext,
         source_key: str | None,
     ) -> tuple[Job, ...]:
         """Create or reuse jobs, commit them, then dispatch each unfinished job.
@@ -84,19 +89,29 @@ class RefreshStartService:
         If dispatching fails, only a job created by this call is marked failed,
         with failure code `dispatch_failed`.
 
+        Args:
+            kind: Kind of reference data to refresh.
+            context: Caller's authorization; the caller is recorded as the
+                jobs' requester.
+            source_key: One source to refresh, or `None` for every source.
+
         Returns:
             Retirement jobs first, then refresh jobs, each in source-key order.
 
         Raises:
+            PermissionDeniedError: If the caller lacks global admin. This is
+                checked before the source lookup, so the caller learns nothing
+                about which sources are configured.
             UnknownSourceError: If `source_key` is not configured for `kind`.
             GroupSabManagedError: If `source_key` names an annotation source
                 whose group is SAB-managed. No job is created.
         """
+        authorize_role(context, PermissionAction.REFRESH_CREATE)
         return self._start(
-            kind, requested_by=requested_by, source_key=source_key, cutover=False
+            kind, requested_by=context.actor_id, source_key=source_key, cutover=False
         )
 
-    def start_cutover(self, *, requested_by: str, source_key: str) -> Job:
+    def start_cutover(self, *, context: AuthorizationContext, source_key: str) -> Job:
         """Create or reuse the cutover job for one annotation source and dispatch it.
 
         A cutover moves the source's group to SAB management permanently, so it
@@ -105,12 +120,15 @@ class RefreshStartService:
         job is not.
 
         Raises:
+            PermissionDeniedError: If the caller lacks global admin, checked
+                before the source lookup.
             UnknownSourceError: If `source_key` is not an annotation source.
             GroupSabManagedError: If the group is already SAB-managed.
         """
+        authorize_role(context, PermissionAction.REFRESH_CREATE)
         (job,) = self._start(
             RefreshKindName.ANNOTATION,
-            requested_by=requested_by,
+            requested_by=context.actor_id,
             source_key=source_key,
             cutover=True,
         )

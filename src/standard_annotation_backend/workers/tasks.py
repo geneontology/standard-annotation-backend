@@ -35,6 +35,7 @@ from uuid import UUID
 from celery import Task
 from celery.exceptions import Reject, Retry
 
+from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.services.job_service import Job
@@ -185,7 +186,7 @@ def schedule_refresh(task: Task, kind: str) -> None:
                 runtime.unit_of_work_factory,
                 runtime.settings.sources,
                 dispatch_refresh_job,
-            ).start(refresh_kind, requested_by="scheduler", source_key=None)
+            ).start(refresh_kind, context=system_context("scheduler"), source_key=None)
     except Exception as error:
         failure_type = type(error).__name__
     if failure_type is not None:

@@ -130,6 +130,24 @@ def authorize(
         raise PermissionDeniedError
 
 
+def system_context(actor_id: str) -> AuthorizationContext:
+    """Return the authorization of a trusted in-process caller.
+
+    The refresh scheduler and the refresh CLI start jobs without a bearer token.
+    They act with global admin authority under a fixed actor name, so services
+    can authorize every caller the same way.
+
+    Args:
+        actor_id: Name recorded as the caller, such as `scheduler` or `cli`.
+    """
+    return AuthorizationContext(
+        actor_id=actor_id,
+        role=AuthorizationRole.ADMIN,
+        scope=AuthorizationScope.GLOBAL,
+        group_id=None,
+    )
+
+
 def authorize_role(context: AuthorizationContext, action: PermissionAction) -> None:
     """Require an action's role independently of resource ownership.
 

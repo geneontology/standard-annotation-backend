@@ -20,6 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from standard_annotation_backend.domain.annotation_management import (
     GroupSabManagedError,
 )
+from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
@@ -72,7 +73,7 @@ def run_refreshes(
 
     started = RefreshStartService(
         runtime.unit_of_work_factory, runtime.settings.sources, run_in_process
-    ).start(kind, requested_by="cli", source_key=source_key)
+    ).start(kind, context=system_context("cli"), source_key=source_key)
     # `start` returns each job as it was before it ran; read the outcome.
     return tuple(runtime.jobs.find(job.job_id) for job in started)
 

@@ -17,6 +17,13 @@ from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
     GroupSabManagedError,
 )
+from standard_annotation_backend.domain.auth import (
+    AuthorizationContext,
+    AuthorizationRole,
+    AuthorizationScope,
+    PermissionDeniedError,
+    system_context,
+)
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
@@ -40,6 +47,35 @@ def _service(
     return RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatched.append)
 
 
+@pytest.mark.parametrize("cutover", [False, True])
+def test_start_requires_global_admin_before_looking_up_the_source(
+    cutover: bool,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A caller without global admin learns nothing about sources and starts nothing."""
+    group_admin = AuthorizationContext(
+        actor_id="curator",
+        role=AuthorizationRole.ADMIN,
+        scope=AuthorizationScope.GROUP,
+        group_id="MGI",
+    )
+    dispatched: list[Job] = []
+    service = _service(unit_of_work_factory, dispatched)
+
+    with pytest.raises(PermissionDeniedError):
+        if cutover:
+            service.start_cutover(context=group_admin, source_key="not-configured")
+        else:
+            service.start(
+                RefreshKindName.ENTITY, context=group_admin, source_key="not-configured"
+            )
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(JobRecord)) == 0
+    assert dispatched == []
+
+
 def _publish_unconfigured_catalog(unit_of_work_factory: UnitOfWorkFactory) -> None:
     """Publish a `zfin` catalog, a source that `TEST_SOURCES` does not configure."""
     zfin = sources_with_entities(
@@ -61,7 +97,7 @@ def test_refresh_all_entities_retires_removed_sources_first(
     dispatched: list[Job] = []
 
     jobs = _service(unit_of_work_factory, dispatched).start(
-        RefreshKindName.ENTITY, requested_by="scheduler", source_key=None
+        RefreshKindName.ENTITY, context=system_context("scheduler"), source_key=None
     )
 
     assert _targets(jobs) == [
@@ -94,7 +130,7 @@ def test_refresh_all_for_kinds_without_retirement(
     _publish_unconfigured_catalog(unit_of_work_factory)
 
     jobs = _service(unit_of_work_factory, []).start(
-        kind, requested_by="scheduler", source_key=None
+        kind, context=system_context("scheduler"), source_key=None
     )
 
     assert _targets(jobs) == expected
@@ -111,14 +147,14 @@ def test_unfinished_jobs_are_reused_and_dispatched_again(
     Sending a running job again lets a job whose worker was lost resume.
     """
     first = _service(unit_of_work_factory, []).start(
-        RefreshKindName.ENTITY, requested_by="admin", source_key="mgi"
+        RefreshKindName.ENTITY, context=system_context("admin"), source_key="mgi"
     )
     if starting_status is JobStatus.RUNNING:
         JobService(unit_of_work_factory).start(first[0].job_id)
     dispatched: list[Job] = []
 
     second = _service(unit_of_work_factory, dispatched).start(
-        RefreshKindName.ENTITY, requested_by="scheduler", source_key="mgi"
+        RefreshKindName.ENTITY, context=system_context("scheduler"), source_key="mgi"
     )
 
     assert [job.job_id for job in second] == [first[0].job_id]
@@ -135,7 +171,9 @@ def test_unknown_source_creates_no_job(
     """An unconfigured key is rejected before any job or audit event exists."""
     with pytest.raises(UnknownSourceError):
         _service(unit_of_work_factory, []).start(
-            RefreshKindName.ONTOLOGY, requested_by="admin", source_key="chebi"
+            RefreshKindName.ONTOLOGY,
+            context=system_context("admin"),
+            source_key="chebi",
         )
 
     with session_factory() as session:
@@ -153,7 +191,7 @@ def test_dispatch_failure_fails_only_new_jobs_with_kind_message(
             raise ConnectionError("broker down")
 
     jobs = RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatch).start(
-        RefreshKindName.ENTITY, requested_by="scheduler", source_key=None
+        RefreshKindName.ENTITY, context=system_context("scheduler"), source_key=None
     )
 
     by_key = {str(job.parameters["source_key"]): job for job in jobs}
@@ -174,14 +212,14 @@ def test_dispatch_failure_keeps_a_reused_job_unfinished(
     An earlier dispatch may already have placed the job in the broker.
     """
     [first] = _service(unit_of_work_factory, []).start(
-        RefreshKindName.ENTITY, requested_by="admin", source_key="mgi"
+        RefreshKindName.ENTITY, context=system_context("admin"), source_key="mgi"
     )
 
     def dispatch(_job: Job) -> None:
         raise ConnectionError("broker down")
 
     [second] = RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatch).start(
-        RefreshKindName.ENTITY, requested_by="admin", source_key="mgi"
+        RefreshKindName.ENTITY, context=system_context("admin"), source_key="mgi"
     )
 
     assert second.job_id == first.job_id
@@ -198,7 +236,7 @@ def test_concurrent_starts_on_independent_connections_create_one_job_each(
     def start(_: int) -> tuple[Job, ...]:
         barrier.wait()
         return _service(unit_of_work_factory, []).start(
-            RefreshKindName.ENTITY, requested_by="scheduler", source_key=None
+            RefreshKindName.ENTITY, context=system_context("scheduler"), source_key=None
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -268,7 +306,7 @@ def test_refresh_all_annotations_skips_sab_managed_groups_and_never_cuts_over(
     dispatched: list[Job] = []
 
     jobs = _service(unit_of_work_factory, dispatched).start(
-        RefreshKindName.ANNOTATION, requested_by="scheduler", source_key=None
+        RefreshKindName.ANNOTATION, context=system_context("scheduler"), source_key=None
     )
 
     assert _targets(jobs) == [(JobType.ANNOTATION_REFRESH, "mgi-gpad")]
@@ -293,10 +331,14 @@ def test_explicit_sab_managed_source_creates_no_job(
 
     with pytest.raises(GroupSabManagedError):
         if cutover:
-            service.start_cutover(requested_by="admin", source_key="mgi-gpad")
+            service.start_cutover(
+                context=system_context("admin"), source_key="mgi-gpad"
+            )
         else:
             service.start(
-                RefreshKindName.ANNOTATION, requested_by="admin", source_key="mgi-gpad"
+                RefreshKindName.ANNOTATION,
+                context=system_context("admin"),
+                source_key="mgi-gpad",
             )
 
     with session_factory() as session:
@@ -311,11 +353,17 @@ def test_cutover_reuses_only_an_unfinished_cutover(
     """A cutover request reuses an unfinished cutover but never an ordinary refresh."""
     service = _service(unit_of_work_factory, [])
     (refresh,) = service.start(
-        RefreshKindName.ANNOTATION, requested_by="admin", source_key="mgi-gpad"
+        RefreshKindName.ANNOTATION,
+        context=system_context("admin"),
+        source_key="mgi-gpad",
     )
 
-    cutover = service.start_cutover(requested_by="admin", source_key="mgi-gpad")
-    again = service.start_cutover(requested_by="admin", source_key="mgi-gpad")
+    cutover = service.start_cutover(
+        context=system_context("admin"), source_key="mgi-gpad"
+    )
+    again = service.start_cutover(
+        context=system_context("admin"), source_key="mgi-gpad"
+    )
 
     assert cutover.job_type is JobType.ANNOTATION_CUTOVER
     assert cutover.job_id != refresh.job_id

@@ -25,9 +25,7 @@ from standard_annotation_backend.api.models import (
 )
 from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.auth import (
-    PermissionAction,
     RequestContext,
-    authorize_role,
 )
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
@@ -88,13 +86,8 @@ def _start(
     kind: RefreshKindName,
     source_key: str | None,
 ) -> RefreshJobsResource:
-    """Authorize the caller, start the refresh, and build the response."""
-    # Check authorization before the source lookup, so callers without access
-    # learn nothing about which sources are configured.
-    authorize_role(context, PermissionAction.REFRESH_CREATE)
-    jobs: tuple[Job, ...] = service.start(
-        kind, requested_by=context.actor_id, source_key=source_key
-    )
+    """Start the refresh and build the response."""
+    jobs: tuple[Job, ...] = service.start(kind, context=context, source_key=source_key)
     return RefreshJobsResource(jobs=[JobResource.from_service(job) for job in jobs])
 
 
@@ -214,11 +207,7 @@ def cut_over_annotations(
     context: Annotated[RequestContext, Depends(get_authenticated_context)],
 ) -> RefreshJobsResource:
     """Start the cutover job for one annotation source."""
-    # Authorize before the source lookup, as `_start` does.
-    authorize_role(context, PermissionAction.REFRESH_CREATE)
-    job = service.start_cutover(
-        requested_by=context.actor_id, source_key=request.source_key
-    )
+    job = service.start_cutover(context=context, source_key=request.source_key)
     return RefreshJobsResource(jobs=[JobResource.from_service(job)])
 
 

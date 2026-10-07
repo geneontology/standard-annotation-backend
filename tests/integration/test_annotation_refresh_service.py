@@ -23,6 +23,7 @@ from standard_annotation_backend.domain.annotation_management import (
 )
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
+from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.persistence.locks import bind_try_lock
@@ -657,12 +658,14 @@ def test_cutover_moves_the_group_to_sab_management_permanently(
     starts = RefreshStartService(unit_of_work_factory, TEST_SOURCES, lambda _job: None)
     with pytest.raises(GroupSabManagedError):
         starts.start(
-            RefreshKindName.ANNOTATION, requested_by="admin", source_key=SOURCE
+            RefreshKindName.ANNOTATION,
+            context=system_context("admin"),
+            source_key=SOURCE,
         )
     with pytest.raises(GroupSabManagedError):
-        starts.start_cutover(requested_by="admin", source_key=SOURCE)
+        starts.start_cutover(context=system_context("admin"), source_key=SOURCE)
     refresh_all = starts.start(
-        RefreshKindName.ANNOTATION, requested_by="scheduler", source_key=None
+        RefreshKindName.ANNOTATION, context=system_context("scheduler"), source_key=None
     )
     assert [job.parameters["source_key"] for job in refresh_all] == ["rgd-gpad"]
 
