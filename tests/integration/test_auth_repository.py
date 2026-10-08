@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from source_provenance import github_provenance
 from sqlalchemy import func, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
@@ -136,8 +136,10 @@ def test_token_listing_revocation_and_last_use_are_owner_scoped(
         uow.auth.record_token_use(token.token_id, used_at=now)
         entries = uow.auth.list_tokens(owner.user_id)
         assert len(entries) == 1
-        assert entries[0].name == "Notebook"
-        assert entries[0].last_used_at == now + timedelta(seconds=1)
+        listed, assignment_is_active = entries[0]
+        assert listed.name == "Notebook"
+        assert listed.last_used_at == now + timedelta(seconds=1)
+        assert assignment_is_active is True
         assert uow.auth.list_tokens(other.user_id) == ()
         assert (
             uow.auth.revoke_token(other.user_id, token.token_id, revoked_at=now)
@@ -154,8 +156,12 @@ def test_token_listing_revocation_and_last_use_are_owner_scoped(
             )
             is True
         )
-        assert uow.auth.list_tokens(owner.user_id)[0].revoked_at == now
+        assert uow.auth.list_tokens(owner.user_id)[0][0].revoked_at == now
         uow.commit()
+    with unit_of_work_factory() as uow:
+        listed_record, _ = uow.auth.list_tokens(owner.user_id)[0]
+        with pytest.raises(InvalidRequestError):
+            _ = listed_record.digest
 
 
 def test_digest_lookup_rejects_expiry_inactive_assignments_and_missing_credentials(
@@ -290,7 +296,7 @@ def test_removed_and_regranted_context_does_not_revive_issued_token(
         assert uow.auth.get_active_token("a" * 64, now=now) is None
         entries = uow.auth.list_tokens(owner.user_id)
         assert len(entries) == 1
-        assert entries[0].assignment_is_active is False
+        assert entries[0][1] is False
 
 
 def test_concurrent_syncs_replace_the_complete_committed_state(

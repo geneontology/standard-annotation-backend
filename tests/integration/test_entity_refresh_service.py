@@ -1,5 +1,6 @@
 """Verify staging, publication, and replacement of entity catalogs in PostgreSQL."""
 
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
@@ -11,7 +12,7 @@ from refresh_helpers import (
     start_job,
 )
 from seeding import insert_annotation
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
@@ -21,12 +22,18 @@ from standard_annotation_backend.domain.annotations import (
 )
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.entities import (
+    STORED_ENTITY_REFRESH_RESULT,
     EntityCandidateConflictError,
+    EntityCatalog,
     EntityCatalogCollisionError,
     EntityRefreshResult,
 )
 from standard_annotation_backend.domain.jobs import JobType
-from standard_annotation_backend.domain.refresh import SourceDocument
+from standard_annotation_backend.domain.refresh import (
+    SourceDocument,
+    SourceProvenance,
+)
+from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.gpi.parser import parse_gpi
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
@@ -41,6 +48,7 @@ from standard_annotation_backend.persistence.repositories.entities import (
     EntityRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services import entity_refresh_service
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
@@ -87,7 +95,7 @@ def publish_catalog(
     return job
 
 
-def stored_result(factory: UnitOfWorkFactory, job: Job) -> dict[str, object] | None:
+def stored_result(factory: UnitOfWorkFactory, job: Job) -> EntityRefreshResult | None:
     """Return the publication result stored for `job`, or `None` if unpublished."""
     with factory() as uow:
         return uow.entities.completed(job.job_id)
@@ -126,7 +134,7 @@ def test_publication_retains_repeated_metadata_and_durable_result(
     job = publish_catalog(service, unit_of_work_factory, "MGI:2", "MGI:1", "MGI:1")
     recovered = service.recover(job)
     assert recovered is not None
-    result = EntityRefreshResult.from_job_result(recovered.result)
+    result = STORED_ENTITY_REFRESH_RESULT.load(recovered.result)
     assert (
         result.source_record_count,
         result.active_identifier_count,
@@ -150,7 +158,7 @@ def test_publication_retains_repeated_metadata_and_durable_result(
         document.source_revision,
         document.source_checksum,
     )
-    assert stored_result(unit_of_work_factory, job) == recovered.result
+    assert stored_result(unit_of_work_factory, job) == result
     assert service.recover(job) == recovered
     catalog = parse_gpi(document.content.decode(), document.provenance)
     with unit_of_work_factory() as uow:
@@ -173,6 +181,60 @@ def test_publication_retains_repeated_metadata_and_durable_result(
             session.scalar(select(func.count()).select_from(EntityStagingRecord)) == 0
         )
         assert session.scalar(PUBLICATION_AUDIT_COUNT) == 1
+
+
+def test_recovered_publication_reports_the_original_outcome(
+    unit_of_work_factory: UnitOfWorkFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovering a publication that stopped before `succeed` repeats its outcome.
+
+    The replacement adds, retains, and removes entities, carries a catalog
+    warning, and removes an entity that an annotation references, so the result,
+    every count, the warnings, and the removal impacts are compared with the
+    original run.
+    """
+
+    def parse_with_warning(text: str, source: SourceProvenance) -> EntityCatalog:
+        return replace(parse_gpi(text, source), warnings=("catalog warning",))
+
+    monkeypatch.setitem(entity_refresh_service._PARSERS, "gpi", parse_with_warning)
+    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    publish_catalog(service, unit_of_work_factory, "MGI:1", "MGI:2", "MGI:3")
+    with unit_of_work_factory() as uow:
+        insert_annotation(
+            uow.annotations.session,
+            annotation=Annotation.model_validate(
+                {
+                    "db_object_id": "MGI:1",
+                    "relation": "RO:0002331",
+                    "ontology_class_id": "GO:0008150",
+                    "references": ["PMID:1"],
+                    "evidence_type": "ECO:0000314",
+                    "annotation_date": "2026-09-29",
+                    "assigned_by": "MGI",
+                }
+            ),
+            actor_id="curator",
+            change_source=ChangeSource.API,
+            owning_group_id="MGI",
+            record_origin=AnnotationOrigin.DIRECT,
+            annotation_id=UUID(int=1),
+        )
+        uow.commit()
+    job = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "mgi")
+    original = service.apply(
+        job, _document("mgi", "MGI:3", "MGI:4", "MGI:5"), ignore_progress
+    )
+    assert original.warnings == ("catalog warning",)
+    assert original.counts["removal_impact_count"] >= 1
+    assert original.counts["removed_count"] == 2
+    assert original.counts["added_count"] == 2
+    recovered = service.recover(job)
+    assert recovered is not None
+    assert recovered.result == original.result
+    assert recovered.counts == original.counts
+    assert recovered.warnings == original.warnings
 
 
 def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
@@ -233,7 +295,7 @@ def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
     outcome = service.apply(
         new, _document("mgi", "MGI:new", "MGI:keep"), ignore_progress
     )
-    result = EntityRefreshResult.from_job_result(outcome.result)
+    result = STORED_ENTITY_REFRESH_RESULT.load(outcome.result)
     assert (result.added_count, result.retained_count, result.removed_count) == (
         1,
         1,
@@ -269,7 +331,7 @@ def test_publish_empty_catalog_removes_only_that_source(
         publish_catalog(service, unit_of_work_factory, f"{prefix}:1", source=key)
     empty = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "mgi")
     outcome = service.apply(empty, _document("mgi"), ignore_progress)
-    result = EntityRefreshResult.from_job_result(outcome.result)
+    result = STORED_ENTITY_REFRESH_RESULT.load(outcome.result)
     assert (
         result.source_record_count,
         result.active_identifier_count,
@@ -341,6 +403,26 @@ def test_failure_after_publication_restores_old_state(
         )
 
 
+def test_malformed_stored_publication_result_is_reported(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A stored publication result with the wrong shape raises `StoredDataError`."""
+    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    job = publish_catalog(service, unit_of_work_factory, "MGI:1")
+    with session_factory() as session:
+        session.execute(
+            update(EntityCatalogSnapshotRecord)
+            .where(EntityCatalogSnapshotRecord.job_id == job.job_id)
+            .values(publication_result={"snapshot_id": "x"})
+        )
+        session.commit()
+    with unit_of_work_factory() as uow, pytest.raises(StoredDataError):
+        uow.entities.completed(job.job_id)
+    with pytest.raises(StoredDataError):
+        service.recover(job)
+
+
 def test_stale_candidate_cannot_replace_a_newer_publication(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
@@ -368,5 +450,5 @@ def test_publication_spans_multiple_insert_batches_without_losing_records(
     )
     result = stored_result(unit_of_work_factory, job)
     assert result is not None
-    assert result["source_record_count"] == result["active_identifier_count"] == 5001
+    assert result.source_record_count == result.active_identifier_count == 5001
     assert len(active_ids(session_factory)) == 5001

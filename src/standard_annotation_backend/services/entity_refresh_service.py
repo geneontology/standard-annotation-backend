@@ -86,6 +86,8 @@ class EntityRefreshService:
         Raises:
             EntityCandidateConflictError: If committed staging belongs to another
                 source or is incomplete or altered.
+            StoredDataError: If the stored result is malformed; the run is
+                retried.
         """
         # Publication commits the catalog and its result together, so a stored
         # result means the earlier attempt stopped only before `succeed`.
@@ -95,7 +97,7 @@ class EntityRefreshService:
         # Staging is committed before publication starts. Publishing it now
         # avoids fetching a file that may have changed since it was staged.
         resumed = self._resume(job_id=job.job_id, actor_id=job.requested_by)
-        return None if resumed is None else _published(resumed.to_job_result())
+        return None if resumed is None else _published(resumed)
 
     def apply(
         self, job: Job, document: SourceDocument, report: ProgressReporter
@@ -144,7 +146,7 @@ class EntityRefreshService:
         self._stage(job_id=job.job_id, source_key=document.source_key, catalog=catalog)
         report("publishing", _catalog_counts(catalog), catalog.warnings)
         published = self._publish_job(job_id=job.job_id, actor_id=job.requested_by)
-        return _published(published.to_job_result())
+        return _published(published)
 
     def discard_staging(self, uow: SqlAlchemyUnitOfWork, job_id: UUID) -> None:
         """Delete the job's staging in the failure transaction."""
@@ -268,7 +270,7 @@ class EntityRefreshService:
         uow.entities.lock_job(job_id)
         completed = uow.entities.completed(job_id)
         if completed is not None:
-            return EntityRefreshResult.from_job_result(completed)
+            return completed
         result = uow.entities.publish(job_id)
         AuditService(uow.audit).record_entity_refreshed(
             actor_id=actor_id,
@@ -287,7 +289,7 @@ class EntityRefreshService:
         uow.commit()
         return result
 
-    def _completed(self, job_id: UUID) -> dict[str, object] | None:
+    def _completed(self, job_id: UUID) -> EntityRefreshResult | None:
         """Return a job's stored publication result, or `None` if not yet published."""
         with self._unit_of_work_factory() as uow:
             return uow.entities.completed(job_id)
@@ -304,34 +306,20 @@ def _catalog_counts(catalog: EntityCatalog) -> dict[str, int]:
     }
 
 
-def _published(result: dict[str, object]) -> RefreshOutcome:
-    """Convert a stored publication result into the job's outcome.
-
-    Raises:
-        ValueError: If the stored result is malformed. This is not a terminal
-            refresh failure, so the run is retried.
-    """
-    published = EntityRefreshResult.from_job_result(result)
-    warnings = result["warnings"]
-    removal_impacts = result["removal_impacts"]
-    if not isinstance(warnings, list) or not all(
-        isinstance(warning, str) for warning in warnings
-    ):
-        raise ValueError("invalid durable entity refresh warnings")
-    if not isinstance(removal_impacts, list):
-        raise ValueError("invalid durable entity refresh removal impacts")
+def _published(result: EntityRefreshResult) -> RefreshOutcome:
+    """Convert a publication result into the job's outcome."""
     return RefreshOutcome(
-        result=result,
+        result=result.to_job_result(),
         counts={
-            "source_record_count": published.source_record_count,
-            "active_identifier_count": published.active_identifier_count,
-            "added_count": published.added_count,
-            "retained_count": published.retained_count,
-            "removed_count": published.removed_count,
-            "warning_count": len(warnings),
-            "removal_impact_count": len(removal_impacts),
+            "source_record_count": result.source_record_count,
+            "active_identifier_count": result.active_identifier_count,
+            "added_count": result.added_count,
+            "retained_count": result.retained_count,
+            "removed_count": result.removed_count,
+            "warning_count": len(result.warnings),
+            "removal_impact_count": len(result.removal_impacts),
         },
-        warnings=tuple(warnings),
+        warnings=result.warnings,
     )
 
 

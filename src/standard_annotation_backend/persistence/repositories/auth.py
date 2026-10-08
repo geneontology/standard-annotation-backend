@@ -8,15 +8,10 @@ from uuid import UUID
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, defer, joinedload
 
-from standard_annotation_backend.domain.auth import (
-    AuthorizationRole,
-    AuthorizationScope,
-)
 from standard_annotation_backend.domain.errors import UnavailableError
 from standard_annotation_backend.domain.refresh import SourceProvenance
-from standard_annotation_backend.domain.tokens import TokenMetadata
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     acquire_transaction_lock,
@@ -421,51 +416,25 @@ class AuthRepository:
         )
         self.session.flush()
 
-    def list_tokens(self, user_id: UUID) -> tuple[TokenMetadata, ...]:
+    def list_tokens(self, user_id: UUID) -> tuple[tuple[ApiTokenRecord, bool], ...]:
         """List an owner's token history without loading token digests.
 
         Args:
             user_id: Identifier of the token owner.
 
         Returns:
-            Safe token metadata ordered by creation time and identifier.
+            Each token record, ordered by creation time and identifier, paired with
+            whether its authorization assignment is still active. A record's digest
+            is never loaded; reading it raises an error.
         """
         rows = self.session.execute(
-            select(
-                ApiTokenRecord.token_id,
-                ApiTokenRecord.user_id,
-                ApiTokenRecord.assignment_id,
-                ApiTokenRecord.name,
-                ApiTokenRecord.created_at,
-                ApiTokenRecord.expires_at,
-                ApiTokenRecord.last_used_at,
-                ApiTokenRecord.revoked_at,
-                ApiTokenRecord.selected_role,
-                ApiTokenRecord.selected_scope,
-                ApiTokenRecord.selected_group_id,
-                AuthorizationAssignmentRecord.is_active,
-            )
+            select(ApiTokenRecord, AuthorizationAssignmentRecord.is_active)
             .join(ApiTokenRecord.assignment)
             .where(ApiTokenRecord.user_id == user_id)
             .order_by(ApiTokenRecord.created_at, ApiTokenRecord.token_id)
+            .options(defer(ApiTokenRecord.digest, raiseload=True))
         ).all()
-        return tuple(
-            TokenMetadata(
-                token_id=row.token_id,
-                user_id=row.user_id,
-                assignment_id=row.assignment_id,
-                name=row.name,
-                created_at=row.created_at,
-                expires_at=row.expires_at,
-                last_used_at=row.last_used_at,
-                revoked_at=row.revoked_at,
-                role=AuthorizationRole(row.selected_role),
-                scope=AuthorizationScope(row.selected_scope),
-                group_id=row.selected_group_id,
-                assignment_is_active=row.is_active,
-            )
-            for row in rows
-        )
+        return tuple((record, is_active) for record, is_active in rows)
 
     @_protect_credential_errors
     def revoke_token(

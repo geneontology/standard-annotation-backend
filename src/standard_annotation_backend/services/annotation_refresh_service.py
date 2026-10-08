@@ -11,7 +11,9 @@ from itertools import batched
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotation_management import (
+    STORED_REJECTION_REPORT,
     UNKNOWN_DB_OBJECT_ID,
+    AnnotationImportConflictError,
     AnnotationManagementMode,
     AnnotationRefreshResult,
     AnnotationRefreshUnchanged,
@@ -42,6 +44,7 @@ from standard_annotation_backend.persistence.locks import (
     AdvisoryTryLock,
     LockNamespace,
 )
+from standard_annotation_backend.persistence.models import AnnotationImportRecord
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
@@ -163,12 +166,12 @@ class AnnotationRefreshService:
             except NoValidAnnotationsError as error:
                 raise TerminalRefreshError(
                     failure_code=RefreshFailureCode.NO_VALID_ANNOTATIONS,
-                    failure_details=error.report.to_json(),
+                    failure_details=STORED_REJECTION_REPORT.dump(error.report),
                 ) from None
             except CutoverRejectedError as error:
                 raise TerminalRefreshError(
                     failure_code=RefreshFailureCode.CUTOVER_REJECTED,
-                    failure_details=error.report.to_json(),
+                    failure_details=STORED_REJECTION_REPORT.dump(error.report),
                 ) from None
         return RefreshOutcome(
             result=result.to_job_result(), counts=result.to_progress()
@@ -282,6 +285,10 @@ class AnnotationRefreshService:
 
         Returns:
             The skip result, or `None` when the file must be imported.
+
+        Raises:
+            StoredDataError: If the last import's stored rejection report is
+                malformed.
         """
         with self._unit_of_work_factory() as uow:
             imports = uow.annotation_imports
@@ -308,7 +315,8 @@ class AnnotationRefreshService:
     def _published_result(self, job_id: UUID) -> AnnotationRefreshResult | None:
         """Return a job's publication result, or `None` if it has not published."""
         with self._unit_of_work_factory() as uow:
-            return uow.annotation_imports.published_result(job_id)
+            record = uow.annotation_imports.published_import(job_id)
+            return None if record is None else _import_result(record)
 
     def _publish(self, *, job_id: UUID, actor_id: str) -> AnnotationRefreshResult:
         """Publish a job's staged import with its audit event, then commit.
@@ -324,10 +332,12 @@ class AnnotationRefreshService:
                 active entity.
         """
         with self._unit_of_work_factory() as uow:
-            existing = uow.annotation_imports.published_result(job_id)
+            existing = uow.annotation_imports.published_import(job_id)
             if existing is not None:
-                return existing
-            result = uow.annotation_imports.publish(job_id, actor_id=actor_id)
+                return _import_result(existing)
+            result = _import_result(
+                uow.annotation_imports.publish(job_id, actor_id=actor_id)
+            )
             AuditService(uow.audit).record_annotation_import_published(
                 is_cutover=result.is_cutover,
                 actor_id=actor_id,
@@ -343,7 +353,45 @@ class AnnotationRefreshService:
             return result
 
 
-def _has_unknown_subject_rejections(report: dict[str, object]) -> bool:
-    """Report whether a stored rejection report counts any unknown-entity rejection."""
-    by_code = report.get("by_code")
-    return isinstance(by_code, dict) and bool(by_code.get(UNKNOWN_DB_OBJECT_ID))
+def _has_unknown_subject_rejections(stored_report: dict[str, object]) -> bool:
+    """Report whether a stored rejection report counts any unknown-entity rejection.
+
+    Raises:
+        StoredDataError: If the stored report is malformed.
+    """
+    report = STORED_REJECTION_REPORT.load(stored_report)
+    return report.by_code.get(UNKNOWN_DB_OBJECT_ID, 0) > 0
+
+
+def _import_result(record: AnnotationImportRecord) -> AnnotationRefreshResult:
+    """Build a publication result from a published import record.
+
+    Raises:
+        AnnotationImportConflictError: If the record has not been published.
+        StoredDataError: If the stored rejection report is malformed.
+    """
+    if record.annotations_deleted is None:
+        raise AnnotationImportConflictError
+    return AnnotationRefreshResult(
+        source_key=record.source_key,
+        group_key=record.group_key,
+        import_job_id=record.job_id,
+        is_cutover=record.is_cutover,
+        provenance=SourceProvenance(
+            source_type=record.source_type,
+            source_locator=record.source_locator,
+            source_revision=record.source_revision,
+            source_checksum=record.source_checksum,
+            fetched_at=record.fetched_at,
+        ),
+        data_rows=record.data_rows,
+        annotations_published=record.annotations_staged,
+        records_rejected=record.records_rejected,
+        annotations_deleted=record.annotations_deleted,
+        mode=(
+            AnnotationManagementMode.SAB_MANAGED
+            if record.is_cutover
+            else AnnotationManagementMode.GPAD_IMPORTED
+        ),
+        rejection_report=STORED_REJECTION_REPORT.load(record.rejection_report),
+    )

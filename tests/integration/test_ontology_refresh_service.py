@@ -13,7 +13,7 @@ from refresh_helpers import (
     start_job,
 )
 from seeding import insert_annotation
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
@@ -28,10 +28,12 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
     OntologyTerm,
 )
+from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AuditEventRecord,
+    OntologyMetadataRecord,
 )
 from standard_annotation_backend.persistence.repositories import AnnotationRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
@@ -230,3 +232,32 @@ def test_activation_failure_rolls_back_snapshot_versions_and_audits(
         assert record.ontology_class_id == OLD_TERM
     with session_factory() as session:
         assert _refresh_audits(session) == ()
+
+
+def test_recovery_rejects_a_stored_result_with_an_invalid_count(
+    unit_of_work_factory: UnitOfWorkFactory,
+    database_engine: Engine,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Recovery reports an invalid stored count instead of reading it as zero."""
+    annotation_id = UUID("00000000-0000-0000-0000-000000000045")
+    _prepare(
+        unit_of_work_factory,
+        annotations=((annotation_id, _annotation(OLD_TERM)),),
+        old_terms={OLD_TERM: OntologyTerm(OLD_TERM, False, (), ())},
+    )
+    job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
+    service = OntologyRefreshService(
+        unit_of_work_factory, bind_try_lock(database_engine), None
+    )
+    outcome = service.apply(job, go_document(CANDIDATE), ignore_progress)
+    assert service.recover(job) is not None
+    with session_factory() as session, session.begin():
+        session.execute(
+            update(OntologyMetadataRecord)
+            .where(OntologyMetadataRecord.job_id == job.job_id)
+            .values(refresh_result={**outcome.result, "annotation_update_count": "1"})
+        )
+
+    with pytest.raises(StoredDataError):
+        service.recover(job)

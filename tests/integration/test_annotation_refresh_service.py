@@ -14,7 +14,7 @@ from refresh_helpers import (
     start_job,
 )
 from seeding import create_job as queue_job
-from sqlalchemy import ColumnElement, Engine, delete, func, select
+from sqlalchemy import ColumnElement, Engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotation_management import (
@@ -27,9 +27,11 @@ from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
+from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import (
     AnnotationCommentRecord,
+    AnnotationImportRecord,
     AnnotationRecord,
     AnnotationVersionRecord,
     AuditEventRecord,
@@ -223,7 +225,7 @@ def test_refresh_publishes_valid_annotations_and_reports_rejected_records(
         "source_locator": "https://example.org/mgi.gpad",
         "source_revision": None,
         "source_checksum": job.result["source_checksum"],
-        "fetched_at": "2026-10-01T00:00:00+00:00",
+        "fetched_at": "2026-10-01T00:00:00Z",
         "data_rows": 3,
         "annotations_published": 2,
         "records_rejected": 2,
@@ -248,6 +250,35 @@ def test_refresh_publishes_valid_annotations_and_reports_rejected_records(
         ),
         key=str,
     ) == [["UniProtKB:Q1"], ["UniProtKB:Q2"]]
+
+
+def test_recovering_a_job_with_a_corrupt_stored_rejection_report_is_reported(
+    run: RunJob,
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    seed_active_subjects: Callable[..., None],
+) -> None:
+    """A published import whose rejection report is malformed raises `StoredDataError`.
+
+    The job is not treated as having no usable import, and the report is not
+    trusted.
+    """
+    seed_active_subjects("UniProtKB:P12345")
+    job = run(GOOD)
+    with session_factory() as session:
+        session.execute(
+            update(AnnotationImportRecord)
+            .where(AnnotationImportRecord.job_id == job.job_id)
+            .values(rejection_report={"issue_count": "x"})
+        )
+        session.commit()
+    service = AnnotationRefreshService(
+        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
+    )
+
+    with pytest.raises(StoredDataError):
+        service.recover(job)
 
 
 def test_rerun_after_interrupted_staging_publishes_only_the_fetched_document(
@@ -453,6 +484,37 @@ def test_identical_file_with_only_unreadable_rows_rejected_is_skipped(
     again = run(content)
     assert again.progress["unchanged"] is True
     assert again.result is not None and again.result["unchanged"] is True
+
+
+def test_identical_file_with_a_corrupt_stored_rejection_report_is_not_skipped(
+    run: RunJob,
+    session_factory: sessionmaker[Session],
+    seed_active_subjects: Callable[..., None],
+) -> None:
+    """A malformed stored rejection report raises `StoredDataError`, not a skip.
+
+    The unchanged-file check does not trust the report, and nothing is published.
+    """
+    seed_active_subjects("UniProtKB:P12345")
+    first = run(GOOD)
+    with session_factory() as session:
+        session.execute(
+            update(AnnotationImportRecord)
+            .where(AnnotationImportRecord.job_id == first.job_id)
+            .values(rejection_report={"issue_count": "x"})
+        )
+        session.commit()
+
+    with pytest.raises(StoredDataError):
+        run(GOOD)
+
+    with session_factory() as session:
+        published = session.scalar(
+            select(func.count())
+            .select_from(AnnotationImportRecord)
+            .where(AnnotationImportRecord.annotations_deleted.is_not(None))
+        )
+    assert published == 1
 
 
 def test_refresh_replaces_only_the_target_groups_annotations_and_history(

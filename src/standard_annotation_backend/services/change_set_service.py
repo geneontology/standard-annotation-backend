@@ -1,5 +1,6 @@
 """Validate, preview, and review proposed annotation changes atomically."""
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
@@ -40,6 +41,7 @@ from standard_annotation_backend.domain.change_sets import (
     apply_annotation_patch,
 )
 from standard_annotation_backend.domain.duplicate_policy import duplicate_key
+from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.domain.validation import (
     AnnotationValidationResult,
     ValidationIssue,
@@ -65,7 +67,8 @@ from standard_annotation_backend.services.resource_authorization import (
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 
-class ChangeSetPreview(BaseModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChangeSetPreview:
     """Describe a proposal's candidate and the current obstacles to acceptance.
 
     A preview is advisory: acceptance repeats validation and repository checks.
@@ -73,8 +76,6 @@ class ChangeSetPreview(BaseModel):
     `before_annotation` is the saved base snapshot for an update or deletion.
     Duplicate peer IDs identify only conflicts that the operation would introduce.
     """
-
-    model_config = ConfigDict(frozen=True)
 
     change_set_id: UUID
     operation: ChangeSetOperation
@@ -90,10 +91,13 @@ class ChangeSetPreview(BaseModel):
     can_accept: bool
 
 
-class ChangeSet(BaseModel):
-    """Return proposal data and review metadata detached from its transaction."""
+STORED_CHANGE_SET_PREVIEW = StoredJson(ChangeSetPreview, label="change-set preview")
+"""Stored form of a change-set preview, as kept on the proposal record."""
 
-    model_config = ConfigDict(frozen=True, from_attributes=True)
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChangeSet:
+    """Return proposal data and review metadata detached from its transaction."""
 
     change_set_id: UUID
     operation: ChangeSetOperation
@@ -114,16 +118,46 @@ class ChangeSet(BaseModel):
     result_annotation_version: int | None
 
 
-class AcceptedChangeSet(BaseModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AcceptedChangeSet:
     """Return a completed review and the annotation version it produced."""
-
-    model_config = ConfigDict(frozen=True)
 
     change_set: ChangeSet
     annotation_id: UUID
     version: int
     is_deleted: bool
     annotation: Annotation
+
+
+def _change_set(record: ChangeSetRecord) -> ChangeSet:
+    """Build a change-set result from its record.
+
+    Raises:
+        StoredDataError: If the stored preview is malformed.
+    """
+    return ChangeSet(
+        change_set_id=record.change_set_id,
+        operation=record.operation,
+        state=record.state,
+        owning_group_id=record.owning_group_id,
+        annotation_id=record.annotation_id,
+        base_version=record.base_version,
+        annotation_payload=record.annotation_payload,
+        patch=record.patch,
+        reason=record.reason,
+        preview=(
+            None
+            if record.preview is None
+            else STORED_CHANGE_SET_PREVIEW.load(record.preview)
+        ),
+        previewed_at=record.previewed_at,
+        proposed_by=record.proposed_by,
+        proposed_at=record.proposed_at,
+        reviewed_by=record.reviewed_by,
+        reviewed_at=record.reviewed_at,
+        review_reason=record.review_reason,
+        result_annotation_version=record.result_annotation_version,
+    )
 
 
 class _CreateProposal(BaseModel):
@@ -216,7 +250,7 @@ class ChangeSetService:
             _record_audit(
                 unit_of_work, record, AuditAction.CHANGE_SET_PROPOSED, context
             )
-            result = ChangeSet.model_validate(record)
+            result = _change_set(record)
             unit_of_work.commit()
         return result
 
@@ -280,7 +314,7 @@ class ChangeSetService:
             _record_audit(
                 unit_of_work, record, AuditAction.CHANGE_SET_PROPOSED, context
             )
-            result = ChangeSet.model_validate(record)
+            result = _change_set(record)
             unit_of_work.commit()
         return result
 
@@ -309,7 +343,7 @@ class ChangeSetService:
                 context,
                 PermissionAction.CHANGE_SET_READ,
             )
-            return ChangeSet.model_validate(record)
+            return _change_set(record)
 
     def propose_delete(
         self,
@@ -363,7 +397,7 @@ class ChangeSetService:
             _record_audit(
                 unit_of_work, record, AuditAction.CHANGE_SET_PROPOSED, context
             )
-            result = ChangeSet.model_validate(record)
+            result = _change_set(record)
             unit_of_work.commit()
         return result
 
@@ -394,7 +428,7 @@ class ChangeSetService:
             )
             preview = _build_preview(unit_of_work.annotations, record)
             unit_of_work.change_sets.record_preview(
-                change_set_id, preview=preview.model_dump(mode="json")
+                change_set_id, preview=STORED_CHANGE_SET_PREVIEW.dump(preview)
             )
             unit_of_work.commit()
         return preview
@@ -457,7 +491,7 @@ class ChangeSetService:
                 )
                 preview = _build_preview(unit_of_work.annotations, record)
                 unit_of_work.change_sets.record_preview(
-                    change_set_id, preview=preview.model_dump(mode="json")
+                    change_set_id, preview=STORED_CHANGE_SET_PREVIEW.dump(preview)
                 )
                 stale = unit_of_work.change_sets.mark_stale(
                     change_set_id,
@@ -514,7 +548,7 @@ class ChangeSetService:
             _record_audit(
                 unit_of_work, rejected, AuditAction.CHANGE_SET_REJECTED, context
             )
-            result = ChangeSet.model_validate(rejected)
+            result = _change_set(rejected)
             unit_of_work.commit()
         return result
 
@@ -618,7 +652,7 @@ def _accept_proposal(
         is_deleted=record.operation == ChangeSetOperation.DELETE,
     )
     unit_of_work.change_sets.record_preview(
-        record.change_set_id, preview=preview.model_dump(mode="json")
+        record.change_set_id, preview=STORED_CHANGE_SET_PREVIEW.dump(preview)
     )
     accepted = unit_of_work.change_sets.accept(
         record.change_set_id,
@@ -629,7 +663,7 @@ def _accept_proposal(
     )
     _record_audit(unit_of_work, accepted, AuditAction.CHANGE_SET_ACCEPTED, context)
     return AcceptedChangeSet(
-        change_set=ChangeSet.model_validate(accepted),
+        change_set=_change_set(accepted),
         annotation_id=changed.annotation_id,
         version=changed.current_version,
         is_deleted=changed.status == "deleted",

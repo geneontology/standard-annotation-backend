@@ -14,9 +14,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotation_management import (
+    STORED_REJECTION_REPORT,
     AnnotationImportConflictError,
     AnnotationManagementMode,
-    AnnotationRefreshResult,
     CutoverRejectedError,
     GroupSabManagedError,
     RejectionReport,
@@ -189,19 +189,19 @@ class AnnotationImportRepository:
             data_rows=data_rows,
             annotations_staged=annotations_staged,
             records_rejected=report.issue_count,
-            rejection_report=report.to_json(),
+            rejection_report=STORED_REJECTION_REPORT.dump(report),
             staged_at=datetime.now(UTC),
         )
         self.session.add(record)
         self.session.flush([record])
         return record
 
-    def published_result(self, job_id: UUID) -> AnnotationRefreshResult | None:
-        """Return a job's publication result, or `None` if it has not published."""
+    def published_import(self, job_id: UUID) -> AnnotationImportRecord | None:
+        """Return a job's import record, or `None` if it has not published."""
         record = self.session.get(AnnotationImportRecord, job_id)
         if record is None or record.published_at is None:
             return None
-        return _result(record)
+        return record
 
     def last_import(self, group_key: str) -> AnnotationImportRecord | None:
         """Return the group's most recently published import, if any."""
@@ -277,7 +277,7 @@ class AnnotationImportRepository:
         if job.status in TERMINAL_JOB_STATUSES:
             self.discard_unpublished(job_id)
 
-    def publish(self, job_id: UUID, *, actor_id: str) -> AnnotationRefreshResult:
+    def publish(self, job_id: UUID, *, actor_id: str) -> AnnotationImportRecord:
         """Replace the job's group's annotations with its staged annotations.
 
         For this group only, deletes the annotations with their versions,
@@ -291,8 +291,8 @@ class AnnotationImportRepository:
         the group's old annotations or the new ones, never a mix.
 
         Returns:
-            The publication result. If the job already published, its stored
-            result is returned and nothing changes.
+            The published import record. If the job already published, its
+            record is returned and nothing changes.
 
         Raises:
             AnnotationImportConflictError: If the job does not exist, is not a
@@ -308,7 +308,7 @@ class AnnotationImportRepository:
         if record is None:
             raise AnnotationImportConflictError
         if record.published_at is not None:
-            return _result(record)
+            return record
         acquire_global_annotation_write_lock(self.session, exclusive=True)
         state = self._lock_group(record.group_key)
         if state.mode == AnnotationManagementMode.SAB_MANAGED.value:
@@ -336,7 +336,7 @@ class AnnotationImportRepository:
             )
         )
         self.session.flush()
-        return _result(record)
+        return record
 
     def _lock_group(self, group_key: str) -> GroupAnnotationManagementRecord:
         """Create the group's row if needed and lock it until the transaction ends."""
@@ -529,32 +529,3 @@ class AnnotationImportRepository:
                 ).where(references.job_id == job_id),
             )
         )
-
-
-def _result(record: AnnotationImportRecord) -> AnnotationRefreshResult:
-    """Build a publication result from a published import row."""
-    if record.annotations_deleted is None:
-        raise AnnotationImportConflictError
-    return AnnotationRefreshResult(
-        source_key=record.source_key,
-        group_key=record.group_key,
-        import_job_id=record.job_id,
-        is_cutover=record.is_cutover,
-        provenance=SourceProvenance(
-            source_type=record.source_type,
-            source_locator=record.source_locator,
-            source_revision=record.source_revision,
-            source_checksum=record.source_checksum,
-            fetched_at=record.fetched_at,
-        ),
-        data_rows=record.data_rows,
-        annotations_published=record.annotations_staged,
-        records_rejected=record.records_rejected,
-        annotations_deleted=record.annotations_deleted,
-        mode=(
-            AnnotationManagementMode.SAB_MANAGED
-            if record.is_cutover
-            else AnnotationManagementMode.GPAD_IMPORTED
-        ),
-        rejection_report=RejectionReport.from_json(record.rejection_report),
-    )

@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
+from pydantic import Field
 
 from standard_annotation_backend.auth.users_yaml import (
     InvalidUsersDocumentError,
@@ -27,6 +27,7 @@ from standard_annotation_backend.domain.refresh import (
     SourceProvenance,
     TerminalRefreshError,
 )
+from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.models import AuthorizationRefreshRecord
 from standard_annotation_backend.persistence.repositories.auth import (
@@ -43,23 +44,6 @@ from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
 
 MAX_REPORTED_ISSUES = 100
-
-
-class InvalidAuthorizationRefreshSummaryError(RuntimeError):
-    """Report invalid counts read from a stored refresh record."""
-
-    def __init__(self) -> None:
-        super().__init__("stored authorization refresh summary is invalid")
-
-
-class _StoredRefreshSummary(BaseModel):
-    """Validate counts loaded from an existing refresh record."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    users: Annotated[StrictInt, Field(ge=0)]
-    groups: Annotated[StrictInt, Field(ge=0)]
-    assignments: Annotated[StrictInt, Field(ge=0)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,18 +68,33 @@ class AuthorizationRefreshResult:
 
     def to_job_result(self) -> dict[str, object]:
         """Return the result as a JSON-compatible dict for the job record."""
-        return {
-            "refresh_id": str(self.refresh_id),
-            "source_type": self.source_type,
-            "source_locator": self.source_locator,
-            "source_revision": self.source_revision,
-            "source_checksum": self.source_checksum,
-            "fetched_at": self.fetched_at.isoformat(),
-            "refreshed_at": self.refreshed_at.isoformat(),
-            "user_count": self.user_count,
-            "group_count": self.group_count,
-            "assignment_count": self.assignment_count,
-        }
+        return STORED_AUTHORIZATION_REFRESH_RESULT.dump(self)
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationRefreshSummary:
+    """Count the users, groups, and grants resulting from a refresh.
+
+    The counts are stored with the refresh record so a later job for the same
+    document can report them without recounting.
+
+    Attributes:
+        users: GitHub-linked people, including those without grants.
+        groups: Distinct groups in active grants.
+        assignments: Grants, excluding identical repeats.
+    """
+
+    users: Annotated[int, Field(ge=0)]
+    groups: Annotated[int, Field(ge=0)]
+    assignments: Annotated[int, Field(ge=0)]
+
+
+STORED_AUTHORIZATION_SUMMARY = StoredJson(
+    AuthorizationRefreshSummary, label="authorization refresh summary"
+)
+STORED_AUTHORIZATION_REFRESH_RESULT = StoredJson(
+    AuthorizationRefreshResult, label="authorization refresh result"
+)
 
 
 class AuthorizationRefreshService:
@@ -190,8 +189,7 @@ class AuthorizationRefreshService:
 
         Raises:
             InvalidUsersDocumentError: If any source entry or YAML is invalid.
-            InvalidAuthorizationRefreshSummaryError: If a stored result has
-                invalid counts.
+            StoredDataError: If a stored summary has invalid counts.
         """
         document = parse_users_yaml(yaml_text)
         users = tuple(
@@ -215,28 +213,25 @@ class AuthorizationRefreshService:
             if grant.group_id is not None
         }
         assignment_count = sum(len(user.authorizations) for user in users)
-        summary: dict[str, object] = {
-            "users": len(users),
-            "groups": len(groups),
-            "assignments": assignment_count,
-        }
+        summary = AuthorizationRefreshSummary(
+            users=len(users), groups=len(groups), assignments=assignment_count
+        )
+        stored_summary = STORED_AUTHORIZATION_SUMMARY.dump(summary)
         with self._unit_of_work_factory() as unit_of_work:
             replacement = unit_of_work.auth.replace_authorizations(
                 users=users,
                 provenance=provenance,
-                summary=summary,
+                summary=stored_summary,
             )
             record = replacement.record
-            if replacement.applied:
-                stored_summary = _StoredRefreshSummary.model_validate(summary)
-            else:
-                stored_summary = _stored_summary(record)
-            result = _result(record, stored_summary)
+            if not replacement.applied:
+                summary = STORED_AUTHORIZATION_SUMMARY.load(record.summary)
+            result = _result(record, summary)
             if replacement.applied:
                 AuditService(unit_of_work.audit).record_authorization_refreshed(
                     actor_id=actor_id,
                     job_id=job_id,
-                    details={**result.to_job_result(), **summary},
+                    details={**result.to_job_result(), **stored_summary},
                 )
             unit_of_work.commit()
         return result, replacement.applied
@@ -250,25 +245,17 @@ class AuthorizationRefreshService:
         document applies it again.
 
         Raises:
-            InvalidAuthorizationRefreshSummaryError: If the stored counts are invalid.
+            StoredDataError: If the stored counts are invalid.
         """
         with self._unit_of_work_factory() as unit_of_work:
             latest = unit_of_work.auth.latest_refresh()
             if latest is None or not same_refresh_source(latest, provenance):
                 return None
-            return _result(latest, _stored_summary(latest))
-
-
-def _stored_summary(record: AuthorizationRefreshRecord) -> _StoredRefreshSummary:
-    """Validate the counts stored on a refresh record."""
-    try:
-        return _StoredRefreshSummary.model_validate(record.summary)
-    except ValidationError:
-        raise InvalidAuthorizationRefreshSummaryError from None
+            return _result(latest, STORED_AUTHORIZATION_SUMMARY.load(latest.summary))
 
 
 def _result(
-    record: AuthorizationRefreshRecord, summary: _StoredRefreshSummary
+    record: AuthorizationRefreshRecord, summary: AuthorizationRefreshSummary
 ) -> AuthorizationRefreshResult:
     """Build a result from a stored refresh record and its validated counts."""
     return AuthorizationRefreshResult(

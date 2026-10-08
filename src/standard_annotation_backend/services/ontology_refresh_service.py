@@ -21,6 +21,7 @@ from standard_annotation_backend.domain.duplicate_policy import (
 )
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
+    STORED_ONTOLOGY_REFRESH_RESULT,
     AnnotationReplacementProposal,
     OntologyDefinition,
     OntologyDocument,
@@ -31,6 +32,7 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
     OntologyTerm,
     OntologyVersion,
+    StoredOntologyRefresh,
     compute_closure,
     ontology_refresh_warnings,
     propose_term_replacements,
@@ -109,6 +111,9 @@ class OntologyRefreshService:
 
         A key that is not a supported ontology has nothing to recover; the runner
         then reports it as an unknown source.
+
+        Raises:
+            StoredDataError: If the stored result is malformed; the run is retried.
         """
         key = _ontology_key(job_source_key(job.parameters))
         if key is None:
@@ -164,7 +169,7 @@ class OntologyRefreshService:
             result = self._activate(
                 definition, job_id=job.job_id, actor_id=job.requested_by
             )
-        return _stored(result.to_job_result())
+        return _stored(result.to_stored())
 
     def discard_staging(self, uow: SqlAlchemyUnitOfWork, job_id: UUID) -> None:
         """Ontology candidates are removed by pruning, not on failure."""
@@ -221,18 +226,19 @@ class OntologyRefreshService:
         with self._unit_of_work_factory() as unit_of_work:
             return unit_of_work.ontologies.matches_active_source(document)
 
-    def _completed(self, job_id: UUID) -> dict[str, object] | None:
+    def _completed(self, job_id: UUID) -> StoredOntologyRefresh | None:
         """Return the stored result if this job completed ontology activation.
 
         Raises:
             RuntimeError: If the job's snapshot is active but has no stored result.
+            StoredDataError: If the stored result does not have its expected shape.
         """
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.ontologies.get_by_job(job_id)
             if record is None:
                 return None
             if record.refresh_result is not None:
-                return dict(record.refresh_result)
+                return STORED_ONTOLOGY_REFRESH_RESULT.load(record.refresh_result)
             if record.active:
                 raise RuntimeError("active ontology snapshot has no durable result")
             return None
@@ -573,16 +579,14 @@ def _ontology_document(key: OntologyKey, document: SourceDocument) -> OntologyDo
 
 def _unchanged(document: OntologyDocument) -> RefreshOutcome:
     """Build the outcome for a document that is already the active snapshot."""
-    result = OntologyRefreshResult.for_active_document(document).to_job_result()
+    result = OntologyRefreshResult.for_active_document(document).to_stored()
     return replace(_stored(result), unchanged=True)
 
 
-def _stored(result: dict[str, object]) -> RefreshOutcome:
+def _stored(stored: StoredOntologyRefresh) -> RefreshOutcome:
     """Build the job's outcome from a stored refresh result."""
-    findings = result.get("findings")
-    finding_count = len(findings) if isinstance(findings, list) else 0
-    ontology_warnings = result.get("ontology_warnings")
-    warning_count = len(ontology_warnings) if isinstance(ontology_warnings, list) else 0
+    finding_count = len(stored.findings)
+    warning_count = len(stored.ontology_warnings)
     warnings: list[str] = []
     if warning_count:
         noun = "warning" if warning_count == 1 else "warnings"
@@ -592,19 +596,13 @@ def _stored(result: dict[str, object]) -> RefreshOutcome:
     if finding_count:
         warnings.append(f"Ontology refresh completed with {finding_count} findings")
     return RefreshOutcome(
-        result=result,
+        result=STORED_ONTOLOGY_REFRESH_RESULT.dump(stored),
         counts={
-            "annotation_scan_count": _count(result, "annotation_scan_count"),
-            "annotation_update_count": _count(result, "annotation_update_count"),
-            "annotation_skip_count": _count(result, "annotation_skip_count"),
+            "annotation_scan_count": stored.annotation_scan_count,
+            "annotation_update_count": stored.annotation_update_count,
+            "annotation_skip_count": stored.annotation_skip_count,
             "finding_count": finding_count,
             "ontology_warning_count": warning_count,
         },
         warnings=tuple(warnings),
     )
-
-
-def _count(result: dict[str, object], key: str) -> int:
-    """Return a stored count, or 0 if it is missing or not an integer."""
-    value = result.get(key, 0)
-    return value if isinstance(value, int) else 0

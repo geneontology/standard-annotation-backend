@@ -23,6 +23,7 @@ from standard_annotation_backend.domain.refresh import (
     SourceProvenance,
     TerminalRefreshError,
 )
+from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     AuthorizationAssignmentRecord,
@@ -139,6 +140,7 @@ def test_successful_replacement_records_counts_and_preserves_unchanged_contexts(
     ) == (3, 2, 3)
     assert result["source_locator"] == "github:geneontology/go-site:metadata/users.yaml"
     assert result["source_revision"] == "b" * 40
+    assert str(result["refreshed_at"]).endswith("Z")
     assert start <= refreshed_at <= datetime.now(UTC)
     with unit_of_work_factory() as uow:
         alice = uow.auth.get_user_by_github_login("ALICE")
@@ -185,7 +187,7 @@ def test_successful_replacement_records_counts_and_preserves_unchanged_contexts(
             "source_revision": "b" * 40,
             "source_checksum": "b" * 64,
             "fetched_at": result["fetched_at"],
-            "refreshed_at": refreshed_at.isoformat(),
+            "refreshed_at": result["refreshed_at"],
             "user_count": 3,
             "group_count": 2,
             "assignment_count": 3,
@@ -421,6 +423,23 @@ def test_returning_to_an_earlier_document_applies_it_again(
     assert reverted.result["refresh_id"] != original.result["refresh_id"]
     assert repeated.unchanged is True
     assert repeated.result == reverted.result
+
+
+def test_corrupt_stored_summary_is_reported_when_the_same_document_returns(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A refresh of the latest document fails if its stored counts are invalid."""
+    provenance = github_provenance("a" * 40)
+    apply_users_yaml(unit_of_work_factory, INITIAL, provenance)
+    with session_factory() as session:
+        record = session.scalars(select(AuthorizationRefreshRecord)).one()
+        corrupt: dict[str, object] = {"users": "3", "groups": 2, "assignments": 4}
+        record.summary = corrupt
+        session.commit()
+
+    with pytest.raises(StoredDataError):
+        apply_users_yaml(unit_of_work_factory, INITIAL, provenance)
 
 
 def test_https_source_without_revision_is_unchanged_by_checksum(

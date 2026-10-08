@@ -230,7 +230,7 @@ def list_token_contexts(
     """List the current authorization choices owned by the signed-in user."""
     return TokenContextListResponse(
         items=[
-            TokenContextResource.model_validate(item)
+            TokenContextResource.from_service(item)
             for item in service.current_contexts(raw_session)
         ]
     )
@@ -250,7 +250,7 @@ def list_tokens(
     """List your current and historical tokens without their secrets or digests."""
     return TokenListResponse(
         items=[
-            TokenResource.model_validate(item)
+            TokenResource.from_service(item)
             for item in service.list_tokens(raw_session)
         ]
     )
@@ -280,10 +280,7 @@ def create_token(
 ) -> TokenCreatedResponse:
     """Create an expiring token and return its bearer secret exactly once."""
     result = service.create_token(raw_session, body)
-    return TokenCreatedResponse(
-        token=result.raw_token,
-        **TokenResource.model_validate(result.metadata).model_dump(),
-    )
+    return TokenCreatedResponse.from_service(result)
 
 
 @router.delete(

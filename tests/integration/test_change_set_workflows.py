@@ -24,6 +24,7 @@ from standard_annotation_backend.domain.change_sets import (
     InvalidChangeSetError,
     StaleChangeSetError,
 )
+from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
@@ -136,6 +137,30 @@ def test_create_preview_preserves_annotations_and_acceptance_records_history(
         assert all(item.selected_scope == "global" for item in events)
         assert events[-1].annotation_id == accepted.annotation_id
         assert events[-1].annotation_version == 1
+
+
+def test_corrupt_stored_preview_is_reported_when_reading_a_change_set(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    validated_annotation: Annotation,
+) -> None:
+    """Reading a change set whose stored preview is malformed raises `StoredDataError` instead of returning the preview."""
+    service = _service(unit_of_work_factory)
+    proposed = service.propose_create(
+        payload=validated_annotation.model_dump(mode="json"),
+        owning_group_id="curator-group",
+        reason="New evidence",
+        context=PROPOSER,
+    )
+    service.preview(proposed.change_set_id, context=PROPOSER)
+    with session_factory.begin() as session:
+        record = session.get(ChangeSetRecord, proposed.change_set_id)
+        assert record is not None
+        corrupt_preview: dict[str, object] = {"change_set_id": "x"}
+        record.preview = corrupt_preview
+
+    with pytest.raises(StoredDataError):
+        service.get(proposed.change_set_id, context=PROPOSER)
 
 
 def test_invalid_create_preview_reports_validation_and_remains_reviewable(

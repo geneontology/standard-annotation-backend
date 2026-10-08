@@ -20,7 +20,6 @@ from test_entity_refresh_concurrency import TIMEOUT, wait_for_lock
 
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
-    AnnotationRefreshResult,
     CutoverRejectedError,
     GroupSabManagedError,
 )
@@ -138,12 +137,11 @@ def wait_until_blocked_by(engine: Engine, waiter_pid: int, holder_pid: int) -> N
 
 def publish(
     unit_of_work_factory: UnitOfWorkFactory, job_id: UUID, actor_id: str
-) -> AnnotationRefreshResult:
+) -> None:
     """Publish a job's committed staging in its own transaction, without an audit."""
     with unit_of_work_factory() as uow:
-        result = uow.annotation_imports.publish(job_id, actor_id=actor_id)
+        uow.annotation_imports.publish(job_id, actor_id=actor_id)
         uow.commit()
-        return result
 
 
 def group_mode(
@@ -282,7 +280,7 @@ def test_refresh_waiting_on_a_cutover_cannot_overwrite_the_sab_managed_group(
 
     assert group_mode(unit_of_work_factory) is AnnotationManagementMode.SAB_MANAGED
     with unit_of_work_factory() as uow:
-        assert uow.annotation_imports.published_result(refresh.job_id) is None
+        assert uow.annotation_imports.published_import(refresh.job_id) is None
     assert group_rows(session_factory) == [("import", ["PMID:2"])]
 
 

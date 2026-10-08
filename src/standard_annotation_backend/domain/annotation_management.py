@@ -21,7 +21,10 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Annotated
 from uuid import UUID
+
+from pydantic import Field
 
 from standard_annotation_backend.domain.errors import ConflictError
 from standard_annotation_backend.domain.refresh import (
@@ -29,6 +32,7 @@ from standard_annotation_backend.domain.refresh import (
     SourceProvenance,
     TerminalRefreshError,
 )
+from standard_annotation_backend.domain.stored_json import StoredJson
 
 MAX_REPORTED_REJECTIONS = 100
 """Maximum number of rejected records listed in a report.
@@ -65,7 +69,7 @@ class AnnotationRejection:
         reason: Short explanation, at most 200 characters.
     """
 
-    line_number: int
+    line_number: Annotated[int, Field(ge=0)]
     code: str
     reason: str
 
@@ -95,56 +99,9 @@ class RejectionReport:
         issues: The rejected records with the lowest line numbers, at most 100.
     """
 
-    issue_count: int
-    by_code: Mapping[str, int]
+    issue_count: Annotated[int, Field(ge=0)]
+    by_code: Mapping[str, Annotated[int, Field(ge=0)]]
     issues: tuple[AnnotationRejection, ...]
-
-    def to_json(self) -> dict[str, object]:
-        """Return the JSON-compatible form stored on jobs and imports."""
-        return {
-            "issue_count": self.issue_count,
-            "by_code": dict(sorted(self.by_code.items())),
-            "issues": [
-                {
-                    "line_number": issue.line_number,
-                    "code": issue.code,
-                    "reason": issue.reason,
-                }
-                for issue in self.issues
-            ],
-        }
-
-    @classmethod
-    def from_json(cls, value: Mapping[str, object]) -> RejectionReport:
-        """Rebuild a report from the form returned by `to_json`.
-
-        Raises:
-            ValueError: If the value does not have that form.
-        """
-        by_code = value.get("by_code")
-        issues = value.get("issues")
-        if not isinstance(by_code, dict) or not isinstance(issues, list):
-            raise ValueError("invalid stored rejection report")
-        counts: dict[str, int] = {}
-        for code, count in by_code.items():
-            if not isinstance(code, str):
-                raise ValueError("invalid stored rejection report")
-            counts[code] = _count(count)
-        parsed: list[AnnotationRejection] = []
-        for issue in issues:
-            if not isinstance(issue, dict):
-                raise ValueError("invalid stored rejection report")
-            code, reason = issue.get("code"), issue.get("reason")
-            if not isinstance(code, str) or not isinstance(reason, str):
-                raise ValueError("invalid stored rejection report")
-            parsed.append(
-                AnnotationRejection(_count(issue.get("line_number")), code, reason)
-            )
-        return cls(
-            issue_count=_count(value.get("issue_count")),
-            by_code=counts,
-            issues=tuple(parsed),
-        )
 
 
 class RejectionReportBuilder:
@@ -184,7 +141,7 @@ class RejectionReportBuilder:
         kept = sorted(self._kept, key=lambda entry: (-entry[0], -entry[1]))
         return RejectionReport(
             issue_count=self._issue_count,
-            by_code=dict(self._by_code),
+            by_code=dict(sorted(self._by_code.items())),
             issues=tuple(entry[2] for entry in kept),
         )
 
@@ -214,32 +171,23 @@ class AnnotationRefreshResult:
     import_job_id: UUID
     is_cutover: bool
     provenance: SourceProvenance
-    data_rows: int
-    annotations_published: int
-    records_rejected: int
-    annotations_deleted: int
+    data_rows: Annotated[int, Field(ge=0)]
+    annotations_published: Annotated[int, Field(ge=0)]
+    records_rejected: Annotated[int, Field(ge=0)]
+    annotations_deleted: Annotated[int, Field(ge=0)]
     mode: AnnotationManagementMode
     rejection_report: RejectionReport
 
     def to_job_result(self) -> dict[str, object]:
-        """Return the JSON-compatible result stored on the job."""
-        return {
-            "source_key": self.source_key,
-            "group_key": self.group_key,
-            "import_job_id": str(self.import_job_id),
-            "is_cutover": self.is_cutover,
-            "source_type": self.provenance.source_type,
-            "source_locator": self.provenance.source_locator,
-            "source_revision": self.provenance.source_revision,
-            "source_checksum": self.provenance.source_checksum,
-            "fetched_at": self.provenance.fetched_at.isoformat(),
-            "data_rows": self.data_rows,
-            "annotations_published": self.annotations_published,
-            "records_rejected": self.records_rejected,
-            "annotations_deleted": self.annotations_deleted,
-            "mode": self.mode.value,
-            "rejection_report": self.rejection_report.to_json(),
-        }
+        """Return the JSON-compatible result stored on the job.
+
+        The provenance fields are written at the top level of the result.
+        """
+        stored = STORED_ANNOTATION_REFRESH_RESULT.dump(self)
+        provenance = stored.pop("provenance")
+        if not isinstance(provenance, dict):
+            raise TypeError("provenance must dump to an object")
+        return {**stored, **provenance}
 
     def to_progress(self) -> dict[str, int]:
         """Return the counts reported as job progress."""
@@ -272,12 +220,16 @@ class AnnotationRefreshUnchanged:
 
     def to_job_result(self) -> dict[str, object]:
         """Return the JSON-compatible result stored on the job."""
-        return {
-            "source_key": self.source_key,
-            "group_key": self.group_key,
-            "import_job_id": str(self.import_job_id),
-            "source_checksum": self.source_checksum,
-        }
+        return STORED_ANNOTATION_UNCHANGED_RESULT.dump(self)
+
+
+STORED_REJECTION_REPORT = StoredJson(RejectionReport, label="rejection report")
+STORED_ANNOTATION_REFRESH_RESULT = StoredJson(
+    AnnotationRefreshResult, label="annotation refresh result"
+)
+STORED_ANNOTATION_UNCHANGED_RESULT = StoredJson(
+    AnnotationRefreshUnchanged, label="unchanged annotation refresh result"
+)
 
 
 class GroupSabManagedError(ConflictError, TerminalRefreshError):
@@ -347,13 +299,3 @@ class AnnotationImportConflictError(TerminalRefreshError):
 
     def __init__(self) -> None:
         super().__init__("job has no usable annotation import")
-
-
-def _count(value: object) -> int:
-    """Return a stored count or line number, or raise `ValueError`.
-
-    The value must be a nonnegative integer; `bool` is rejected.
-    """
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError("invalid stored rejection report")
-    return value
