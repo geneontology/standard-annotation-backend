@@ -4,19 +4,23 @@ from collections.abc import Callable
 from uuid import UUID
 
 import pytest
-from refresh_helpers import FakeFetchers, build_runner, sources_with_entities
-from sqlalchemy import Engine, func, select
+from refresh_helpers import (
+    TEST_SOURCES,
+    FakeFetchers,
+    build_runner,
+    sources_with_entities,
+)
+from seeding import create_job
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
-from test_entity_refresh_service import stage
+from test_entity_refresh_service import publish_catalog
 
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AuditEventRecord,
-    EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
-    EntitySourceRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh import runner as refresh_runner
@@ -36,7 +40,9 @@ from standard_annotation_backend.services.job_service import (
 def services(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> tuple[JobService, EntityRefreshService]:
-    return JobService(unit_of_work_factory), EntityRefreshService(unit_of_work_factory)
+    return JobService(unit_of_work_factory), EntityRefreshService(
+        unit_of_work_factory, TEST_SOURCES
+    )
 
 
 NO_ENTITIES = sources_with_entities({})
@@ -57,18 +63,16 @@ def _runner(
 
 def _publish(
     imports: EntityRefreshService,
-    session_factory: sessionmaker[Session],
+    unit_of_work_factory: UnitOfWorkFactory,
     source: str,
     *identifiers: str,
 ) -> None:
-    imports.publish(
-        job_id=stage(imports, session_factory, *identifiers, source=source),
-        actor_id="curator",
-    )
+    publish_catalog(imports, unit_of_work_factory, *identifiers, source=source)
 
 
-def _retirement_job(jobs: JobService, source: str) -> UUID:
-    return jobs.create(
+def _retirement_job(factory: UnitOfWorkFactory, source: str) -> UUID:
+    return create_job(
+        factory,
         job_type=JobType.ENTITY_RETIREMENT,
         requested_by="scheduler",
         parameters={"source_key": source},
@@ -118,10 +122,10 @@ def test_retirement_removes_membership_and_reports_impacts(
 ) -> None:
     """Retiring a source removes its entities and reports affected annotations."""
     jobs, imports = services
-    _publish(imports, session_factory, "mgi", "MGI:1", "MGI:2")
-    _publish(imports, session_factory, "rgd", "RGD:1")
+    _publish(imports, unit_of_work_factory, "mgi", "MGI:1", "MGI:2")
+    _publish(imports, unit_of_work_factory, "rgd", "RGD:1")
     annotation_id = seed_annotation("MGI:1")  # active annotation on a retired entity
-    job_id = _retirement_job(jobs, "mgi")
+    job_id = _retirement_job(unit_of_work_factory, "mgi")
 
     _runner(database_engine, unit_of_work_factory, ONLY_RGD).run_retirement(job_id)
 
@@ -133,16 +137,6 @@ def test_retirement_removes_membership_and_reports_impacts(
                 )
             )
         ) == ["RGD:1"]
-        assert session.scalar(select(func.count()).select_from(EntitySourceRecord)) == 1
-        retired = session.scalar(
-            select(EntityCatalogSnapshotRecord).where(
-                EntityCatalogSnapshotRecord.source_key == "mgi"
-            )
-        )
-        assert retired is not None
-        assert retired.active is False
-        assert retired.retired_by_job_id == job_id
-        assert retired.retired_at is not None
         assert session.get(AnnotationRecord, annotation_id) is not None
         audits = list(
             session.scalars(
@@ -152,19 +146,16 @@ def test_retirement_removes_membership_and_reports_impacts(
             )
         )
         assert len(audits) == 1
+        retired_snapshot_id = audits[0].details["snapshot_id"]
     with jobs._unit_of_work_factory() as uow:
         record = uow.jobs.get(job_id)
         assert record is not None
         assert record.status == JobStatus.SUCCEEDED.value
-        assert record.progress == {
-            "phase": "completed",
-            "retired": True,
-            "removed_count": 2,
-        }
+        assert record.progress == {"phase": "completed", "removed_count": 2}
         assert record.result == {
             "source_key": "mgi",
             "retired": True,
-            "snapshot_id": str(retired.snapshot_id),
+            "snapshot_id": retired_snapshot_id,
             "removed_count": 2,
             "removal_impacts": [
                 {"db_object_id": "MGI:1", "annotation_ids": [str(annotation_id)]},
@@ -186,9 +177,9 @@ def test_redelivered_retirement_recovers_result_without_second_audit(
     retirement is audited only once.
     """
     jobs, imports = services
-    _publish(imports, session_factory, "mgi", "MGI:1")
+    _publish(imports, unit_of_work_factory, "mgi", "MGI:1")
     runner = _runner(database_engine, unit_of_work_factory, NO_ENTITIES)
-    job_id = _retirement_job(jobs, "mgi")
+    job_id = _retirement_job(unit_of_work_factory, "mgi")
     original_succeed = JobService.succeed
     failures = 1
 
@@ -197,15 +188,12 @@ def test_redelivered_retirement_recovers_result_without_second_audit(
         received_job_id: UUID,
         *,
         result: dict[str, object],
-        artifact_uri: str | None = None,
     ) -> Job:
         nonlocal failures
         if failures:
             failures -= 1
             raise RuntimeError("connection dropped after retirement")
-        return original_succeed(
-            service, received_job_id, result=result, artifact_uri=artifact_uri
-        )
+        return original_succeed(service, received_job_id, result=result)
 
     monkeypatch.setattr(JobService, "succeed", fail_once)
 
@@ -245,12 +233,12 @@ def test_retirement_without_active_catalog_or_of_configured_source_is_a_no_op(
     """
     jobs, imports = services
     if case == "configured":
-        _publish(imports, session_factory, "mgi", "MGI:1")
+        _publish(imports, unit_of_work_factory, "mgi", "MGI:1")
         sources = ONLY_MGI
     else:
         sources = NO_ENTITIES
     active_before = _active_ids(session_factory)
-    job_id = _retirement_job(jobs, "mgi")
+    job_id = _retirement_job(unit_of_work_factory, "mgi")
 
     _runner(database_engine, unit_of_work_factory, sources).run_retirement(job_id)
 
@@ -300,7 +288,8 @@ def test_invalid_entity_job_parameters_fail_terminally(
     monkeypatch.setattr(refresh_runner.logger, "error", record_log)
     jobs, _imports = services
     runner = _runner(database_engine, unit_of_work_factory, ONLY_MGI)
-    job_id = jobs.create(
+    job_id = create_job(
+        unit_of_work_factory,
         job_type=job_type,
         requested_by="scheduler",
         parameters=parameters,

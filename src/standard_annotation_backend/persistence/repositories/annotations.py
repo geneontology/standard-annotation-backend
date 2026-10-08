@@ -1,14 +1,27 @@
 """Read and write annotations in caller-managed transactions."""
 
 from collections.abc import Iterable
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, delete, exists, select
 from sqlalchemy.orm import Session
 
-from standard_annotation_backend.domain.annotations import Annotation, new_annotation_id
+from standard_annotation_backend.domain.annotation_search import (
+    AnnotationFilter,
+    OwnershipScope,
+)
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationDeletedError,
+    AnnotationNotFoundError,
+    AnnotationOrigin,
+    AnnotationStatus,
+    ChangeSource,
+    DuplicateAnnotationError,
+    StaleAnnotationVersionError,
+    new_annotation_id,
+)
 from standard_annotation_backend.domain.ontology import OntologyKey
 from standard_annotation_backend.persistence.annotation_data import (
     AnnotationPersistenceData,
@@ -21,12 +34,13 @@ from standard_annotation_backend.persistence.locks import (
 from standard_annotation_backend.persistence.models import (
     AnnotationDuplicateReferenceRecord,
     AnnotationMultivaluedFieldValueRecord,
-    AnnotationOrigin,
     AnnotationRecord,
-    AnnotationStatus,
     AnnotationVersionRecord,
     OntologyClosureRecord,
     OntologyMetadataRecord,
+)
+from standard_annotation_backend.persistence.repositories.entities import (
+    EntityRepository,
 )
 from standard_annotation_backend.persistence.repositories.pagination import (
     Page,
@@ -34,115 +48,126 @@ from standard_annotation_backend.persistence.repositories.pagination import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class AnnotationSearchFilters:
-    """Hold exact-match criteria for finding active annotations.
+def _closure_condition(term_id: str, predicate_id: str) -> ColumnElement[bool]:
+    """Match annotations whose ontology class is the term or one of its descendants.
 
-    Each scalar value must match exactly. Every value in a tuple must be present
-    in the corresponding list-valued annotation field.
+    Descendants are read from the closure (precomputed ancestor relationships)
+    of the active GO ontology through the given predicate.
 
-    Attributes:
-        db_object_id: Database object identifier to match.
-        negation: Negation value to match.
-        relation: Relation identifier to match.
-        ontology_class_id: Ontology class identifier to match.
-        evidence_type: Evidence type identifier to match.
-        annotation_date: Annotation date to match.
-        assigned_by: Assigning organization to match.
-        references: Reference identifiers that must all be present.
-        with_or_from: Supporting identifiers that must all be present.
-        interacting_taxon_id: Taxon identifiers that must all be present.
-        owning_group_id: Group whose annotations may be returned.
-        created_by: Actor recorded in the immutable first annotation version.
+    Args:
+        term_id: Ontology term whose descendants-or-self are matched.
+        predicate_id: Loaded closure predicate relating descendants to the term.
+
+    Returns:
+        An SQL condition on the annotation's ontology class.
     """
-
-    db_object_id: str | None = None
-    negation: bool | None = None
-    relation: str | None = None
-    ontology_class_id: str | None = None
-    ontology_class_id_closure: str | None = None
-    evidence_type: str | None = None
-    annotation_date: date | None = None
-    assigned_by: str | None = None
-    references: tuple[str, ...] = ()
-    with_or_from: tuple[str, ...] = ()
-    interacting_taxon_id: tuple[str, ...] = ()
-    owning_group_id: str | None = None
-    created_by: str | None = None
-
-
-class AnnotationNotFoundError(LookupError):
-    """Raised when an annotation write targets an unknown identifier."""
+    return exists(
+        select(1)
+        .select_from(OntologyClosureRecord)
+        .join(
+            OntologyMetadataRecord,
+            OntologyMetadataRecord.version_id == OntologyClosureRecord.version_id,
+        )
+        .where(
+            OntologyMetadataRecord.ontology_key == OntologyKey.GO.value,
+            OntologyMetadataRecord.active.is_(True),
+            OntologyClosureRecord.subject_term_id == AnnotationRecord.ontology_class_id,
+            OntologyClosureRecord.object_term_id == term_id,
+            OntologyClosureRecord.predicate_id == predicate_id,
+        )
+    )
 
 
-class AnnotationDeletedError(RuntimeError):
-    """Raised when an annotation write targets a soft-deleted annotation."""
+def _multivalued_condition(field_name: str, field_value: str) -> ColumnElement[bool]:
+    """Match annotations whose list-valued field contains a value.
 
+    Args:
+        field_name: Stored name of the list-valued annotation field.
+        field_value: Value that the field must contain.
 
-class DuplicateAnnotationError(RuntimeError):
-    """Report a requested change that would create an active duplicate.
-
-    Attributes:
-        peer_ids: Identifiers of active annotations equivalent to the proposed data.
+    Returns:
+        An SQL condition on the annotation's stored list values.
     """
+    return exists(
+        select(1).where(
+            AnnotationMultivaluedFieldValueRecord.annotation_id
+            == AnnotationRecord.annotation_id,
+            AnnotationMultivaluedFieldValueRecord.field_name == field_name,
+            AnnotationMultivaluedFieldValueRecord.field_value == field_value,
+        )
+    )
 
-    def __init__(self, peer_ids: Iterable[UUID]) -> None:
-        self.peer_ids = tuple(peer_ids)
-        super().__init__("annotation conflicts with an active duplicate")
 
+def _criteria_conditions(criteria: AnnotationFilter) -> list[ColumnElement[bool]]:
+    """Build the SQL conditions for every supplied search criterion.
 
-class StaleAnnotationVersionError(RuntimeError):
-    """Report that an annotation changed after a client last read it.
+    Args:
+        criteria: Field values that matching annotations must have.
 
-    Attributes:
-        annotation_id: Identifier of the annotation being changed.
-        expected_version: Version supplied by the client.
-        current_version: Version stored when the change was attempted.
+    Returns:
+        SQL conditions that a matching annotation must satisfy together.
     """
+    conditions: list[ColumnElement[bool]] = []
+    if criteria.db_object_id is not None:
+        conditions.append(AnnotationRecord.db_object_id == criteria.db_object_id)
+    if criteria.negation is not None:
+        conditions.append(AnnotationRecord.negation == criteria.negation)
+    if criteria.relation is not None:
+        conditions.append(AnnotationRecord.relation == criteria.relation)
+    if criteria.ontology_class_id is not None:
+        if criteria.ontology_class_id_closure is not None:
+            conditions.append(
+                _closure_condition(
+                    criteria.ontology_class_id, criteria.ontology_class_id_closure
+                )
+            )
+        else:
+            conditions.append(
+                AnnotationRecord.ontology_class_id == criteria.ontology_class_id
+            )
+    if criteria.evidence_type is not None:
+        conditions.append(AnnotationRecord.evidence_type == criteria.evidence_type)
+    if criteria.annotation_date is not None:
+        conditions.append(AnnotationRecord.annotation_date == criteria.annotation_date)
+    if criteria.assigned_by is not None:
+        conditions.append(AnnotationRecord.assigned_by == criteria.assigned_by)
+    conditions.extend(
+        _multivalued_condition("references", value) for value in criteria.references
+    )
+    conditions.extend(
+        _multivalued_condition("with_or_from", value) for value in criteria.with_or_from
+    )
+    conditions.extend(
+        _multivalued_condition("interacting_taxon_id", value)
+        for value in criteria.interacting_taxon_id
+    )
+    return conditions
 
-    def __init__(
-        self,
-        annotation_id: UUID,
-        expected_version: int,
-        current_version: int,
-    ) -> None:
-        self.annotation_id = annotation_id
-        self.expected_version = expected_version
-        self.current_version = current_version
-        super().__init__(f"annotation {annotation_id} is at version {current_version}")
 
-
-class InvalidAnnotationProvenanceError(ValueError):
-    """Raised when annotation provenance is unsupported or inconsistent."""
-
-
-def _ownership_conditions(
-    owning_group_id: str | None, created_by: str | None
-) -> tuple[ColumnElement[bool], ...]:
+def _ownership_conditions(scope: OwnershipScope) -> list[ColumnElement[bool]]:
     """Build ownership conditions to apply before pagination.
 
     Args:
-        owning_group_id: Group key that returned annotations must match.
-        created_by: Actor on the first annotation version that results must match.
+        scope: Group and first-version creator that results must match.
 
     Returns:
         SQL conditions for the requested ownership restrictions.
     """
     conditions: list[ColumnElement[bool]] = []
-    if owning_group_id is not None:
-        conditions.append(AnnotationRecord.owning_group_id == owning_group_id)
-    if created_by is not None:
+    if scope.owning_group_id is not None:
+        conditions.append(AnnotationRecord.owning_group_id == scope.owning_group_id)
+    if scope.created_by is not None:
         conditions.append(
             exists(
                 select(1).where(
                     AnnotationVersionRecord.annotation_id
                     == AnnotationRecord.annotation_id,
                     AnnotationVersionRecord.version == 1,
-                    AnnotationVersionRecord.actor_id == created_by,
+                    AnnotationVersionRecord.actor_id == scope.created_by,
                 )
             )
         )
-    return tuple(conditions)
+    return conditions
 
 
 class AnnotationRepository:
@@ -151,11 +176,12 @@ class AnnotationRepository:
     The repository flushes changes so database errors are raised promptly, but
     the caller remains responsible for committing or rolling back the session.
 
-    Mutation methods such as `create`, `update`, and `soft_delete` support workflows
-    whose callers supply their own workflow details. Their `_direct` counterparts
-    handle changes submitted through the public API and enforce that workflow's
-    additional rules, including duplicate prevention and expected-version checks.
-    Both variants use shared private helpers for the underlying database writes so
+    `create`, `update`, and `soft_delete` serve both direct API writes and
+    change-set acceptance. They enforce an active entity catalog subject,
+    duplicate prevention, and expected-version checks. `apply_system_update`
+    serves system-wide updates such as ontology refresh, whose caller holds the
+    exclusive annotation lock and checks duplicates for the whole batch. All of
+    them use shared private helpers for the underlying database writes so
     annotations and their version histories remain consistent.
 
     Args:
@@ -164,6 +190,7 @@ class AnnotationRepository:
 
     def __init__(self, session: Session) -> None:
         self.session = session
+        self._entities = EntityRepository(session)
 
     def get(
         self,
@@ -185,52 +212,9 @@ class AnnotationRepository:
         )
         if not include_deleted:
             statement = statement.where(
-                AnnotationRecord.status == AnnotationStatus.ACTIVE.value
+                AnnotationRecord.status == AnnotationStatus.ACTIVE
             )
         return self.session.scalar(statement)
-
-    def list_versions(
-        self,
-        annotation_id: UUID,
-    ) -> tuple[AnnotationVersionRecord, ...]:
-        """List the saved versions of an annotation.
-
-        Args:
-            annotation_id: Identifier of the annotation whose history is needed.
-
-        Returns:
-            Saved versions ordered from oldest to newest.
-        """
-        statement = (
-            select(AnnotationVersionRecord)
-            .where(AnnotationVersionRecord.annotation_id == annotation_id)
-            .order_by(AnnotationVersionRecord.version)
-        )
-        return tuple(self.session.scalars(statement))
-
-    def annotation_exists(
-        self,
-        annotation_id: UUID,
-        *,
-        include_deleted: bool = True,
-    ) -> bool:
-        """Return whether an annotation with the exact identifier exists.
-
-        Args:
-            annotation_id: Identifier to look up.
-            include_deleted: Whether a deleted annotation counts as existing.
-
-        Returns:
-            `True` when a matching visible record exists; otherwise `False`.
-        """
-        statement = select(AnnotationRecord.annotation_id).where(
-            AnnotationRecord.annotation_id == annotation_id
-        )
-        if not include_deleted:
-            statement = statement.where(
-                AnnotationRecord.status == AnnotationStatus.ACTIVE.value
-            )
-        return self.session.scalar(statement) is not None
 
     def list_versions_page(
         self,
@@ -279,15 +263,17 @@ class AnnotationRepository:
 
     def list_active(
         self,
-        filters: AnnotationSearchFilters,
+        criteria: AnnotationFilter,
+        scope: OwnershipScope,
         *,
         limit: int,
         offset: int,
     ) -> Page[AnnotationRecord]:
-        """List active annotations that match every supplied filter.
+        """List active annotations that match every supplied criterion.
 
         Args:
-            filters: Exact field values that matching annotations must contain.
+            criteria: Field values that matching annotations must have.
+            scope: Ownership restrictions applied before pagination.
             limit: Maximum number of annotations to return.
             offset: Number of matching annotations to skip.
 
@@ -295,68 +281,10 @@ class AnnotationRepository:
             The selected annotation records and total number of matches.
         """
         statement = select(AnnotationRecord).where(
-            AnnotationRecord.status == AnnotationStatus.ACTIVE.value,
-            *_ownership_conditions(filters.owning_group_id, filters.created_by),
+            AnnotationRecord.status == AnnotationStatus.ACTIVE,
+            *_ownership_conditions(scope),
+            *_criteria_conditions(criteria),
         )
-        for field_name in (
-            "db_object_id",
-            "negation",
-            "relation",
-            "ontology_class_id",
-            "evidence_type",
-            "annotation_date",
-            "assigned_by",
-        ):
-            value = getattr(filters, field_name)
-            if value is not None:
-                if (
-                    field_name == "ontology_class_id"
-                    and filters.ontology_class_id_closure is not None
-                ):
-                    statement = statement.where(
-                        exists(
-                            select(1)
-                            .select_from(OntologyClosureRecord)
-                            .join(
-                                OntologyMetadataRecord,
-                                OntologyMetadataRecord.version_id
-                                == OntologyClosureRecord.version_id,
-                            )
-                            .where(
-                                OntologyMetadataRecord.ontology_key
-                                == OntologyKey.GO.value,
-                                OntologyMetadataRecord.active.is_(True),
-                                OntologyClosureRecord.subject_term_id
-                                == AnnotationRecord.ontology_class_id,
-                                OntologyClosureRecord.object_term_id == value,
-                                OntologyClosureRecord.predicate_id
-                                == filters.ontology_class_id_closure,
-                            )
-                        )
-                    )
-                    continue
-                statement = statement.where(
-                    getattr(AnnotationRecord, field_name) == value
-                )
-        for field_name in (
-            "references",
-            "with_or_from",
-            "interacting_taxon_id",
-        ):
-            for field_value in getattr(filters, field_name):
-                statement = statement.where(
-                    exists(
-                        select(1).where(
-                            AnnotationMultivaluedFieldValueRecord.annotation_id
-                            == AnnotationRecord.annotation_id,
-                            AnnotationMultivaluedFieldValueRecord.field_name
-                            == field_name,
-                            AnnotationMultivaluedFieldValueRecord.field_value
-                            == field_value,
-                        )
-                    )
-                )
-
         return load_page(
             self.session,
             statement,
@@ -371,7 +299,7 @@ class AnnotationRepository:
         return tuple(
             self.session.scalars(
                 select(AnnotationRecord)
-                .where(AnnotationRecord.status == AnnotationStatus.ACTIVE.value)
+                .where(AnnotationRecord.status == AnnotationStatus.ACTIVE)
                 .order_by(AnnotationRecord.annotation_id)
                 .with_for_update()
                 .execution_options(populate_existing=True)
@@ -413,7 +341,7 @@ class AnnotationRepository:
                 == AnnotationDuplicateReferenceRecord.annotation_id,
             )
             .where(
-                AnnotationRecord.status == AnnotationStatus.ACTIVE.value,
+                AnnotationRecord.status == AnnotationStatus.ACTIVE,
                 AnnotationDuplicateReferenceRecord.duplicate_base_signature
                 == duplicate_base_signature,
                 AnnotationDuplicateReferenceRecord.canonical_reference.in_(references),
@@ -433,64 +361,8 @@ class AnnotationRepository:
         *,
         annotation: Annotation,
         actor_id: str,
-        change_source: str,
         owning_group_id: str,
-        record_origin: str | AnnotationOrigin,
-        source_import_job_id: UUID | None = None,
-        annotation_id: UUID | None = None,
-    ) -> AnnotationRecord:
-        """Store a new annotation and its first version.
-
-        Args:
-            annotation: Validated annotation to store.
-            actor_id: Identifier for the person or process making the change.
-            change_source: Name of the workflow that made the change.
-            owning_group_id: Group responsible for the annotation.
-            record_origin: Whether the annotation was created directly or
-                imported.
-            source_import_job_id: Import job that supplied the annotation.
-            annotation_id: Identifier to use instead of generating one.
-
-        Returns:
-            The new current annotation record.
-
-        Raises:
-            InvalidAnnotationProvenanceError: If the origin and import job do not
-                describe a valid direct or imported record.
-            TypeError: If `annotation` is not a validated `Annotation`.
-        """
-        origin = (
-            record_origin.value
-            if isinstance(record_origin, AnnotationOrigin)
-            else record_origin
-        )
-        self._validate_provenance(origin, source_import_job_id)
-        persistence_data = prepare_annotation_for_persistence(annotation)
-
-        acquire_global_annotation_write_lock(self.session)
-        acquire_signature_locks(
-            self.session,
-            [persistence_data.duplicate_base_signature],
-        )
-
-        return self._insert_annotation(
-            annotation=annotation,
-            persistence_data=persistence_data,
-            actor_id=actor_id,
-            change_source=change_source,
-            owning_group_id=owning_group_id,
-            record_origin=origin,
-            source_import_job_id=source_import_job_id,
-            annotation_id=annotation_id or new_annotation_id(),
-        )
-
-    def create_direct(
-        self,
-        *,
-        annotation: Annotation,
-        actor_id: str,
-        owning_group_id: str,
-        change_source: str = "api",
+        change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         """Store an annotation unless an equivalent one is active.
 
@@ -504,9 +376,14 @@ class AnnotationRepository:
             The newly stored annotation at version 1.
 
         Raises:
+            UnknownDbObjectIdError: If `db_object_id` is not in the active entity
+                catalog.
             DuplicateAnnotationError: If an equivalent active annotation exists.
             TypeError: If `annotation` is not a validated `Annotation`.
         """
+        # Lock the subject's catalog membership before the annotation locks, the
+        # order every annotation write uses, so catalog removal waits for us.
+        self._entities.require_active(annotation.db_object_id)
         persistence_data = prepare_annotation_for_persistence(annotation)
         acquire_global_annotation_write_lock(self.session)
         acquire_signature_locks(
@@ -519,65 +396,16 @@ class AnnotationRepository:
         )
         if peers:
             raise DuplicateAnnotationError(peers)
-        return self._insert_annotation(
-            annotation=annotation,
-            persistence_data=persistence_data,
-            actor_id=actor_id,
-            change_source=change_source,
-            owning_group_id=owning_group_id,
-            record_origin=AnnotationOrigin.DIRECT.value,
-            source_import_job_id=None,
-            annotation_id=new_annotation_id(),
-        )
-
-    def _insert_annotation(
-        self,
-        *,
-        annotation: Annotation,
-        persistence_data: AnnotationPersistenceData,
-        actor_id: str,
-        change_source: str,
-        owning_group_id: str,
-        record_origin: str,
-        source_import_job_id: UUID | None,
-        annotation_id: UUID,
-    ) -> AnnotationRecord:
-        """Store a new annotation and its records used for history and search.
-
-        The caller must prepare the annotation data, obtain the necessary database
-        locks, and perform the policy checks required by its workflow. API creation,
-        for example, checks for duplicates; import workflows may allow them.
-
-        Args:
-            annotation: Validated annotation to store.
-            persistence_data: Annotation data prepared for database storage.
-            actor_id: Identifier for the person or process creating the annotation.
-            change_source: Workflow through which the annotation was created.
-            owning_group_id: Identifier of the responsible group.
-            record_origin: How the annotation entered the system.
-            source_import_job_id: Import job that created the annotation, if any.
-            annotation_id: Unique identifier assigned to the annotation.
-
-        Returns:
-            The newly stored annotation at version 1.
-        """
+        annotation_id = new_annotation_id()
         record = AnnotationRecord(
             annotation_id=annotation_id,
-            annotation_data=persistence_data.annotation_data,
             current_version=1,
-            status=AnnotationStatus.ACTIVE.value,
+            status=AnnotationStatus.ACTIVE,
             deleted_at=None,
             owning_group_id=owning_group_id,
-            record_origin=record_origin,
-            source_import_job_id=source_import_job_id,
-            duplicate_base_signature=persistence_data.duplicate_base_signature,
-            db_object_id=persistence_data.db_object_id,
-            negation=persistence_data.negation,
-            relation=persistence_data.relation,
-            ontology_class_id=persistence_data.ontology_class_id,
-            evidence_type=persistence_data.evidence_type,
-            annotation_date=persistence_data.annotation_date,
-            assigned_by=persistence_data.assigned_by,
+            record_origin=AnnotationOrigin.DIRECT,
+            source_import_job_id=None,
+            **persistence_data.column_values(),
         )
         self.session.add(record)
         self.session.flush([record])
@@ -600,53 +428,9 @@ class AnnotationRepository:
         annotation_id: UUID,
         annotation: Annotation,
         *,
-        actor_id: str,
-        change_source: str,
-    ) -> AnnotationRecord:
-        """Replace an annotation's current data and add a saved version.
-
-        Args:
-            annotation_id: Identifier of the annotation to update.
-            annotation: Validated replacement annotation.
-            actor_id: Identifier for the person or process making the change.
-            change_source: Name of the workflow that made the change.
-
-        Returns:
-            The updated current annotation record.
-
-        Raises:
-            AnnotationNotFoundError: If the annotation does not exist.
-            AnnotationDeletedError: If the annotation has already been deleted.
-            TypeError: If `annotation` is not a validated `Annotation`.
-        """
-        persistence_data = prepare_annotation_for_persistence(annotation)
-        acquire_global_annotation_write_lock(self.session)
-        record = self._get_annotation_for_change(annotation_id)
-        self._raise_if_deleted(record)
-
-        acquire_signature_locks(
-            self.session,
-            [
-                record.duplicate_base_signature,
-                persistence_data.duplicate_base_signature,
-            ],
-        )
-
-        return self._apply_update(
-            record,
-            persistence_data,
-            actor_id=actor_id,
-            change_source=change_source,
-        )
-
-    def update_direct(
-        self,
-        annotation_id: UUID,
-        annotation: Annotation,
-        *,
         expected_version: int,
         actor_id: str,
-        change_source: str = "api",
+        change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         """Update an annotation when the client version is current.
 
@@ -661,12 +445,16 @@ class AnnotationRepository:
             The updated annotation with a newly saved version.
 
         Raises:
+            UnknownDbObjectIdError: If the replacement `db_object_id` is not in the
+                active entity catalog.
             AnnotationNotFoundError: If the annotation does not exist.
             AnnotationDeletedError: If the annotation has already been deleted.
             DuplicateAnnotationError: If the change creates a new duplicate.
             StaleAnnotationVersionError: If `expected_version` is not current.
             TypeError: If `annotation` is not a validated `Annotation`.
         """
+        # Same lock order as `create`: catalog membership first.
+        self._entities.require_active(annotation.db_object_id)
         candidate = prepare_annotation_for_persistence(annotation)
         acquire_global_annotation_write_lock(self.session)
         current = self._get_annotation_for_change(annotation_id)
@@ -675,18 +463,13 @@ class AnnotationRepository:
             Annotation.model_validate(current.annotation_data)
         )
 
+        # The row lock taken above keeps `current` unchanged until this
+        # transaction ends, so its signature is the one to lock and compare.
         acquire_signature_locks(
             self.session,
             [before.duplicate_base_signature, candidate.duplicate_base_signature],
         )
 
-        current = self._get_annotation_for_change(annotation_id)
-        self._raise_if_deleted(current)
-        refreshed_before = prepare_annotation_for_persistence(
-            Annotation.model_validate(current.annotation_data)
-        )
-        if refreshed_before != before:
-            before = refreshed_before
         if current.current_version != expected_version:
             raise StaleAnnotationVersionError(
                 annotation_id,
@@ -725,7 +508,7 @@ class AnnotationRepository:
         persistence_data: AnnotationPersistenceData,
         *,
         actor_id: str,
-        change_source: str,
+        change_source: ChangeSource,
     ) -> AnnotationRecord:
         """Save replacement data and rebuild the records used for searching.
 
@@ -767,19 +550,28 @@ class AnnotationRepository:
     def apply_system_update(
         self,
         record: AnnotationRecord,
-        persistence_data: AnnotationPersistenceData,
+        annotation: Annotation,
         *,
         actor_id: str,
-        change_source: str,
+        change_source: ChangeSource,
     ) -> AnnotationRecord:
         """Update one annotation after system-wide validation is complete.
 
         The caller must hold the exclusive global annotation lock and evaluate
         duplicate safety for the complete batch before calling this method.
+
+        Args:
+            record: Current record of the annotation to update.
+            annotation: Validated replacement annotation.
+            actor_id: Identifier for the person or process making the change.
+            change_source: Workflow recorded in version history.
+
+        Returns:
+            The updated current annotation record.
         """
         return self._apply_update(
             record,
-            persistence_data,
+            prepare_annotation_for_persistence(annotation),
             actor_id=actor_id,
             change_source=change_source,
         )
@@ -788,42 +580,9 @@ class AnnotationRepository:
         self,
         annotation_id: UUID,
         *,
-        actor_id: str,
-        change_source: str,
-    ) -> AnnotationRecord:
-        """Mark an annotation as deleted and save that change as a new version.
-
-        Args:
-            annotation_id: Identifier of the annotation to delete.
-            actor_id: Identifier for the person or process making the change.
-            change_source: Name of the workflow that made the change.
-
-        Returns:
-            The annotation record in its deleted state.
-
-        Raises:
-            AnnotationNotFoundError: If the annotation does not exist.
-            AnnotationDeletedError: If the annotation has already been deleted.
-        """
-        acquire_global_annotation_write_lock(self.session)
-        record = self._get_annotation_for_change(annotation_id)
-        self._raise_if_deleted(record)
-
-        acquire_signature_locks(self.session, [record.duplicate_base_signature])
-
-        return self._apply_soft_delete(
-            record,
-            actor_id=actor_id,
-            change_source=change_source,
-        )
-
-    def soft_delete_direct(
-        self,
-        annotation_id: UUID,
-        *,
         expected_version: int,
         actor_id: str,
-        change_source: str = "api",
+        change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         """Mark an annotation as deleted when its version matches.
 
@@ -849,8 +608,6 @@ class AnnotationRepository:
         self._raise_if_deleted(record)
         acquire_signature_locks(self.session, [record.duplicate_base_signature])
 
-        record = self._get_annotation_for_change(annotation_id)
-        self._raise_if_deleted(record)
         if record.current_version != expected_version:
             raise StaleAnnotationVersionError(
                 annotation_id,
@@ -869,7 +626,7 @@ class AnnotationRepository:
         record: AnnotationRecord,
         *,
         actor_id: str,
-        change_source: str,
+        change_source: ChangeSource,
     ) -> AnnotationRecord:
         """Save a deletion version and remove records used for active searches.
 
@@ -888,7 +645,7 @@ class AnnotationRepository:
         next_version = record.current_version + 1
         now = datetime.now(UTC)
         record.current_version = next_version
-        record.status = AnnotationStatus.DELETED.value
+        record.status = AnnotationStatus.DELETED
         record.deleted_at = now
         record.updated_at = now
         self.session.add(
@@ -905,33 +662,6 @@ class AnnotationRepository:
         self._delete_derived_values(record.annotation_id)
         self.session.flush()
         return record
-
-    @staticmethod
-    def _validate_provenance(
-        record_origin: str,
-        source_import_job_id: UUID | None,
-    ) -> None:
-        try:
-            AnnotationOrigin(record_origin)
-        except ValueError:
-            raise InvalidAnnotationProvenanceError(
-                f"{record_origin!r} is not a supported annotation record origin"
-            ) from None
-
-        if (
-            record_origin == AnnotationOrigin.DIRECT.value
-            and source_import_job_id is not None
-        ):
-            raise InvalidAnnotationProvenanceError(
-                "direct annotations cannot have a source import job"
-            )
-        if (
-            record_origin == AnnotationOrigin.IMPORT.value
-            and source_import_job_id is None
-        ):
-            raise InvalidAnnotationProvenanceError(
-                "imported annotations require a source import job"
-            )
 
     def _get_annotation_for_change(self, annotation_id: UUID) -> AnnotationRecord:
         """Get the current annotation and prevent concurrent changes to it.
@@ -953,30 +683,21 @@ class AnnotationRepository:
         )
         record = self.session.scalar(statement)
         if record is None:
-            raise AnnotationNotFoundError(f"annotation {annotation_id} was not found")
+            raise AnnotationNotFoundError(annotation_id)
         return record
 
     @staticmethod
     def _raise_if_deleted(record: AnnotationRecord) -> None:
-        if record.status == AnnotationStatus.DELETED.value:
-            raise AnnotationDeletedError(
-                f"annotation {record.annotation_id} is already deleted"
-            )
+        if record.status == AnnotationStatus.DELETED:
+            raise AnnotationDeletedError(record.annotation_id)
 
     @staticmethod
     def _update_current_record(
         record: AnnotationRecord,
         persistence_data: AnnotationPersistenceData,
     ) -> None:
-        record.annotation_data = persistence_data.annotation_data
-        record.duplicate_base_signature = persistence_data.duplicate_base_signature
-        record.db_object_id = persistence_data.db_object_id
-        record.negation = persistence_data.negation
-        record.relation = persistence_data.relation
-        record.ontology_class_id = persistence_data.ontology_class_id
-        record.evidence_type = persistence_data.evidence_type
-        record.annotation_date = persistence_data.annotation_date
-        record.assigned_by = persistence_data.assigned_by
+        for column, value in persistence_data.column_values().items():
+            setattr(record, column, value)
 
     def _delete_derived_values(self, annotation_id: UUID) -> None:
         self.session.execute(
@@ -996,18 +717,10 @@ class AnnotationRepository:
         persistence_data: AnnotationPersistenceData,
     ) -> None:
         self.session.add_all(
-            AnnotationMultivaluedFieldValueRecord(
-                annotation_id=annotation_id,
-                field_name=value.field_name,
-                field_value=value.field_value,
-            )
-            for value in persistence_data.multivalued_field_values
+            AnnotationMultivaluedFieldValueRecord(annotation_id=annotation_id, **row)
+            for row in persistence_data.multivalued_rows()
         )
         self.session.add_all(
-            AnnotationDuplicateReferenceRecord(
-                annotation_id=annotation_id,
-                canonical_reference=reference,
-                duplicate_base_signature=persistence_data.duplicate_base_signature,
-            )
-            for reference in persistence_data.canonical_references
+            AnnotationDuplicateReferenceRecord(annotation_id=annotation_id, **row)
+            for row in persistence_data.reference_rows()
         )

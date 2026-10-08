@@ -8,12 +8,19 @@ provides. These values do not depend on the file format the catalog came from.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Annotated
 from uuid import UUID
 
 from go_standard_annotation_schema.datamodel import Entity
+from pydantic import Field
 
-from standard_annotation_backend.domain.refresh import SourceProvenance
+from standard_annotation_backend.domain.errors import InvalidInputError
+from standard_annotation_backend.domain.refresh import (
+    RefreshFailureCode,
+    SourceProvenance,
+    TerminalRefreshError,
+)
+from standard_annotation_backend.domain.stored_json import StoredJson
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,15 +60,26 @@ class EntityCatalog:
     warnings: tuple[str, ...]
 
 
-class UnknownDbObjectIdError(ValueError):
-    """Report a `db_object_id` that is not in the active entity catalog."""
+class UnknownDbObjectIdError(InvalidInputError):
+    """Report a `db_object_id` that is not in the active entity catalog.
+
+    Attributes:
+        db_object_id: The identifier that is not in the catalog.
+    """
+
+    code = "unknown_db_object_id"
+    message = "Annotation db_object_id is not in the active entity catalog"
 
     def __init__(self, db_object_id: str) -> None:
         self.db_object_id = db_object_id
-        super().__init__("db_object_id is not present in the active entity catalog")
+        super().__init__()
+
+    def issue_location(self) -> tuple[str | int, ...]:
+        """Return the annotation's `db_object_id` field."""
+        return ("annotation", "db_object_id")
 
 
-class EntityCandidateConflictError(RuntimeError):
+class EntityCandidateConflictError(TerminalRefreshError):
     """Report staged catalog data that cannot be used for a job.
 
     Raised when a job's staged catalog differs from a new parse of its source, is
@@ -69,18 +87,22 @@ class EntityCandidateConflictError(RuntimeError):
     that has already finished.
     """
 
+    failure_code = RefreshFailureCode.CANDIDATE_CONFLICT
+
     def __init__(self) -> None:
         super().__init__(
             "Entity catalog candidate conflicts with its job or publication state"
         )
 
 
-class EntityCatalogCollisionError(RuntimeError):
+class EntityCatalogCollisionError(TerminalRefreshError):
     """Report exact identifiers already supplied by another source.
 
     The identifiers are available as `colliding_ids`. The exception message
     leaves them out, so logs stay short and contain no source data.
     """
+
+    failure_code = RefreshFailureCode.CATALOG_COLLISION
 
     def __init__(self, colliding_ids: tuple[str, ...]) -> None:
         self.colliding_ids = tuple(sorted(set(colliding_ids)))
@@ -105,65 +127,23 @@ class EntityRefreshResult:
     source_locator: str
     source_revision: str | None
     source_checksum: str
-    source_record_count: int
-    active_identifier_count: int
-    added_count: int
-    retained_count: int
-    removed_count: int
+    source_record_count: Annotated[int, Field(ge=0)]
+    active_identifier_count: Annotated[int, Field(ge=0)]
+    added_count: Annotated[int, Field(ge=0)]
+    retained_count: Annotated[int, Field(ge=0)]
+    removed_count: Annotated[int, Field(ge=0)]
     warnings: tuple[str, ...]
     removal_impacts: tuple[EntityRemovalImpact, ...]
 
     def to_job_result(self) -> dict[str, object]:
-        """Return the result as a JSON-compatible dict for the job record."""
-        return {
-            "snapshot_id": str(self.snapshot_id),
-            "source_key": self.source_key,
-            "source_type": self.source_type,
-            "source_locator": self.source_locator,
-            "source_revision": self.source_revision,
-            "source_checksum": self.source_checksum,
-            "source_record_count": self.source_record_count,
-            "active_identifier_count": self.active_identifier_count,
-            "added_count": self.added_count,
-            "retained_count": self.retained_count,
-            "removed_count": self.removed_count,
-            "warnings": list(self.warnings),
-            "warning_count": len(self.warnings),
-            "removal_impacts": [
-                {
-                    "db_object_id": impact.db_object_id,
-                    "annotation_ids": [str(value) for value in impact.annotation_ids],
-                }
-                for impact in self.removal_impacts
-            ],
-        }
+        """Return the result as a JSON-compatible dict for the job record.
 
-    @classmethod
-    def from_job_result(cls, value: dict[str, object]) -> EntityRefreshResult:
-        """Rebuild a result from the dict produced by `to_job_result`."""
-        return cls(
-            snapshot_id=UUID(cast(str, value["snapshot_id"])),
-            source_key=cast(str, value["source_key"]),
-            source_type=cast(str, value["source_type"]),
-            source_locator=cast(str, value["source_locator"]),
-            source_revision=cast(str | None, value.get("source_revision")),
-            source_checksum=cast(str, value["source_checksum"]),
-            source_record_count=cast(int, value["source_record_count"]),
-            active_identifier_count=cast(int, value["active_identifier_count"]),
-            added_count=cast(int, value["added_count"]),
-            retained_count=cast(int, value["retained_count"]),
-            removed_count=cast(int, value["removed_count"]),
-            warnings=tuple(cast(list[str], value["warnings"])),
-            removal_impacts=tuple(
-                EntityRemovalImpact(
-                    cast(str, impact["db_object_id"]),
-                    tuple(
-                        UUID(item) for item in cast(list[str], impact["annotation_ids"])
-                    ),
-                )
-                for impact in cast(list[dict[str, object]], value["removal_impacts"])
-            ),
-        )
+        `warning_count` is added for clients; it is ignored when the result is read.
+        """
+        return {
+            **STORED_ENTITY_REFRESH_RESULT.dump(self),
+            "warning_count": len(self.warnings),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,12 +156,7 @@ class EntityRefreshUnchangedResult:
 
     def to_job_result(self) -> dict[str, object]:
         """Return the result as a JSON-compatible dict for the job record."""
-        return {
-            "source_key": self.source_key,
-            "snapshot_id": str(self.snapshot_id),
-            "source_checksum": self.source_checksum,
-            "unchanged": True,
-        }
+        return STORED_ENTITY_UNCHANGED_RESULT.dump(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,50 +166,37 @@ class EntityCatalogRetirementResult:
     Attributes:
         source_key: The retired source.
         retired: Whether an active catalog was retired.
-        snapshot_id: The retired snapshot, when one was retired.
+        snapshot_id: The retired snapshot. `None` when nothing was retired.
         removal_impacts: Every removed identifier with the active annotations
-            that still reference it.
+            that still reference it. Empty when nothing was retired.
     """
 
     source_key: str
     retired: bool
-    snapshot_id: UUID | None
-    removal_impacts: tuple[EntityRemovalImpact, ...]
+    snapshot_id: UUID | None = None
+    removal_impacts: tuple[EntityRemovalImpact, ...] = ()
 
     def to_job_result(self) -> dict[str, object]:
-        """Return the result as a JSON-compatible dict for the job record."""
+        """Return the result as a JSON-compatible dict for the job record.
+
+        A source with nothing to retire is recorded with only `source_key` and
+        `retired`. A retirement adds `removed_count` for clients; it is ignored
+        when the result is read.
+        """
         if not self.retired:
             return {"source_key": self.source_key, "retired": False}
         return {
-            "source_key": self.source_key,
-            "retired": True,
-            "snapshot_id": str(self.snapshot_id),
+            **STORED_ENTITY_RETIREMENT_RESULT.dump(self),
             "removed_count": len(self.removal_impacts),
-            "removal_impacts": [
-                {
-                    "db_object_id": impact.db_object_id,
-                    "annotation_ids": [str(value) for value in impact.annotation_ids],
-                }
-                for impact in self.removal_impacts
-            ],
         }
 
-    @classmethod
-    def from_job_result(cls, value: dict[str, object]) -> EntityCatalogRetirementResult:
-        """Rebuild a result from the dict produced by `to_job_result`."""
-        if value["retired"] is not True:
-            return cls(cast(str, value["source_key"]), False, None, ())
-        return cls(
-            source_key=cast(str, value["source_key"]),
-            retired=True,
-            snapshot_id=UUID(cast(str, value["snapshot_id"])),
-            removal_impacts=tuple(
-                EntityRemovalImpact(
-                    cast(str, impact["db_object_id"]),
-                    tuple(
-                        UUID(item) for item in cast(list[str], impact["annotation_ids"])
-                    ),
-                )
-                for impact in cast(list[dict[str, object]], value["removal_impacts"])
-            ),
-        )
+
+STORED_ENTITY_REFRESH_RESULT = StoredJson(
+    EntityRefreshResult, label="entity refresh result"
+)
+STORED_ENTITY_UNCHANGED_RESULT = StoredJson(
+    EntityRefreshUnchangedResult, label="unchanged entity refresh result"
+)
+STORED_ENTITY_RETIREMENT_RESULT = StoredJson(
+    EntityCatalogRetirementResult, label="entity retirement result"
+)

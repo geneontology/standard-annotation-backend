@@ -7,13 +7,39 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.persistence.locks import acquire_refresh_start_lock
+from standard_annotation_backend.domain.jobs import (
+    ACTIVE_JOB_STATUSES,
+    JobNotFoundError,
+    JobStatus,
+    JobType,
+)
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    acquire_transaction_lock,
+)
 from standard_annotation_backend.persistence.models import JobRecord
 
 
-class JobNotFoundError(LookupError):
-    """Report an operation that targets an unknown job."""
+def lock_job_record(session: Session, job_id: UUID) -> JobRecord | None:
+    """Load a job under a row lock held until the transaction ends.
+
+    The row is reloaded from the database even if the session already holds it,
+    so callers see the state committed by any transaction that held the lock
+    before them.
+
+    Args:
+        session: Session whose transaction holds the lock.
+        job_id: Identifier of the job to lock.
+
+    Returns:
+        The locked job, or `None` if no job has the identifier.
+    """
+    return session.scalar(
+        select(JobRecord)
+        .where(JobRecord.job_id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
 
 
 class InvalidJobTransitionError(RuntimeError):
@@ -44,8 +70,8 @@ class JobRepository:
     ) -> JobRecord:
         """Store one queued job and flush its generated identifier."""
         record = JobRecord(
-            job_type=job_type.value,
-            status=JobStatus.QUEUED.value,
+            job_type=job_type,
+            status=JobStatus.QUEUED,
             requested_by=requested_by,
             parameters=parameters,
             progress={},
@@ -58,19 +84,26 @@ class JobRepository:
         return record
 
     def lock_refresh_starts(self) -> None:
-        """Hold the refresh start lock until the transaction ends.
+        """Make refresh job creation run one request at a time, for every kind.
 
-        See `acquire_refresh_start_lock`.
+        Starting a refresh first looks for a queued or running job for each
+        source and creates one only when none exists. Without this lock, two
+        requests running at once could both find no job and both create one.
+        The lock is held until the transaction ends.
+
+        One lock covers every kind. Starts are short and rare, so serializing
+        them costs nothing noticeable, and a single key cannot deadlock with
+        itself.
         """
-        acquire_refresh_start_lock(self.session)
+        acquire_transaction_lock(self.session, LockNamespace.REFRESH_START)
 
     def find_active(self, *, job_type: JobType, source_key: str) -> JobRecord | None:
         """Return the oldest queued or running job of a type for one source."""
         return self.session.scalar(
             select(JobRecord)
             .where(
-                JobRecord.job_type == job_type.value,
-                JobRecord.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+                JobRecord.job_type == job_type,
+                JobRecord.status.in_(ACTIVE_JOB_STATUSES),
                 JobRecord.parameters["source_key"].astext == source_key,
             )
             .order_by(JobRecord.created_at, JobRecord.job_id)
@@ -84,10 +117,10 @@ class JobRepository:
     def start(self, job_id: UUID, *, now: datetime) -> JobMutation:
         """Move a queued job to running under a row lock."""
         record = self._lock(job_id)
-        status = JobStatus(record.status)
+        status = record.status
         if status is not JobStatus.QUEUED:
             return JobMutation(record, False)
-        record.status = JobStatus.RUNNING.value
+        record.status = JobStatus.RUNNING
         record.started_at = now
         record.updated_at = now
         self.session.flush([record])
@@ -103,7 +136,7 @@ class JobRepository:
     ) -> JobMutation:
         """Replace progress for a running job under a row lock."""
         record = self._lock(job_id)
-        if JobStatus(record.status) is not JobStatus.RUNNING:
+        if record.status is not JobStatus.RUNNING:
             raise InvalidJobTransitionError("only running jobs can update progress")
         changed = record.progress != progress or tuple(record.warnings) != warnings
         if changed:
@@ -118,21 +151,19 @@ class JobRepository:
         job_id: UUID,
         *,
         result: dict[str, object],
-        artifact_uri: str | None,
         now: datetime,
     ) -> JobMutation:
         """Finish a running job successfully under a row lock."""
         record = self._lock(job_id)
-        status = JobStatus(record.status)
+        status = record.status
         if status is JobStatus.SUCCEEDED:
-            if record.result == result and record.artifact_uri == artifact_uri:
+            if record.result == result:
                 return JobMutation(record, False)
             raise InvalidJobTransitionError("job already succeeded with another result")
         if status is not JobStatus.RUNNING:
             raise InvalidJobTransitionError("only running jobs can succeed")
-        record.status = JobStatus.SUCCEEDED.value
+        record.status = JobStatus.SUCCEEDED
         record.result = result
-        record.artifact_uri = artifact_uri
         record.completed_at = now
         record.updated_at = now
         self.session.flush([record])
@@ -148,14 +179,14 @@ class JobRepository:
     ) -> JobMutation:
         """Finish a queued or running job with a public error message."""
         record = self._lock(job_id)
-        status = JobStatus(record.status)
+        status = record.status
         if status is JobStatus.FAILED:
             if record.error == error:
                 return JobMutation(record, False)
             raise InvalidJobTransitionError("job already failed with another error")
-        if status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
+        if status not in ACTIVE_JOB_STATUSES:
             raise InvalidJobTransitionError("terminal job outcome cannot change")
-        record.status = JobStatus.FAILED.value
+        record.status = JobStatus.FAILED
         record.error = error
         if progress is not None:
             record.progress = progress
@@ -166,12 +197,7 @@ class JobRepository:
 
     def _lock(self, job_id: UUID) -> JobRecord:
         """Load a job under a row lock held until the transaction ends."""
-        record = self.session.scalar(
-            select(JobRecord)
-            .where(JobRecord.job_id == job_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+        record = lock_job_record(self.session, job_id)
         if record is None:
             raise JobNotFoundError(job_id)
         return record

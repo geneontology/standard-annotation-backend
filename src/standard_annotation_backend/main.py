@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
@@ -9,8 +10,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from standard_annotation_backend.api.errors import (
+    OAuthCallbackFailedError,
+    UnexpectedError,
     install_exception_handlers,
-    oauth_callback_failure_response,
+    sab_error_response,
 )
 from standard_annotation_backend.api.routes.admin import router as admin_router
 from standard_annotation_backend.api.routes.annotation_comments import (
@@ -43,6 +46,8 @@ from standard_annotation_backend.persistence.unit_of_work import (
     create_unit_of_work_factory,
 )
 from standard_annotation_backend.version import get_application_version
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -117,7 +122,12 @@ async def protect_token_management_responses(
     request: Request,
     call_next: Callable[[Request], Awaitable[Response]],
 ) -> Response:
-    """Protect responses from internal token-management routes.
+    """Return safe responses for unexpected failures and protect token management.
+
+    An unexpected exception becomes a JSON `500 internal_error` response. Only the
+    request method, the path without its query string, and the exception's type
+    name are logged, because exception messages and tracebacks can carry secrets.
+    The exception is not re-raised, so the server does not log it either.
 
     Token-management responses are not cacheable and cannot supply referrer data.
     OAuth callbacks also consume the browser's state cookie, including when an
@@ -129,19 +139,24 @@ async def protect_token_management_responses(
 
     Returns:
         Response with token-management security headers and callback cleanup applied.
-
-    Raises:
-        Exception: Re-raises unexpected failures outside the OAuth callback route.
     """
     path = request.url.path
     try:
         response = await call_next(request)
-    except Exception:
-        if path != "/auth/github/callback":
-            raise
-        # Callback failures must still consume browser state. Do not render or
-        # log the exception: even unexpected failures may retain OAuth secrets.
-        response = oauth_callback_failure_response()
+    except Exception as error:
+        if path == "/auth/github/callback":
+            # Callback failures must still consume browser state. Do not render
+            # or log the exception: even unexpected failures may retain OAuth
+            # secrets.
+            response = sab_error_response(OAuthCallbackFailedError())
+        else:
+            logger.error(
+                "Unexpected request failure: method=%s path=%s failure_type=%s",
+                request.method,
+                path,
+                type(error).__name__,
+            )
+            response = sab_error_response(UnexpectedError())
     if (
         path.startswith("/auth/github/")
         or path.startswith("/assets/")

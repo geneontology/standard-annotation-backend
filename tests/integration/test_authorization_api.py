@@ -127,7 +127,7 @@ def _seed(
             payload = annotation.model_dump(mode="json") | {
                 "db_object_id": f"UniProtKB:{name}"
             }
-            record = uow.annotations.create_direct(
+            record = uow.annotations.create(
                 annotation=Annotation.model_validate(payload),
                 actor_id=creator,
                 owning_group_id=group,
@@ -396,7 +396,7 @@ def test_deleted_history_is_authorized_before_version_disclosure(
     resources = _seed(unit_of_work_factory, validated_annotation, "read", scope)
     with unit_of_work_factory() as uow:
         for annotation_id in resources.annotations.values():
-            uow.annotations.soft_delete_direct(
+            uow.annotations.soft_delete(
                 annotation_id, actor_id="deleter", expected_version=1
             )
         uow.commit()

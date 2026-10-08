@@ -24,6 +24,7 @@ dependencies = [
     "redis",
     "rich>=15.0.0",
     "sqlalchemy",
+    "starlette",
     "structlog>=26.1.0",
     "uvicorn[standard]",
 ]

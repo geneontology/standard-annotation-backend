@@ -3,17 +3,26 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, Query, status
+from fastapi import APIRouter, Depends, Path
 
 from standard_annotation_backend.api.dependencies import (
+    PageLimit,
+    PageOffset,
     get_annotation_service,
     get_authenticated_context,
 )
-from standard_annotation_backend.api.errors import BEARER_ERROR_RESPONSES
+from standard_annotation_backend.api.errors import (
+    BEARER_ERRORS,
+    RequestValidationFailedError,
+    error_responses,
+)
 from standard_annotation_backend.api.models import (
     AnnotationVersionPageResponse,
     AnnotationVersionResource,
-    ApiErrorResponse,
+)
+from standard_annotation_backend.domain.annotations import (
+    AnnotationNotFoundError,
+    AnnotationVersionNotFoundError,
 )
 from standard_annotation_backend.domain.auth import RequestContext
 from standard_annotation_backend.services.annotation_service import AnnotationService
@@ -22,24 +31,21 @@ router = APIRouter(
     prefix="/annotations",
     tags=["annotations"],
     dependencies=[Depends(get_authenticated_context)],
-    responses={
-        **BEARER_ERROR_RESPONSES,
-        status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
-    },
+    responses=error_responses(*BEARER_ERRORS, RequestValidationFailedError),
 )
 
 
 @router.get(
     "/{annotation_id}/versions",
     response_model=AnnotationVersionPageResponse,
+    responses=error_responses(AnnotationNotFoundError),
 )
 def list_annotation_versions(
     annotation_id: UUID,
     service: Annotated[AnnotationService, Depends(get_annotation_service)],
     context: Annotated[RequestContext, Depends(get_authenticated_context)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: PageLimit = 50,
+    offset: PageOffset = 0,
 ) -> AnnotationVersionPageResponse:
     """Return saved annotation versions from oldest to newest.
 
@@ -63,6 +69,7 @@ def list_annotation_versions(
 @router.get(
     "/{annotation_id}/versions/{version}",
     response_model=AnnotationVersionResource,
+    responses=error_responses(AnnotationNotFoundError, AnnotationVersionNotFoundError),
 )
 def get_annotation_version(
     annotation_id: UUID,

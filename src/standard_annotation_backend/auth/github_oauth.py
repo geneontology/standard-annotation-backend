@@ -8,20 +8,21 @@ import httpx2
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, ValidationError
 
 from standard_annotation_backend.config import Settings
+from standard_annotation_backend.domain.errors import UnavailableError, UpstreamError
 
 
-class OAuthConfigurationError(Exception):
+class OAuthConfigurationError(UnavailableError):
     """Report missing or invalid OAuth configuration without exposing its values."""
 
-    def __init__(self) -> None:
-        super().__init__("GitHub authentication is not configured")
+    code = "oauth_not_configured"
+    message = "GitHub authentication is not configured"
 
 
-class OAuthUpstreamError(Exception):
+class OAuthUpstreamError(UpstreamError):
     """Report upstream failure without retaining a response or credential."""
 
-    def __init__(self) -> None:
-        super().__init__("GitHub authentication is unavailable")
+    code = "github_oauth_unavailable"
+    message = "GitHub authentication is unavailable"
 
 
 class _OAuthConfiguration(BaseModel):

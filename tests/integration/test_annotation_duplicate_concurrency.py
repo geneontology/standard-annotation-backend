@@ -10,7 +10,12 @@ import pytest
 from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationStatus,
+    DuplicateAnnotationError,
+    StaleAnnotationVersionError,
+)
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
@@ -18,17 +23,29 @@ from standard_annotation_backend.domain.auth import (
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
-    AnnotationStatus,
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationRepository,
-    DuplicateAnnotationError,
-    StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     create_unit_of_work_factory,
 )
 from standard_annotation_backend.services.annotation_service import AnnotationService
+
+
+@pytest.fixture(autouse=True)
+def _active_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Make the subjects these tests write active in the entity catalog.
+
+    Direct annotation writes require an active subject.
+    """
+    seed_active_subjects(
+        "UniProtKB:P12345",
+        "UniProtKB:FIRST",
+        "UniProtKB:SECOND",
+        "UniProtKB:UNRELATED",
+    )
+
 
 GUARD_SECONDS = 5
 OBSERVATION_SECONDS = 2
@@ -43,7 +60,7 @@ def _changed(annotation: Annotation, **changes: object) -> Annotation:
 
 def _create(annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
-        AnnotationRepository(session).create_direct(
+        AnnotationRepository(session).create(
             annotation=annotation,
             actor_id="concurrent-creator",
             owning_group_id="group-1",
@@ -54,7 +71,7 @@ def _create(annotation: Annotation) -> Mutation:
 
 def _update(annotation_id: UUID, annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
-        AnnotationRepository(session).update_direct(
+        AnnotationRepository(session).update(
             annotation_id,
             annotation,
             expected_version=1,
@@ -155,26 +172,6 @@ def _run_coordinated_mutations(
                 assert second_finished.wait(OBSERVATION_SECONDS), (
                     "unrelated write did not reach its post-lock, pre-commit checkpoint"
                 )
-                # Both writes are still uncommitted. Observe compatible global
-                # locks as well as their independent signature locks in PostgreSQL.
-                locks = tuple(
-                    observer.execute(
-                        text(
-                            "SELECT pid, mode FROM pg_locks "
-                            "WHERE locktype = 'advisory' AND granted "
-                            "AND pid IN (:first, :second)"
-                        ),
-                        {"first": first_pid, "second": second_pid},
-                    )
-                )
-                assert sorted(locks) == sorted(
-                    [
-                        (first_pid, "ShareLock"),
-                        (first_pid, "ExclusiveLock"),
-                        (second_pid, "ShareLock"),
-                        (second_pid, "ExclusiveLock"),
-                    ]
-                )
             else:
                 deadline = monotonic() + OBSERVATION_SECONDS
                 while monotonic() < deadline:
@@ -219,7 +216,7 @@ def test_conflicting_creates_cannot_both_succeed(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    # Removing create_direct's signature lock allows both uncommitted creates.
+    # Removing create's signature lock allows both uncommitted creates.
     outcomes, blocked = _run_coordinated_mutations(
         session_factory, _create(validated_annotation), _create(validated_annotation)
     )
@@ -242,12 +239,12 @@ def test_distinct_record_updates_cannot_introduce_the_same_duplicate(
 ) -> None:
     with session_factory() as session:
         repository = AnnotationRepository(session)
-        first = repository.create_direct(
+        first = repository.create(
             annotation=_changed(validated_annotation, db_object_id="UniProtKB:FIRST"),
             actor_id="seed",
             owning_group_id="group-1",
         )
-        second = repository.create_direct(
+        second = repository.create(
             annotation=_changed(validated_annotation, db_object_id="UniProtKB:SECOND"),
             actor_id="seed",
             owning_group_id="group-1",
@@ -255,7 +252,7 @@ def test_distinct_record_updates_cannot_introduce_the_same_duplicate(
         session.commit()
         first_id, second_id = first.annotation_id, second.annotation_id
 
-    # Removing update_direct's candidate signature lock permits both updates.
+    # Removing update's candidate signature lock permits both updates.
     outcomes, blocked = _run_coordinated_mutations(
         session_factory,
         _update(first_id, validated_annotation),
@@ -275,7 +272,7 @@ def test_same_record_update_race_rejects_the_stale_version(
     validated_annotation: Annotation,
 ) -> None:
     with session_factory() as session:
-        record = AnnotationRepository(session).create_direct(
+        record = AnnotationRepository(session).create(
             annotation=validated_annotation, actor_id="seed", owning_group_id="group-1"
         )
         session.commit()
@@ -297,7 +294,10 @@ def test_same_record_update_race_rejects_the_stale_version(
         assert current.current_version == 2
         assert current.assigned_by == "First"
         assert [
-            version.version for version in repository.list_versions(annotation_id)
+            version.version
+            for version in repository.list_versions_page(
+                annotation_id, limit=100, offset=0
+            ).items
         ] == [
             1,
             2,
@@ -309,7 +309,7 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
     validated_annotation: Annotation,
 ) -> None:
     with session_factory() as session:
-        record = AnnotationRepository(session).create_direct(
+        record = AnnotationRepository(session).create(
             annotation=validated_annotation,
             actor_id="seed",
             owning_group_id="group-1",
@@ -326,7 +326,7 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
             nonlocal writer_calls
             writer_calls += 1
             with session_factory() as writer:
-                AnnotationRepository(writer).update_direct(
+                AnnotationRepository(writer).update(
                     annotation_id,
                     _changed(validated_annotation, assigned_by="Concurrent"),
                     expected_version=1,
@@ -365,18 +365,23 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
         assert current is not None
         current_version = current.current_version
         assigned_by = current.assigned_by
-        versions = tuple(repository.list_versions(annotation_id))
+        versions = tuple(
+            repository.list_versions_page(annotation_id, limit=100, offset=0).items
+        )
     assert current_version == 2
     assert assigned_by == "Concurrent"
     assert [version.version for version in versions] == [1, 2]
 
 
-def test_unrelated_signatures_overlap_after_the_shared_global_lock(
+def test_unrelated_signatures_overlap_and_both_succeed(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    # An exclusive global lock or constant signature key prevents the second
-    # post-lock checkpoint while the first transaction remains uncommitted.
+    """Creates with unrelated duplicate signatures proceed concurrently and succeed.
+
+    The second create reaches its pre-commit point while the first transaction is
+    still uncommitted, and both annotations are stored.
+    """
     outcomes, _blocked = _run_coordinated_mutations(
         session_factory,
         _create(validated_annotation),

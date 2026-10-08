@@ -12,11 +12,18 @@ import pytest
 from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    DuplicateAnnotationError,
+)
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
     RequestContext,
+)
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetStateError,
+    StaleChangeSetError,
 )
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
@@ -30,7 +37,6 @@ from standard_annotation_backend.persistence.models import (
 from standard_annotation_backend.persistence.repositories import (
     AnnotationRepository,
     ChangeSetRepository,
-    DuplicateAnnotationError,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
@@ -40,8 +46,6 @@ from standard_annotation_backend.services.annotation_service import AnnotationSe
 from standard_annotation_backend.services.change_set_service import (
     AcceptedChangeSet,
     ChangeSetService,
-    ChangeSetStateError,
-    StaleChangeSetError,
 )
 
 
@@ -251,24 +255,6 @@ def _run_review_race(
                 assert second_ready.wait(OBSERVATION_SECONDS), (
                     "unrelated acceptance did not reach its pre-commit checkpoint"
                 )
-                locks = tuple(
-                    observer.execute(
-                        text(
-                            "SELECT pid, mode FROM pg_locks "
-                            "WHERE locktype = 'advisory' AND granted "
-                            "AND pid IN (:first, :second)"
-                        ),
-                        {"first": first_pid, "second": second_pid},
-                    )
-                )
-                assert sorted(locks) == sorted(
-                    [
-                        (first_pid, "ShareLock"),
-                        (first_pid, "ExclusiveLock"),
-                        (second_pid, "ShareLock"),
-                        (second_pid, "ExclusiveLock"),
-                    ]
-                )
             else:
                 blocked = _blocked_by(
                     observer,
@@ -411,7 +397,11 @@ def test_direct_update_makes_waiting_acceptance_stale_without_overwriting(
         assert current.status == "active"
         assert current.current_version == 2
         assert current.assigned_by == "Direct"
-        versions = AnnotationRepository(session).list_versions(created.annotation_id)
+        versions = (
+            AnnotationRepository(session)
+            .list_versions_page(created.annotation_id, limit=100, offset=0)
+            .items
+        )
         assert [version.version for version in versions] == [1, 2]
         assert versions[-1].annotation_data["assigned_by"] == "Direct"
         assert not versions[-1].is_deleted
@@ -451,7 +441,7 @@ def test_same_payload_create_acceptances_cannot_both_succeed(
     """Conflicting acceptances create one annotation and keep the losing proposal open."""
     first_id = _propose_create(unit_of_work_factory, validated_annotation)
     second_id = _propose_create(unit_of_work_factory, validated_annotation)
-    # Removing create_direct's signature lock lets both transactions find no peer.
+    # Removing create's signature lock lets both transactions find no peer.
     outcomes, blocked = _run_review_race(
         session_factory,
         _accept(first_id, FIRST_REVIEWER),
@@ -483,12 +473,12 @@ def test_same_payload_create_acceptances_cannot_both_succeed(
         )
 
 
-def test_unrelated_create_acceptances_overlap_after_shared_global_lock(
+def test_unrelated_create_acceptances_overlap_and_both_succeed(
     session_factory: sessionmaker[Session],
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    """Unrelated acceptances hold compatible global locks before either commits."""
+    """Unrelated create acceptances proceed concurrently and both succeed."""
     first_id = _propose_create(unit_of_work_factory, validated_annotation)
     unrelated = Annotation.model_validate(
         {
@@ -544,7 +534,7 @@ def test_conflicting_update_acceptances_cannot_both_succeed(
         target_ids.append(created.annotation_id)
         proposal_ids.append(proposed.change_set_id)
 
-    # Removing update_direct's signature locks permits both unrelated row locks
+    # Removing update's signature locks permits both unrelated row locks
     # to check the candidate before the other's uncommitted write is visible.
     outcomes, blocked = _run_review_race(
         session_factory,

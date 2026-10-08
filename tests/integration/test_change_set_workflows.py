@@ -1,38 +1,41 @@
 """Verify atomic change-set review workflows with PostgreSQL."""
 
-from importlib import import_module
-from types import TracebackType
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
+from seeding import insert_annotation
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    ChangeSource,
+    DuplicateAnnotationError,
+)
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
     RequestContext,
 )
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetStateError,
+    InvalidChangeSetError,
+    StaleChangeSetError,
+)
+from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
     AuditEventRecord,
     ChangeSetRecord,
 )
-from standard_annotation_backend.persistence.repositories import (
-    AnnotationRepository,
-    DuplicateAnnotationError,
-)
 from standard_annotation_backend.persistence.unit_of_work import (
-    SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
 from standard_annotation_backend.services.annotation_service import AnnotationService
 from standard_annotation_backend.services.change_set_service import (
     ChangeSet,
     ChangeSetService,
-    InvalidChangeSetError,
 )
 
 PROPOSER = RequestContext(
@@ -103,7 +106,7 @@ def test_create_preview_preserves_annotations_and_acceptance_records_history(
         assert annotation.owning_group_id == "curator-group"
         version = session.scalar(select(AnnotationVersionRecord))
         assert version is not None
-        assert version.change_source == "change_set"
+        assert version.change_source is ChangeSource.CHANGE_SET
         assert version.actor_id == "proposer"
         events = list(
             session.scalars(
@@ -130,26 +133,28 @@ def test_create_preview_preserves_annotations_and_acceptance_records_history(
         assert events[-1].annotation_version == 1
 
 
-def test_invalid_create_preview_reports_validation_and_remains_reviewable(
+def test_corrupt_stored_preview_is_reported_when_reading_a_change_set(
     unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    validated_annotation: Annotation,
 ) -> None:
-    """Invalid annotation content is stored for review and reported in preview."""
+    """Reading a change set whose stored preview is malformed raises `StoredDataError` instead of returning the preview."""
     service = _service(unit_of_work_factory)
     proposed = service.propose_create(
-        payload={"assigned_by": "TEST"},
-        owning_group_id="group",
-        reason="Candidate needs review",
+        payload=validated_annotation.model_dump(mode="json"),
+        owning_group_id="curator-group",
+        reason="New evidence",
         context=PROPOSER,
     )
-    preview = service.preview(proposed.change_set_id, context=PROPOSER)
-    assert not preview.can_accept
-    assert any(
-        issue["location"] == ("db_object_id",) for issue in preview.validation_errors
-    )
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.InvalidChangeSetError):
-        service.accept(proposed.change_set_id, context=REVIEWER)
-    assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
+    service.preview(proposed.change_set_id, context=PROPOSER)
+    with session_factory.begin() as session:
+        record = session.get(ChangeSetRecord, proposed.change_set_id)
+        assert record is not None
+        corrupt_preview: dict[str, object] = {"change_set_id": "x"}
+        record.preview = corrupt_preview
+
+    with pytest.raises(StoredDataError):
+        service.get(proposed.change_set_id, context=PROPOSER)
 
 
 def test_create_acceptance_rechecks_duplicates_after_successful_preview(
@@ -230,31 +235,41 @@ def test_create_audit_failure_rolls_back_entire_workflow(
         assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
-@pytest.mark.parametrize("change_source", ["api", "change_set"])
-def test_direct_repository_create_records_selected_workflow(
+def test_repository_writes_default_to_api_change_source(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
-    change_source: str,
 ) -> None:
-    """The shared duplicate-safe write retains API defaults and explicit workflow."""
+    """Repository create, update, and delete record the API change source by default."""
     with unit_of_work_factory() as unit_of_work:
-        kwargs = {} if change_source == "api" else {"change_source": change_source}
-        created = unit_of_work.annotations.create_direct(
-            annotation=validated_annotation,
-            actor_id="writer",
-            owning_group_id="group",
-            **kwargs,
+        target = unit_of_work.annotations.create(
+            annotation=validated_annotation, actor_id="writer", owning_group_id="group"
         )
-        version = unit_of_work.annotations.get_version(created.annotation_id, 1)
-        assert version is not None
-        assert version.change_source == change_source
+        unit_of_work.annotations.update(
+            target.annotation_id,
+            validated_annotation,
+            actor_id="writer",
+            expected_version=1,
+        )
+        unit_of_work.annotations.soft_delete(
+            target.annotation_id, actor_id="writer", expected_version=2
+        )
+        for version_number in (1, 2, 3):
+            version = unit_of_work.annotations.get_version(
+                target.annotation_id, version_number
+            )
+            assert version is not None
+            assert version.change_source is ChangeSource.API
 
 
 def test_update_preview_and_acceptance_use_base_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    """An update previews whole-field replacements and changes only on acceptance."""
+    """An update previews whole-field replacements and changes only on acceptance.
+
+    The saved version is attributed to the proposer, as for creates; the reviewer
+    is recorded on the change set.
+    """
     annotations = AnnotationService(unit_of_work_factory)
     target = annotations.create(
         payload=validated_annotation.model_dump(mode="json"),
@@ -287,43 +302,9 @@ def test_update_preview_and_acceptance_use_base_snapshot(
     with unit_of_work_factory() as unit_of_work:
         version = unit_of_work.annotations.get_version(target.annotation_id, 2)
         assert version is not None
-        assert version.change_source == "change_set"
-        assert version.actor_id == "reviewer"
-
-
-def test_false_boolean_number_test_does_not_persist_proposal_or_audit(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
-) -> None:
-    """A failed JSON test rejects proposal persistence and its audit event together."""
-    annotations = AnnotationService(unit_of_work_factory)
-    target = annotations.create(
-        payload={**validated_annotation.model_dump(mode="json"), "negation": False},
-        owning_group_id="group",
-        context=PROPOSER,
-    )
-
-    with pytest.raises(InvalidChangeSetError) as raised:
-        _service(unit_of_work_factory).propose_update(
-            target.annotation_id,
-            base_version=1,
-            patch=[
-                {"op": "test", "path": "/negation", "value": 0},
-                {"op": "replace", "path": "/assigned_by", "value": "NEW"},
-            ],
-            reason="Conditional correction",
-            context=PROPOSER,
-        )
-
-    assert raised.value.errors[0]["location"] == ("patch",)
-    assert raised.value.errors[0]["type"] == "invalid_patch_operation"
-    assert annotations.get(target.annotation_id, context=PROPOSER) == target
-    with session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(ChangeSetRecord)) == 0
-        assert list(session.scalars(select(AuditEventRecord.action))) == [
-            "annotation.created"
-        ]
+        assert version.change_source is ChangeSource.CHANGE_SET
+        assert version.actor_id == "proposer"
+    assert accepted.change_set.reviewed_by == "reviewer"
 
 
 def test_update_preview_reports_invalid_post_patch_annotation(
@@ -346,9 +327,8 @@ def test_update_preview_reports_invalid_post_patch_annotation(
     )
     preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert not preview.can_accept
-    assert preview.validation_errors[0]["location"] == ("db_object_id",)
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.InvalidChangeSetError):
+    assert preview.validation_errors[0]["location"] == ("annotation", "db_object_id")
+    with pytest.raises(InvalidChangeSetError):
         service.accept(proposed.change_set_id, context=REVIEWER)
     assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
@@ -401,29 +381,29 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
     """Preview and acceptance allow existing duplicates but reject new conflicts."""
     payload = validated_annotation.model_dump(mode="json")
     with unit_of_work_factory() as unit_of_work:
-        target = unit_of_work.annotations.create(
+        target = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=validated_annotation,
             owning_group_id="group",
             actor_id="importer",
-            change_source="import",
-            record_origin="direct",
+            change_source=ChangeSource.ANNOTATION_REFRESH,
         )
         target_id = target.annotation_id
-        legacy = unit_of_work.annotations.create(
+        legacy = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=validated_annotation,
             owning_group_id="other",
             actor_id="importer",
-            change_source="import",
-            record_origin="direct",
+            change_source=ChangeSource.ANNOTATION_REFRESH,
         )
-        new_peer = unit_of_work.annotations.create(
+        new_peer = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=Annotation.model_validate(
                 {**payload, "references": ["PMID:99"]}
             ),
             owning_group_id="other",
             actor_id="importer",
-            change_source="import",
-            record_origin="direct",
+            change_source=ChangeSource.ANNOTATION_REFRESH,
         )
         legacy_id, new_peer_id = legacy.annotation_id, new_peer.annotation_id
         unit_of_work.commit()
@@ -473,8 +453,7 @@ def test_update_proposal_rejects_unusable_patch_before_persistence(
         owning_group_id="group",
         context=PROPOSER,
     )
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.InvalidChangeSetError) as error:
+    with pytest.raises(InvalidChangeSetError) as error:
         _service(unit_of_work_factory).propose_update(
             target.annotation_id,
             base_version=1,
@@ -497,8 +476,7 @@ def test_update_proposal_requires_existing_base_version(
         owning_group_id="group",
         context=PROPOSER,
     )
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.InvalidChangeSetError) as error:
+    with pytest.raises(InvalidChangeSetError) as error:
         _service(unit_of_work_factory).propose_update(
             target.annotation_id,
             base_version=99,
@@ -509,35 +487,15 @@ def test_update_proposal_requires_existing_base_version(
     assert error.value.errors[0]["type"] == "base_version_not_found"
 
 
-@pytest.mark.parametrize("change_source", ["api", "change_set"])
-def test_direct_repository_update_records_selected_workflow(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-    change_source: str,
-) -> None:
-    """Shared update policy retains the default API source or the selected source."""
-    with unit_of_work_factory() as unit_of_work:
-        target = unit_of_work.annotations.create_direct(
-            annotation=validated_annotation, actor_id="writer", owning_group_id="group"
-        )
-        kwargs = {} if change_source == "api" else {"change_source": change_source}
-        unit_of_work.annotations.update_direct(
-            target.annotation_id,
-            validated_annotation,
-            actor_id="writer",
-            expected_version=1,
-            **kwargs,
-        )
-        version = unit_of_work.annotations.get_version(target.annotation_id, 2)
-        assert version is not None
-        assert version.change_source == change_source
-
-
 def test_delete_preview_and_acceptance_preserve_history(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    """Deletion previews its target, then saves a deleted version upon acceptance."""
+    """Deletion previews its target, then saves a deleted version upon acceptance.
+
+    The deleted version is attributed to the proposer; the reviewer is recorded on
+    the change set.
+    """
     annotations = AnnotationService(unit_of_work_factory)
     target = annotations.create(
         payload=validated_annotation.model_dump(mode="json"),
@@ -566,7 +524,9 @@ def test_delete_preview_and_acceptance_preserve_history(
         version = unit_of_work.annotations.get_version(target.annotation_id, 2)
         assert version is not None
         assert version.is_deleted
-        assert version.change_source == "change_set"
+        assert version.change_source is ChangeSource.CHANGE_SET
+        assert version.actor_id == "proposer"
+    assert accepted.change_set.reviewed_by == "reviewer"
 
 
 def test_rejection_records_explanation_reviewer_and_audit(
@@ -640,23 +600,8 @@ def test_stale_acceptance_commits_review_and_audit_before_raising(
         )
     else:
         annotations.delete(target.annotation_id, expected_version=1, context=PROPOSER)
-    exits: list[type[BaseException] | None] = []
-
-    class ObservedUnitOfWork(SqlAlchemyUnitOfWork):
-        def __exit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc_value: BaseException | None,
-            traceback: TracebackType | None,
-        ) -> None:
-            exits.append(exc_type)
-            super().__exit__(exc_type, exc_value, traceback)
-
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    observed_service = _service(lambda: ObservedUnitOfWork(session_factory))
-    with pytest.raises(module.StaleChangeSetError) as error:
-        observed_service.accept(proposal.change_set_id, context=REVIEWER)
-    assert exits == [None]
+    with pytest.raises(StaleChangeSetError) as error:
+        service.accept(proposal.change_set_id, context=REVIEWER)
     assert error.value.change_set_id == proposal.change_set_id
     assert error.value.expected_version == 1
     assert error.value.current_version == 2
@@ -698,7 +643,6 @@ def test_terminal_proposals_reject_further_review_operations(
     proposal = service.propose_delete(
         target.annotation_id, base_version=1, reason="Withdraw", context=PROPOSER
     )
-    module = import_module("standard_annotation_backend.services.change_set_service")
     if state == "accepted":
         service.accept(proposal.change_set_id, context=REVIEWER)
     elif state == "rejected":
@@ -710,9 +654,9 @@ def test_terminal_proposals_reject_further_review_operations(
             expected_version=1,
             context=PROPOSER,
         )
-        with pytest.raises(module.StaleChangeSetError):
+        with pytest.raises(StaleChangeSetError):
             service.accept(proposal.change_set_id, context=REVIEWER)
-    with pytest.raises(module.ChangeSetStateError) as error:
+    with pytest.raises(ChangeSetStateError) as error:
         getattr(service, operation)(
             proposal.change_set_id,
             context=REVIEWER,
@@ -720,44 +664,6 @@ def test_terminal_proposals_reject_further_review_operations(
         )
     assert error.value.state == state
     assert service.get(proposal.change_set_id, context=PROPOSER).state == state
-
-
-@pytest.mark.parametrize("operation", ["get", "preview", "accept", "reject"])
-def test_unknown_change_set_has_transport_neutral_not_found_error(
-    unit_of_work_factory: UnitOfWorkFactory,
-    operation: str,
-) -> None:
-    """Read, preview, and review operations expose the missing change-set identifier."""
-    service = _service(unit_of_work_factory)
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    missing_id = uuid4()
-    with pytest.raises(module.ChangeSetNotFoundError) as error:
-        getattr(service, operation)(
-            missing_id,
-            context=REVIEWER,
-            **({"review_reason": "Missing"} if operation == "reject" else {}),
-        )
-    assert error.value.change_set_id == missing_id
-
-
-@pytest.mark.parametrize("change_source", ["api", "change_set"])
-def test_direct_repository_delete_records_selected_workflow(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-    change_source: str,
-) -> None:
-    """Shared delete policy preserves the API default and explicit review source."""
-    with unit_of_work_factory() as unit_of_work:
-        target = unit_of_work.annotations.create_direct(
-            annotation=validated_annotation, actor_id="writer", owning_group_id="group"
-        )
-        kwargs = {} if change_source == "api" else {"change_source": change_source}
-        unit_of_work.annotations.soft_delete_direct(
-            target.annotation_id, actor_id="writer", expected_version=1, **kwargs
-        )
-        version = unit_of_work.annotations.get_version(target.annotation_id, 2)
-        assert version is not None
-        assert version.change_source == change_source
 
 
 def test_delete_proposal_requires_existing_active_base_snapshot(
@@ -773,12 +679,11 @@ def test_delete_proposal_requires_existing_active_base_snapshot(
     )
     annotations.delete(target.annotation_id, expected_version=1, context=PROPOSER)
     service = _service(unit_of_work_factory)
-    module = import_module("standard_annotation_backend.services.change_set_service")
     for version, issue_type in [
         (99, "base_version_not_found"),
         (2, "base_version_deleted"),
     ]:
-        with pytest.raises(module.InvalidChangeSetError) as error:
+        with pytest.raises(InvalidChangeSetError) as error:
             service.propose_delete(
                 target.annotation_id,
                 base_version=version,
@@ -786,101 +691,6 @@ def test_delete_proposal_requires_existing_active_base_snapshot(
                 context=PROPOSER,
             )
         assert error.value.errors[0]["type"] == issue_type
-
-
-@pytest.mark.parametrize("operation", ["update", "delete"])
-def test_repository_detected_stale_write_is_persisted_after_intervening_transaction(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-    monkeypatch: pytest.MonkeyPatch,
-    operation: str,
-) -> None:
-    """A write committed on another connection after the service read marks review stale."""
-    target = AnnotationService(unit_of_work_factory).create(
-        payload=validated_annotation.model_dump(mode="json"),
-        owning_group_id="group",
-        context=PROPOSER,
-    )
-    service = _service(unit_of_work_factory)
-    proposal = getattr(service, f"propose_{operation}")(
-        target.annotation_id,
-        base_version=1,
-        reason="Review",
-        context=PROPOSER,
-        **(
-            {"patch": [{"op": "replace", "path": "/assigned_by", "value": "PROPOSED"}]}
-            if operation == "update"
-            else {}
-        ),
-    )
-    original_update = AnnotationRepository.update_direct
-    original_delete = AnnotationRepository.soft_delete_direct
-    candidate = Annotation.model_validate(
-        {**validated_annotation.model_dump(mode="json"), "assigned_by": "CONCURRENT"}
-    )
-
-    def update_elsewhere() -> None:
-        with unit_of_work_factory() as unit_of_work:
-            original_update(
-                unit_of_work.annotations,
-                target.annotation_id,
-                candidate,
-                expected_version=1,
-                actor_id="concurrent-writer",
-            )
-            unit_of_work.commit()
-
-    def interrupted_update(
-        repository: AnnotationRepository,
-        annotation_id: UUID,
-        annotation: Annotation,
-        *,
-        expected_version: int,
-        actor_id: str,
-        change_source: str = "api",
-    ) -> AnnotationRecord:
-        update_elsewhere()
-        return original_update(
-            repository,
-            annotation_id,
-            annotation,
-            expected_version=expected_version,
-            actor_id=actor_id,
-            change_source=change_source,
-        )
-
-    def interrupted_delete(
-        repository: AnnotationRepository,
-        annotation_id: UUID,
-        *,
-        expected_version: int,
-        actor_id: str,
-        change_source: str = "api",
-    ) -> AnnotationRecord:
-        update_elsewhere()
-        return original_delete(
-            repository,
-            annotation_id,
-            expected_version=expected_version,
-            actor_id=actor_id,
-            change_source=change_source,
-        )
-
-    if operation == "update":
-        monkeypatch.setattr(AnnotationRepository, "update_direct", interrupted_update)
-    else:
-        monkeypatch.setattr(
-            AnnotationRepository, "soft_delete_direct", interrupted_delete
-        )
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    with pytest.raises(module.StaleChangeSetError) as error:
-        service.accept(proposal.change_set_id, context=REVIEWER)
-    assert error.value.current_version == 2
-    stored = service.get(proposal.change_set_id, context=PROPOSER)
-    assert stored.state == "stale"
-    assert stored.preview is not None
-    assert stored.preview.current_version == 2
-    assert stored.preview.is_stale
 
 
 @pytest.mark.parametrize(

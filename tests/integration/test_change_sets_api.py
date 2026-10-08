@@ -1,5 +1,6 @@
 """Test proposal and review HTTP contracts against PostgreSQL."""
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -14,6 +15,8 @@ from standard_annotation_backend.persistence.models import (
 )
 
 pytestmark = pytest.mark.usefixtures("active_annotation_subjects")
+
+CLOCK_TOLERANCE = timedelta(seconds=5)  # database and test clocks may differ
 
 ANNOTATION = {
     "db_object_id": "UniProtKB:P12345",
@@ -54,6 +57,7 @@ def _create_annotation(client: TestClient) -> dict:
 def test_create_read_preview_and_accept(integration_api_client: TestClient) -> None:
     """A proposal remains separate from annotations until accepted with identity."""
     client = integration_api_client
+    requested_at = datetime.now(UTC)
     response = client.post(
         "/change-sets",
         json={
@@ -63,9 +67,15 @@ def test_create_read_preview_and_accept(integration_api_client: TestClient) -> N
             "reason": "Add evidence",
         },
     )
+    responded_at = datetime.now(UTC)
     assert response.status_code == status.HTTP_201_CREATED
     proposal = response.json()
     UUID(proposal["change_set_id"])
+    proposed_at = datetime.fromisoformat(proposal["proposed_at"])
+    assert proposed_at.tzinfo is not None
+    assert (
+        requested_at - CLOCK_TOLERANCE <= proposed_at <= responded_at + CLOCK_TOLERANCE
+    )
     path = f"/change-sets/{proposal['change_set_id']}"
     assert response.headers["location"] == path
     assert proposal["state"] == "proposed"
@@ -314,7 +324,7 @@ def test_false_boolean_number_test_rejects_proposal_without_audit(
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     error = response.json()["error"]
     assert error["code"] == "invalid_change_set"
-    assert error["details"][0]["location"] == ["patch"]
+    assert error["details"][0]["location"] == ["body", "patch"]
     assert error["details"][0]["type"] == "invalid_patch_operation"
     assert client.get(f"/annotations/{target['annotation_id']}").json() == target
     with session_factory() as session:
@@ -377,7 +387,6 @@ def test_update_rejects_unsupported_patch_format(
     error = response.json()["error"]
     assert error["code"] == "request_validation_error"
     assert error["details"][0]["location"][-1] == "patch_format"
-    assert error["details"][0]["type"] == "literal_error"
 
 
 def test_invalid_candidate_can_be_previewed_but_not_accepted(
@@ -397,6 +406,10 @@ def test_invalid_candidate_can_be_previewed_but_not_accepted(
         "message",
         "type",
     }
+    assert preview.json()["validation_errors"][0]["location"] == [
+        "annotation",
+        "db_object_id",
+    ]
     accepted = client.post(f"{path}/accept", json={})
     assert accepted.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert accepted.json()["error"]["code"] == "invalid_change_set"

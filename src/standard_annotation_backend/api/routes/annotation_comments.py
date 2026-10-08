@@ -3,13 +3,19 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, Query, Response, status
+from fastapi import APIRouter, Body, Depends, Response, status
 
 from standard_annotation_backend.api.dependencies import (
+    PageLimit,
+    PageOffset,
     get_authenticated_context,
     get_comment_service,
 )
-from standard_annotation_backend.api.errors import BEARER_ERROR_RESPONSES
+from standard_annotation_backend.api.errors import (
+    BEARER_ERRORS,
+    RequestValidationFailedError,
+    error_responses,
+)
 from standard_annotation_backend.api.examples import (
     ANNOTATION_COMMENT_CREATE_EXAMPLES,
     ANNOTATION_COMMENT_EDIT_EXAMPLES,
@@ -18,20 +24,21 @@ from standard_annotation_backend.api.models import (
     AnnotationCommentPageResponse,
     AnnotationCommentRequest,
     AnnotationCommentResource,
-    ApiErrorResponse,
 )
+from standard_annotation_backend.domain.annotations import AnnotationNotFoundError
 from standard_annotation_backend.domain.auth import RequestContext
+from standard_annotation_backend.domain.comments import CommentNotFoundError
 from standard_annotation_backend.services.comment_service import CommentService
 
 router = APIRouter(
     prefix="/annotations/{annotation_id}/comments",
     tags=["annotation comments"],
     dependencies=[Depends(get_authenticated_context)],
-    responses={
-        **BEARER_ERROR_RESPONSES,
-        status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
-    },
+    responses=error_responses(
+        *BEARER_ERRORS,
+        AnnotationNotFoundError,
+        RequestValidationFailedError,
+    ),
 )
 
 
@@ -40,8 +47,8 @@ def list_annotation_comments(
     annotation_id: UUID,
     service: Annotated[CommentService, Depends(get_comment_service)],
     context: Annotated[RequestContext, Depends(get_authenticated_context)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: PageLimit = 50,
+    offset: PageOffset = 0,
 ) -> AnnotationCommentPageResponse:
     """Return visible comments for an accessible annotation.
 
@@ -109,7 +116,11 @@ def create_annotation_comment(
     return AnnotationCommentResource.from_service(result)
 
 
-@router.patch("/{comment_id}", response_model=AnnotationCommentResource)
+@router.patch(
+    "/{comment_id}",
+    response_model=AnnotationCommentResource,
+    responses=error_responses(AnnotationNotFoundError, CommentNotFoundError),
+)
 def edit_annotation_comment(
     annotation_id: UUID,
     comment_id: UUID,
@@ -142,7 +153,11 @@ def edit_annotation_comment(
     )
 
 
-@router.delete("/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{comment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=error_responses(AnnotationNotFoundError, CommentNotFoundError),
+)
 def delete_annotation_comment(
     annotation_id: UUID,
     comment_id: UUID,

@@ -1,10 +1,22 @@
 """Provide annotation operations shared by HTTP and other entry points."""
 
-from dataclasses import dataclass, replace
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotation_search import (
+    AnnotationFilter,
+    OntologyUnavailableError,
+    UnsupportedClosurePredicateError,
+)
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationVersionNotFoundError,
+    ChangeSource,
+    EmptyAnnotationPatchError,
+    InvalidAnnotationPayloadError,
+    StaleAnnotationVersionError,
+)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
     PermissionAction,
@@ -13,25 +25,18 @@ from standard_annotation_backend.domain.auth import (
     derive_creation_group,
 )
 from standard_annotation_backend.domain.ontology import OntologyKey
-from standard_annotation_backend.domain.validation import (
-    ValidationIssue,
-    validate_annotation,
-)
+from standard_annotation_backend.domain.validation import validate_annotation
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
 )
-from standard_annotation_backend.persistence.repositories import (
-    AnnotationNotFoundError,
-    AuditRepository,
-    StaleAnnotationVersionError,
-)
+from standard_annotation_backend.persistence.repositories import AuditRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.resource_authorization import (
-    authorize_annotation,
-    ownership_filters,
+    load_authorized_annotation,
+    ownership_scope,
 )
 
 
@@ -78,59 +83,9 @@ class AnnotationVersion:
     version: int
     is_deleted: bool
     actor_id: str
-    change_source: str
+    change_source: ChangeSource
     created_at: datetime
     annotation: Annotation
-
-
-class InvalidAnnotationPayloadError(ValueError):
-    """Report annotation data that does not satisfy the annotation schema.
-
-    Attributes:
-        errors: Validation problems found in the submitted annotation data.
-    """
-
-    def __init__(self, errors: tuple[ValidationIssue, ...]) -> None:
-        self.errors = errors
-        super().__init__("annotation payload is invalid")
-
-
-class EmptyAnnotationPatchError(ValueError):
-    """Report an update request that does not supply any fields to replace."""
-
-
-class ClosureTermRequiredError(ValueError):
-    """Report that a closure predicate was supplied without an ontology term."""
-
-
-class UnsupportedClosureFieldError(ValueError):
-    """Report that closure search was requested for an unsupported field."""
-
-
-class UnsupportedClosurePredicateError(ValueError):
-    """Report that the active ontology does not support a closure predicate."""
-
-
-class OntologyUnavailableError(RuntimeError):
-    """Report that closure search has no active ontology snapshot."""
-
-
-class AnnotationHistoryNotFoundError(LookupError):
-    """Report an annotation or saved version that does not exist.
-
-    Attributes:
-        annotation_id: Identifier of the requested annotation.
-        version: Requested version number, or `None` for the complete history.
-    """
-
-    def __init__(self, annotation_id: UUID, version: int | None = None) -> None:
-        self.annotation_id = annotation_id
-        self.version = version
-        if version is None:
-            message = f"annotation history {annotation_id} was not found"
-        else:
-            message = f"annotation {annotation_id} has no version {version}"
-        super().__init__(message)
 
 
 class AnnotationService:
@@ -176,8 +131,7 @@ class AnnotationService:
         )
         annotation = _validated_annotation(payload)
         with self._unit_of_work_factory() as unit_of_work:
-            unit_of_work.entities.require_active(annotation.db_object_id)
-            record = unit_of_work.annotations.create_direct(
+            record = unit_of_work.annotations.create(
                 annotation=annotation,
                 actor_id=context.actor_id,
                 owning_group_id=group,
@@ -208,14 +162,11 @@ class AnnotationService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            record = unit_of_work.annotations.get(annotation_id)
-            if record is None:
-                raise AnnotationNotFoundError(annotation_id)
-            authorize_annotation(
+            record = load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.ANNOTATION_READ,
-                record,
+                annotation_id,
             )
             result = _current_annotation(record)
         return result
@@ -254,17 +205,14 @@ class AnnotationService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_EDIT)
         if not changes:
-            raise EmptyAnnotationPatchError
+            raise EmptyAnnotationPatchError()
 
         with self._unit_of_work_factory() as unit_of_work:
-            current = unit_of_work.annotations.get(annotation_id)
-            if current is None:
-                raise AnnotationNotFoundError(annotation_id)
-            authorize_annotation(
+            current = load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.ANNOTATION_EDIT,
-                current,
+                annotation_id,
             )
             if current.current_version != expected_version:
                 raise StaleAnnotationVersionError(
@@ -276,8 +224,7 @@ class AnnotationService:
             merged = current.annotation_data.copy()
             merged.update(changes)
             annotation = _validated_annotation(merged)
-            unit_of_work.entities.require_active(annotation.db_object_id)
-            updated = unit_of_work.annotations.update_direct(
+            updated = unit_of_work.annotations.update(
                 annotation_id,
                 annotation,
                 expected_version=expected_version,
@@ -314,16 +261,14 @@ class AnnotationService:
         """
         authorize_role(context, PermissionAction.ANNOTATION_DELETE)
         with self._unit_of_work_factory() as unit_of_work:
-            current = unit_of_work.annotations.get(annotation_id, include_deleted=True)
-            if current is None:
-                raise AnnotationNotFoundError(annotation_id)
-            authorize_annotation(
+            load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.ANNOTATION_DELETE,
-                current,
+                annotation_id,
+                include_deleted=True,
             )
-            record = unit_of_work.annotations.soft_delete_direct(
+            record = unit_of_work.annotations.soft_delete(
                 annotation_id,
                 expected_version=expected_version,
                 actor_id=context.actor_id,
@@ -340,78 +285,47 @@ class AnnotationService:
         self,
         *,
         context: RequestContext,
-        db_object_id: str | None = None,
-        negation: bool | None = None,
-        relation: str | None = None,
-        ontology_class_id: str | None = None,
-        ontology_class_id_closure: str | None = None,
-        evidence_type: str | None = None,
-        annotation_date: date | None = None,
-        assigned_by: str | None = None,
-        references: tuple[str, ...] = (),
-        with_or_from: tuple[str, ...] = (),
-        interacting_taxon_id: tuple[str, ...] = (),
+        criteria: AnnotationFilter,
         limit: int = 50,
         offset: int = 0,
     ) -> ResultPage[CurrentAnnotation]:
         """Find active annotations whose stored fields match every supplied filter.
 
-        Repeating a list-valued filter requires an annotation to contain every
-        supplied value. Results use a stable order so offset pagination is repeatable.
+        Results are limited to the caller's ownership scope and use a stable order
+        so offset pagination is repeatable.
 
         Args:
             context: Authenticated identity and ownership scope for the query.
-            db_object_id: Database object identifier to match.
-            negation: Negation value to match.
-            relation: Relation identifier to match.
-            ontology_class_id: Ontology class identifier to match.
-            ontology_class_id_closure: Predicate used for descendant-or-self search.
-            evidence_type: Evidence type identifier to match.
-            annotation_date: Annotation date to match.
-            assigned_by: Assigning organization to match.
-            references: Reference identifiers that must all be present.
-            with_or_from: Supporting identifiers that must all be present.
-            interacting_taxon_id: Taxon identifiers that must all be present.
+            criteria: Field values that matching annotations must have.
             limit: Maximum number of annotations to return.
             offset: Number of matching annotations to skip.
 
         Returns:
             The requested annotations and pagination information.
+
+        Raises:
+            OntologyUnavailableError: If closure search is requested while no GO
+                ontology is active.
+            UnsupportedClosurePredicateError: If the closure predicate is not
+                loaded for the active GO ontology.
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
-        if ontology_class_id_closure is not None and ontology_class_id is None:
-            raise ClosureTermRequiredError
-        filters = replace(
-            ownership_filters(context),
-            db_object_id=db_object_id,
-            negation=negation,
-            relation=relation,
-            ontology_class_id=ontology_class_id,
-            ontology_class_id_closure=ontology_class_id_closure,
-            evidence_type=evidence_type,
-            annotation_date=annotation_date,
-            assigned_by=assigned_by,
-            references=references,
-            with_or_from=with_or_from,
-            interacting_taxon_id=interacting_taxon_id,
-        )
+        scope = ownership_scope(context)
         with self._unit_of_work_factory() as unit_of_work:
-            if ontology_class_id_closure is not None:
+            if criteria.ontology_class_id_closure is not None:
                 active = unit_of_work.ontologies.get_active(OntologyKey.GO)
                 if active is None:
                     raise OntologyUnavailableError
-                if ontology_class_id_closure not in active.loaded_predicates:
-                    raise UnsupportedClosurePredicateError
+                if criteria.ontology_class_id_closure not in active.loaded_predicates:
+                    raise UnsupportedClosurePredicateError("ontology_class_id_closure")
             page = unit_of_work.annotations.list_active(
-                filters,
+                criteria,
+                scope,
                 limit=limit,
                 offset=offset,
             )
-            result = ResultPage(
-                items=tuple(_current_annotation(record) for record in page.items),
-                total=page.total,
-                limit=limit,
-                offset=offset,
+            result = ResultPage.from_page(
+                page, _current_annotation, limit=limit, offset=offset
             )
         return result
 
@@ -437,32 +351,25 @@ class AnnotationService:
             The requested versions and pagination information.
 
         Raises:
-            AnnotationHistoryNotFoundError: If the annotation does not exist.
+            AnnotationNotFoundError: If the annotation does not exist or is
+                outside the selected ownership scope.
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            current = unit_of_work.annotations.get(annotation_id, include_deleted=True)
-            if current is None:
-                raise AnnotationHistoryNotFoundError(annotation_id)
-            try:
-                authorize_annotation(
-                    unit_of_work.annotations,
-                    context,
-                    PermissionAction.ANNOTATION_READ,
-                    current,
-                )
-            except AnnotationNotFoundError:
-                raise AnnotationHistoryNotFoundError(annotation_id) from None
+            load_authorized_annotation(
+                unit_of_work.annotations,
+                context,
+                PermissionAction.ANNOTATION_READ,
+                annotation_id,
+                include_deleted=True,
+            )
             page = unit_of_work.annotations.list_versions_page(
                 annotation_id,
                 limit=limit,
                 offset=offset,
             )
-            result = ResultPage(
-                items=tuple(_annotation_version(record) for record in page.items),
-                total=page.total,
-                limit=limit,
-                offset=offset,
+            result = ResultPage.from_page(
+                page, _annotation_version, limit=limit, offset=offset
             )
         return result
 
@@ -484,25 +391,22 @@ class AnnotationService:
             The annotation data and change information saved for that version.
 
         Raises:
-            AnnotationHistoryNotFoundError: If the annotation or version does not exist.
+            AnnotationNotFoundError: If the annotation does not exist or is
+                outside the selected ownership scope.
+            AnnotationVersionNotFoundError: If the annotation has no such version.
         """
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         with self._unit_of_work_factory() as unit_of_work:
-            current = unit_of_work.annotations.get(annotation_id, include_deleted=True)
-            if current is None:
-                raise AnnotationHistoryNotFoundError(annotation_id)
-            try:
-                authorize_annotation(
-                    unit_of_work.annotations,
-                    context,
-                    PermissionAction.ANNOTATION_READ,
-                    current,
-                )
-            except AnnotationNotFoundError:
-                raise AnnotationHistoryNotFoundError(annotation_id) from None
+            load_authorized_annotation(
+                unit_of_work.annotations,
+                context,
+                PermissionAction.ANNOTATION_READ,
+                annotation_id,
+                include_deleted=True,
+            )
             record = unit_of_work.annotations.get_version(annotation_id, version)
             if record is None:
-                raise AnnotationHistoryNotFoundError(annotation_id, version)
+                raise AnnotationVersionNotFoundError(annotation_id, version)
             result = _annotation_version(record)
         return result
 

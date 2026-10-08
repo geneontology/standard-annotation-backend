@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict
 
@@ -96,6 +97,37 @@ def duplicate_base_signature(annotation: Annotation) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class DuplicateKey:
+    """Hold the values that decide whether two annotations are duplicates.
+
+    Two annotations are duplicates when their signatures are equal and their
+    reference sets overlap.
+
+    Attributes:
+        signature: `duplicate_base_signature` of the annotation.
+        references: Sorted, unique canonical references.
+    """
+
+    signature: str
+    references: tuple[str, ...]
+
+
+def duplicate_key(annotation: Annotation) -> DuplicateKey:
+    """Return the duplicate-detection key for an annotation.
+
+    Args:
+        annotation: Schema-validated annotation.
+
+    Returns:
+        The annotation's base signature and canonical references.
+    """
+    return DuplicateKey(
+        signature=duplicate_base_signature(annotation),
+        references=canonicalize_duplicate_fields(annotation).references,
+    )
+
+
 def are_duplicate_annotations(left: Annotation, right: Annotation) -> bool:
     """Compare two annotation payloads using the duplicate policy.
 
@@ -110,8 +142,7 @@ def are_duplicate_annotations(left: Annotation, right: Annotation) -> bool:
         True when the normalized non-reference fields match and the reference
         sets overlap; otherwise, False.
     """
-    left_fields = canonicalize_duplicate_fields(left)
-    right_fields = canonicalize_duplicate_fields(right)
-    if duplicate_base_signature(left) != duplicate_base_signature(right):
+    left_key, right_key = duplicate_key(left), duplicate_key(right)
+    if left_key.signature != right_key.signature:
         return False
-    return not set(left_fields.references).isdisjoint(right_fields.references)
+    return not set(left_key.references).isdisjoint(right_key.references)

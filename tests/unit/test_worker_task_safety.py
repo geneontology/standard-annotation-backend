@@ -123,7 +123,6 @@ def _job(job_id: UUID, job_type: JobType) -> Job:
         progress={},
         warnings=(),
         result=None,
-        artifact_uri=None,
         error=None,
         created_at=now,
         updated_at=now,

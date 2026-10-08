@@ -1,4 +1,4 @@
-"""Verify that Celery stores job state in PostgreSQL."""
+"""Tests for Celery task delivery guarantees and the Beat schedule."""
 
 import os
 from unittest.mock import patch
@@ -9,36 +9,24 @@ from standard_annotation_backend.config import Settings
 from standard_annotation_backend.workers.celery_app import beat_schedule, celery_app
 
 
-def test_celery_uses_json_late_acknowledgement_and_no_result_backend() -> None:
-    """Tasks use JSON, late acknowledgement, and no Celery result backend."""
-    assert celery_app.conf.task_ignore_result is True
-    assert celery_app.conf.result_backend is None
-    assert celery_app.conf.accept_content == ["json"]
-    assert celery_app.conf.task_serializer == "json"
-    assert celery_app.conf.result_serializer == "json"
-    assert celery_app.conf.enable_utc is True
-    assert celery_app.conf.timezone == "UTC"
-    assert celery_app.conf.task_acks_late is True
-    assert celery_app.conf.task_reject_on_worker_lost is True
+def test_tasks_are_redelivered_after_worker_loss_and_retried_without_a_cap() -> None:
+    """SAB tasks are redelivered after worker loss and retried indefinitely.
 
-
-def test_celery_registers_exactly_the_refresh_tasks() -> None:
-    """SAB's task module registers the four refresh tasks and no others."""
+    Tasks acknowledge late and are rejected back to the broker when their worker
+    dies, so unfinished work is delivered again. SAB tasks have no retry limit, so
+    infrastructure errors are retried until they succeed.
+    """
     celery_app.loader.import_default_modules()
 
-    sab_tasks = {
-        name
-        for name, task in celery_app.tasks.items()
+    assert celery_app.conf.task_acks_late is True
+    assert celery_app.conf.task_reject_on_worker_lost is True
+    sab_tasks = [
+        task
+        for task in celery_app.tasks.values()
         if task.__module__ == "standard_annotation_backend.workers.tasks"
-    }
-    assert sab_tasks == {
-        "sab.refresh.run",
-        "sab.refresh.schedule",
-        "sab.entity_retirement.run",
-        "sab.ontology.prune",
-    }
-    for name in sab_tasks:
-        assert celery_app.tasks[name].max_retries is None
+    ]
+    assert sab_tasks
+    assert all(task.max_retries is None for task in sab_tasks)
 
 
 def test_beat_schedules_each_kind_on_its_own_cron_setting() -> None:

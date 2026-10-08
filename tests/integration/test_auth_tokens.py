@@ -11,11 +11,13 @@ import httpx2
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from refresh_helpers import apply_users_yaml
 from source_provenance import github_provenance
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.auth import AuthenticationRequiredError
+from standard_annotation_backend.domain.tokens import InvalidTokenError
 from standard_annotation_backend.main import app
 from standard_annotation_backend.persistence.models import (
     ApiTokenRecord,
@@ -32,13 +34,7 @@ from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFacto
 from standard_annotation_backend.services.authentication_service import (
     AuthenticationService,
 )
-from standard_annotation_backend.services.authorization_refresh_service import (
-    AuthorizationRefreshService,
-)
-from standard_annotation_backend.services.token_service import (
-    InvalidTokenError,
-    TokenService,
-)
+from standard_annotation_backend.services.token_service import TokenService
 
 
 @pytest.fixture
@@ -269,6 +265,7 @@ def test_contexts_and_token_creation_are_owned_and_keep_secret_out_of_history(
         assert token.expires_at == datetime.fromisoformat(
             str(result["expires_at"]).replace("Z", "+00:00")
         )
+        token_expires_at = token.expires_at
         stored = session.execute(
             text("SELECT row_to_json(api_token) FROM api_token")
         ).scalar_one()
@@ -279,6 +276,10 @@ def test_contexts_and_token_creation_are_owned_and_keep_secret_out_of_history(
         assert event.actor_id == str(user_assignments["user_id"])
         assert event.details["token_id"] == str(token_id)
         assert set(event.details) == {"token_id", "assignment_id", "expires_at"}
+        assert event.details["assignment_id"] == str(user_assignments["assignment_id"])
+        assert (
+            datetime.fromisoformat(str(event.details["expires_at"])) == token_expires_at
+        )
         assert raw not in json.dumps(event.details) and digest not in json.dumps(
             event.details
         )
@@ -356,13 +357,51 @@ def test_invalid_expiration_never_persists_token_or_audit(
         },
     )
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
-    assert response.json()["error"]["code"] in {
-        "invalid_token",
-        "request_validation_error",
-    }
+    error = response.json()["error"]
+    assert error["code"] in {"invalid_token", "request_validation_error"}
+    assert error["details"]
+    assert all(
+        issue["location"][0] == "body" and "expires_at" in issue["location"]
+        for issue in error["details"]
+    )
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(ApiTokenRecord)) == 0
         assert session.scalar(select(func.count()).select_from(AuditEventRecord)) == 0
+
+
+def test_out_of_range_expiration_reports_a_located_invalid_token_issue(
+    management_client: TestClient,
+    user_assignments: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expiration outside the allowed lifetime is reported at `expires_at`."""
+    monkeypatch.setattr(
+        "standard_annotation_backend.services.token_service._utc_now",
+        lambda: datetime(2026, 9, 16, tzinfo=UTC),
+    )
+    response = management_client.post(
+        "/tokens",
+        json={
+            "name": "Notebook",
+            "assignment_id": str(user_assignments["assignment_id"]),
+            "expires_at": "2026-09-15T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json() == {
+        "error": {
+            "code": "invalid_token",
+            "message": "Token name, context, or expiration is invalid",
+            "details": [
+                {
+                    "location": ["body", "expires_at"],
+                    "message": "Token expiration is outside the allowed range",
+                    "type": "invalid_token",
+                }
+            ],
+        }
+    }
 
 
 def test_cross_user_assignment_and_tokens_return_nondisclosing_404(
@@ -494,8 +533,8 @@ def test_users_yaml_login_can_start_management_without_a_numeric_id(
 - accounts: {github: curator}
   authorizations: {sab: [{role: edit, scope: self, group: MGI}]}
 """
-    AuthorizationRefreshService(unit_of_work_factory).refresh(
-        source, github_provenance("a" * 40, "test/repo")
+    apply_users_yaml(
+        unit_of_work_factory, source, github_provenance("a" * 40, "test/repo")
     )
     _login(integration_api_client)
     assert len(integration_api_client.get("/tokens/contexts").json()["items"]) == 1
@@ -519,12 +558,13 @@ def test_changed_login_gets_new_identity_and_cannot_inherit_old_tokens(
     session_factory: sessionmaker[Session],
 ) -> None:
     """A renamed login requires a new grant and cannot inherit the old identity."""
-    service = AuthorizationRefreshService(unit_of_work_factory)
     source = """
 - accounts: {github: curator}
   authorizations: {sab: [{role: edit, scope: self, group: MGI}]}
 """
-    service.refresh(source, github_provenance("a" * 40, "test/repo"))
+    apply_users_yaml(
+        unit_of_work_factory, source, github_provenance("a" * 40, "test/repo")
+    )
     responses = list(github_http_responses)
     _login(integration_api_client)
     context = integration_api_client.get("/tokens/contexts").json()["items"][0]
@@ -534,7 +574,8 @@ def test_changed_login_gets_new_identity_and_cannot_inherit_old_tokens(
         assert original is not None
         original_id = original.user_id
 
-    service.refresh(
+    apply_users_yaml(
+        unit_of_work_factory,
         source.replace("github: curator", "github: renamed-curator"),
         github_provenance("b" * 40, "test/repo"),
     )
@@ -784,7 +825,7 @@ def test_creation_service_validates_names_without_an_http_boundary(
     """Non-HTTP callers cannot issue blank or overlong names through the service."""
     service = TokenService(unit_of_work_factory)
     raw = management_client.cookies["sab_token_management_session"]
-    with pytest.raises(InvalidTokenError):
+    with pytest.raises(InvalidTokenError) as raised:
         service.create_token(
             raw,
             {
@@ -793,6 +834,7 @@ def test_creation_service_validates_names_without_an_http_boundary(
                 "expires_at": _future_expiration(),
             },
         )
+    assert [issue["location"] for issue in raised.value.errors] == [("body", "name")]
     assert service.list_tokens(raw) == ()
 
 

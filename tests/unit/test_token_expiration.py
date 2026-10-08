@@ -5,7 +5,10 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from standard_annotation_backend.domain.tokens import resolve_expiration
+from standard_annotation_backend.domain.tokens import (
+    InvalidExpirationError,
+    resolve_expiration,
+)
 from standard_annotation_backend.services.token_service import TokenCreateInput
 
 
@@ -39,10 +42,10 @@ def test_expiration_accepts_exact_calendar_year_and_normalizes_utc() -> None:
 def test_expiry_must_be_future_and_no_later_than_calendar_year(
     expires_at: str,
 ) -> None:
-    """Past, equal, and one-microsecond-over-limit expirations are rejected."""
+    """Past, equal, and one-microsecond-over-limit expirations are client errors."""
     data = _input(expires_at)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidExpirationError):
         resolve_expiration(
             data.expires_at, datetime(2028, 2, 29, 12, 34, 56, tzinfo=UTC)
         )
@@ -58,5 +61,7 @@ def test_expiration_resolution_requires_timezone_on_creation_time() -> None:
     """Expiration resolution rejects an ambiguous creation timestamp."""
     data = _input("2029-01-01T00:00:00Z")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as caught:
         resolve_expiration(data.expires_at, datetime(2028, 1, 1))
+
+    assert not isinstance(caught.value, InvalidExpirationError)

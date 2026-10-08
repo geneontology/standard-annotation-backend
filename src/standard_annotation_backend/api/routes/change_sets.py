@@ -10,8 +10,9 @@ from standard_annotation_backend.api.dependencies import (
     get_change_set_service,
 )
 from standard_annotation_backend.api.errors import (
-    ANNOTATION_WRITE_VALIDATION_RESPONSE,
-    BEARER_ERROR_RESPONSES,
+    BEARER_ERRORS,
+    RequestValidationFailedError,
+    error_responses,
 )
 from standard_annotation_backend.api.examples import (
     CHANGE_SET_ACCEPT_EXAMPLES,
@@ -19,7 +20,6 @@ from standard_annotation_backend.api.examples import (
 )
 from standard_annotation_backend.api.models import (
     AcceptedChangeSetResource,
-    ApiErrorResponse,
     ChangeSetAcceptRequest,
     ChangeSetCreateRequest,
     ChangeSetPreviewResource,
@@ -28,18 +28,25 @@ from standard_annotation_backend.api.models import (
     ChangeSetResource,
     ChangeSetUpdateRequest,
 )
+from standard_annotation_backend.domain.annotations import (
+    AnnotationNotFoundError,
+    DuplicateAnnotationError,
+)
 from standard_annotation_backend.domain.auth import RequestContext
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetNotFoundError,
+    ChangeSetStateError,
+    InvalidChangeSetError,
+    StaleChangeSetError,
+)
+from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
 from standard_annotation_backend.services.change_set_service import ChangeSetService
 
 router = APIRouter(
     prefix="/change-sets",
     tags=["change-sets"],
     dependencies=[Depends(get_authenticated_context)],
-    responses={
-        **BEARER_ERROR_RESPONSES,
-        status.HTTP_404_NOT_FOUND: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ApiErrorResponse},
-    },
+    responses=error_responses(*BEARER_ERRORS),
 )
 
 
@@ -48,6 +55,11 @@ router = APIRouter(
     response_model=ChangeSetResource,
     status_code=status.HTTP_201_CREATED,
     responses={
+        **error_responses(
+            AnnotationNotFoundError,
+            InvalidChangeSetError,
+            RequestValidationFailedError,
+        ),
         status.HTTP_201_CREATED: {
             "headers": {
                 "Location": {
@@ -55,7 +67,7 @@ router = APIRouter(
                     "schema": {"type": "string"},
                 }
             }
-        }
+        },
     },
 )
 def propose_change_set(
@@ -95,7 +107,11 @@ def propose_change_set(
     return ChangeSetResource.from_service(result)
 
 
-@router.get("/{change_set_id}", response_model=ChangeSetResource)
+@router.get(
+    "/{change_set_id}",
+    response_model=ChangeSetResource,
+    responses=error_responses(ChangeSetNotFoundError, RequestValidationFailedError),
+)
 def get_change_set(
     change_set_id: UUID,
     service: Annotated[ChangeSetService, Depends(get_change_set_service)],
@@ -108,7 +124,9 @@ def get_change_set(
 @router.post(
     "/{change_set_id}/preview",
     response_model=ChangeSetPreviewResource,
-    responses={status.HTTP_409_CONFLICT: {"model": ApiErrorResponse}},
+    responses=error_responses(
+        ChangeSetNotFoundError, ChangeSetStateError, RequestValidationFailedError
+    ),
 )
 def preview_change_set(
     change_set_id: UUID,
@@ -124,10 +142,15 @@ def preview_change_set(
 @router.post(
     "/{change_set_id}/accept",
     response_model=AcceptedChangeSetResource,
-    responses={
-        status.HTTP_409_CONFLICT: {"model": ApiErrorResponse},
-        status.HTTP_422_UNPROCESSABLE_CONTENT: ANNOTATION_WRITE_VALIDATION_RESPONSE,
-    },
+    responses=error_responses(
+        ChangeSetNotFoundError,
+        ChangeSetStateError,
+        StaleChangeSetError,
+        DuplicateAnnotationError,
+        InvalidChangeSetError,
+        UnknownDbObjectIdError,
+        RequestValidationFailedError,
+    ),
 )
 def accept_change_set(
     change_set_id: UUID,
@@ -154,7 +177,12 @@ def accept_change_set(
 @router.post(
     "/{change_set_id}/reject",
     response_model=ChangeSetResource,
-    responses={status.HTTP_409_CONFLICT: {"model": ApiErrorResponse}},
+    responses=error_responses(
+        ChangeSetNotFoundError,
+        ChangeSetStateError,
+        InvalidChangeSetError,
+        RequestValidationFailedError,
+    ),
 )
 def reject_change_set(
     change_set_id: UUID,

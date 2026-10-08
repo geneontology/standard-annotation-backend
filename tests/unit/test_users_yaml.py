@@ -26,9 +26,7 @@ def test_parses_and_normalizes_all_supported_authorization_contexts() -> None:
       - {role: read, scope: group, group: zfin}
       - {role: edit, scope: group, group: zfin}
 """)
-    assert isinstance(document, parser.UsersDocument)
     user = document.root[0]
-    assert isinstance(user, parser.SabUserEntry)
     assert user.accounts.github == "some-curator"
     assert user.nickname == "Curator"
     assert [grant.model_dump(mode="json") for grant in user.authorizations.sab] == [

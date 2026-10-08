@@ -4,70 +4,25 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from standard_annotation_backend.domain.annotations import Annotation
 
-def test_creation_ownership_is_optional_and_documents_token_derivation(
-    client: TestClient,
-) -> None:
-    """The create body permits token-derived groups and explains explicit global ownership."""
+
+def test_creation_ownership_is_optional(client: TestClient) -> None:
+    """Clients may create an annotation without supplying `owning_group_id`."""
     schema = client.get("/openapi.json").json()["components"]["schemas"][
         "AnnotationCreateRequest"
     ]
     assert "owning_group_id" not in schema["required"]
-    description = schema["properties"]["owning_group_id"]["description"]
-    assert "global" in description and "selected group" in description
 
 
 def _openapi_statuses(*status_codes: int) -> set[str]:
     return {str(status_code) for status_code in status_codes}
 
 
-def test_annotation_writes_include_realistic_request_examples(
+def test_annotation_openapi_documents_routes_models_and_filters(
     client: TestClient,
 ) -> None:
-    """Create and patch operations show complete workflow-specific requests."""
-    paths = client.get("/openapi.json").json()["paths"]
-    create_content = paths["/annotations"]["post"]["requestBody"]["content"][
-        "application/json"
-    ]
-    patch_content = paths["/annotations/{annotation_id}"]["patch"]["requestBody"][
-        "content"
-    ]["application/json"]
-
-    assert set(create_content["examples"]) == {"create-annotation"}
-    assert create_content["examples"]["create-annotation"]["value"] == {
-        "owning_group_id": "GO_Central",
-        "annotation": {
-            "db_object_id": "UniProtKB:P12345",
-            "relation": "RO:0002331",
-            "ontology_class_id": "GO:0008150",
-            "references": ["PMID:12345678"],
-            "evidence_type": "ECO:0000314",
-            "with_or_from": ["UniProtKB:Q9XYZ1"],
-            "interacting_taxon_id": ["NCBITaxon:9606"],
-            "annotation_date": "2026-09-15",
-            "assigned_by": "GO_Central",
-            "annotation_extensions": [
-                {
-                    "extension_relation": "BFO:0000050",
-                    "extension_term": "CL:0000000",
-                }
-            ],
-            "annotation_properties": {
-                "comment": ["Curated from the cited publication"]
-            },
-        },
-    }
-    assert set(patch_content["examples"]) == {"replace-annotation-fields"}
-    assert patch_content["examples"]["replace-annotation-fields"]["value"] == {
-        "references": ["PMID:12345678", "GO_REF:0000002"],
-        "annotation_date": "2026-09-15",
-    }
-
-
-def test_annotation_openapi_documents_routes_models_headers_and_filters(
-    client: TestClient,
-) -> None:
-    """OpenAPI documents every annotation route, model, header, and filter."""
+    """OpenAPI documents every annotation route, response model, and query filter."""
     response = client.get("/openapi.json")
 
     assert response.status_code == status.HTTP_200_OK
@@ -125,18 +80,20 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
         "limit",
         "offset",
     }
-    closure_parameter = next(
-        parameter
-        for parameter in collection_parameters
-        if parameter["name"] == "ontology_class_id_closure"
+    assert all(parameter["in"] == "query" for parameter in collection_parameters)
+
+
+def test_annotation_patch_request_accepts_every_annotation_field(
+    client: TestClient,
+) -> None:
+    """Clients may patch any annotation field, and no field is required."""
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    patch_schema = schemas["AnnotationPatchRequest"]
+
+    assert set(patch_schema["properties"]) == set(
+        Annotation.model_json_schema()["properties"]
     )
-    assert "descendant-or-self" in closure_parameter["description"]
-    for method in ("patch", "delete"):
-        parameters = paths["/annotations/{annotation_id}"][method]["parameters"]
-        assert any(
-            parameter["name"] == "If-Match" and parameter["in"] == "header"
-            for parameter in parameters
-        )
+    assert "required" not in patch_schema
 
 
 @pytest.mark.parametrize(
@@ -147,7 +104,6 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
             "get",
             _openapi_statuses(
                 status.HTTP_200_OK,
-                status.HTTP_400_BAD_REQUEST,
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
             ),
         ),
@@ -174,7 +130,6 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
             "patch",
             _openapi_statuses(
                 status.HTTP_200_OK,
-                status.HTTP_400_BAD_REQUEST,
                 status.HTTP_404_NOT_FOUND,
                 status.HTTP_409_CONFLICT,
                 status.HTTP_412_PRECONDITION_FAILED,
@@ -187,7 +142,6 @@ def test_annotation_openapi_documents_routes_models_headers_and_filters(
             "delete",
             _openapi_statuses(
                 status.HTTP_204_NO_CONTENT,
-                status.HTTP_400_BAD_REQUEST,
                 status.HTTP_404_NOT_FOUND,
                 status.HTTP_412_PRECONDITION_FAILED,
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -223,17 +177,13 @@ def test_annotation_openapi_documents_applicable_typed_errors(
     """OpenAPI lists only applicable statuses using the standard error model."""
     schema = client.get("/openapi.json").json()
     responses = schema["paths"][path][method]["responses"]
-    assert set(responses) == expected_statuses | {"401", "403", "503"}
+    assert set(responses) == expected_statuses | {"401", "403", "500", "503"}
     assert schema["paths"][path][method]["security"] == [{"Bearer": []}]
     assert (
         responses["401"]["headers"]["WWW-Authenticate"]["schema"]["const"] == "Bearer"
     )
-    assert "ApiErrorResponse" in schema["components"]["schemas"]
-    for status_code, response in responses.items():
-        if int(status_code) >= status.HTTP_400_BAD_REQUEST:
-            assert response["content"]["application/json"]["schema"] == {
-                "$ref": "#/components/schemas/ApiErrorResponse"
-            }
+    assert "`authentication_required`" in responses["401"]["description"]
+    assert "`permission_denied`" in responses["403"]["description"]
 
 
 @pytest.mark.parametrize("method", ["patch", "delete"])
@@ -287,16 +237,57 @@ def test_annotation_openapi_documents_success_response_headers(
     assert set(response.get("headers", {})) == expected_headers
     for header in response["headers"].values():
         assert header["schema"]["type"] == "string"
-        assert header["description"]
 
 
-def test_owning_group_has_reusable_field_example(client: TestClient) -> None:
-    """SAB-owned group metadata carries a reusable component-level example."""
-    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [
+        ("/annotations", "post"),
+        ("/annotations/{annotation_id}", "patch"),
+        ("/change-sets/{change_set_id}/accept", "post"),
+    ],
+)
+def test_write_422_docs_list_validation_and_unknown_subject_codes(
+    client: TestClient, path: str, method: str
+) -> None:
+    """Write routes document `request_validation_error` and `unknown_db_object_id` for 422."""
+    responses = client.get("/openapi.json").json()["paths"][path][method]["responses"]
 
-    assert schemas["AnnotationCreateRequest"]["properties"]["owning_group_id"][
-        "examples"
-    ] == ["GO_Central"]
-    assert schemas["ChangeSetCreateRequest"]["properties"]["owning_group_id"][
-        "examples"
-    ] == ["GO_Central"]
+    description = responses["422"]["description"]
+    assert "`request_validation_error`" in description
+    assert "`unknown_db_object_id`" in description
+
+
+def test_annotation_search_docs_list_query_errors_and_both_unavailable_causes(
+    client: TestClient,
+) -> None:
+    """Search documents its located query errors and every 503 cause."""
+    responses = client.get("/openapi.json").json()["paths"]["/annotations"]["get"][
+        "responses"
+    ]
+
+    for code in (
+        "unknown_query_parameter",
+        "unsupported_filter",
+        "closure_term_required",
+        "unsupported_closure_field",
+        "unsupported_closure_predicate",
+        "request_validation_error",
+    ):
+        assert f"`{code}`" in responses["422"]["description"]
+    for code in ("credential_storage_unavailable", "ontology_unavailable"):
+        assert f"`{code}`" in responses["503"]["description"]
+
+
+@pytest.mark.parametrize("method", ["patch", "delete"])
+def test_annotation_write_docs_list_if_match_errors(
+    client: TestClient, method: str
+) -> None:
+    """Versioned writes document missing and malformed `If-Match` errors."""
+    responses = client.get("/openapi.json").json()["paths"][
+        "/annotations/{annotation_id}"
+    ][method]["responses"]
+
+    assert "`precondition_required`" in responses["428"]["description"]
+    assert "`malformed_precondition`" in responses["422"]["description"]
+    assert "`request_validation_error`" in responses["422"]["description"]

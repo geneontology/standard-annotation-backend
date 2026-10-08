@@ -21,49 +21,34 @@ from standard_annotation_backend.auth.secrets import (
     generate_secret,
     secret_matches,
 )
-from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
 )
 from standard_annotation_backend.domain.tokens import (
     TOKEN_MANAGEMENT_SESSION_TTL,
+    InvalidExpirationError,
+    InvalidTokenError,
+    ManagementSessionRequiredError,
+    OAuthCallbackError,
+    OAuthIdentityNotAllowedError,
+    OAuthStateError,
+    TokenContextNotFoundError,
     TokenMetadata,
+    TokenNotFoundError,
     resolve_expiration,
 )
+from standard_annotation_backend.domain.validation import (
+    ValidationIssue,
+    validation_issues,
+)
+from standard_annotation_backend.persistence.models import ApiTokenRecord
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
     credential_unit_of_work,
 )
-
-
-class OAuthStateError(Exception):
-    """Reject a callback without the browser's matching OAuth state."""
-
-
-class OAuthCallbackError(Exception):
-    """Reject a denied or incomplete OAuth callback without reflecting its query."""
-
-
-class OAuthIdentityNotAllowedError(Exception):
-    """Reject a GitHub login that is not in the synchronized authorization state."""
-
-
-class ManagementSessionRequiredError(Exception):
-    """Require a valid token-management session independently of bearer authority."""
-
-
-class TokenContextNotFoundError(Exception):
-    """Hide missing and differently owned authorization contexts equally."""
-
-
-class TokenNotFoundError(Exception):
-    """Hide missing and differently owned token IDs equally."""
-
-
-class InvalidTokenError(Exception):
-    """Report invalid creation input without retaining untrusted values."""
+from standard_annotation_backend.services.audit_service import AuditService
 
 
 class TokenCreateInput(BaseModel):
@@ -124,6 +109,26 @@ class CreatedToken:
 def _utc_now() -> datetime:
     """Return the current UTC time used for credential lifetime checks."""
     return datetime.now(UTC)
+
+
+def _token_metadata(
+    record: ApiTokenRecord, *, assignment_is_active: bool
+) -> TokenMetadata:
+    """Build safe token metadata from a token record, without its digest."""
+    return TokenMetadata(
+        token_id=record.token_id,
+        user_id=record.user_id,
+        assignment_id=record.assignment_id,
+        name=record.name,
+        created_at=record.created_at,
+        expires_at=record.expires_at,
+        last_used_at=record.last_used_at,
+        revoked_at=record.revoked_at,
+        role=AuthorizationRole(record.selected_role),
+        scope=AuthorizationScope(record.selected_scope),
+        group_id=record.selected_group_id,
+        assignment_is_active=assignment_is_active,
+    )
 
 
 class TokenService:
@@ -269,9 +274,19 @@ class TokenService:
             user_id = self._user_id(uow, raw_session, now)
             try:
                 data = TokenCreateInput.model_validate(payload)
+            except ValidationError as error:
+                raise InvalidTokenError(
+                    validation_issues(error, root=("body",))
+                ) from None
+            try:
                 expires_at = resolve_expiration(data.expires_at, now)
-            except (ValidationError, ValueError):
-                raise InvalidTokenError from None
+            except InvalidExpirationError:
+                issue = ValidationIssue(
+                    location=("body", "expires_at"),
+                    message="Token expiration is outside the allowed range",
+                    type=InvalidTokenError.code,
+                )
+                raise InvalidTokenError((issue,)) from None
             assignment = uow.auth.get_active_assignment(user_id, data.assignment_id)
             if assignment is None:
                 raise TokenContextNotFoundError
@@ -284,31 +299,12 @@ class TokenService:
                 created_at=now,
                 expires_at=expires_at,
             )
-            metadata = TokenMetadata(
-                token_id=record.token_id,
+            metadata = _token_metadata(record, assignment_is_active=True)
+            AuditService(uow.audit).record_token_created(
                 user_id=user_id,
+                token_id=record.token_id,
                 assignment_id=assignment.assignment_id,
-                name=record.name,
-                created_at=now,
                 expires_at=expires_at,
-                last_used_at=None,
-                revoked_at=None,
-                role=AuthorizationRole(assignment.role),
-                scope=AuthorizationScope(assignment.scope),
-                group_id=None
-                if assignment.group is None
-                else assignment.group.group_key,
-                assignment_is_active=True,
-            )
-            uow.audit.record(
-                action=AuditAction.TOKEN_CREATED,
-                actor_id=str(user_id),
-                result=AuditResult.SUCCESS,
-                details={
-                    "token_id": str(record.token_id),
-                    "assignment_id": str(assignment.assignment_id),
-                    "expires_at": expires_at.isoformat(),
-                },
             )
             uow.commit()
             return CreatedToken(raw, metadata)
@@ -328,7 +324,10 @@ class TokenService:
         """
         with credential_unit_of_work(self._unit_of_work_factory) as uow:
             user_id = self._user_id(uow, raw_session, _utc_now())
-            return uow.auth.list_tokens(user_id)
+            return tuple(
+                _token_metadata(record, assignment_is_active=is_active)
+                for record, is_active in uow.auth.list_tokens(user_id)
+            )
 
     def revoke_token(self, raw_session: str | None, token_id: UUID) -> None:
         """Revoke an owned token and commit its audit event in the same transaction.
@@ -347,10 +346,7 @@ class TokenService:
             user_id = self._user_id(uow, raw_session, now)
             if not uow.auth.revoke_token(user_id, token_id, revoked_at=now):
                 raise TokenNotFoundError
-            uow.audit.record(
-                action=AuditAction.TOKEN_REVOKED,
-                actor_id=str(user_id),
-                result=AuditResult.SUCCESS,
-                details={"token_id": str(token_id)},
+            AuditService(uow.audit).record_token_revoked(
+                user_id=user_id, token_id=token_id
             )
             uow.commit()

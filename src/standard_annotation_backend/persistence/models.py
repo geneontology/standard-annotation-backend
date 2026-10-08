@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from enum import StrEnum
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -24,9 +25,62 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
+from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator, TypeEngine
 
-from standard_annotation_backend.domain.annotations import new_annotation_id
+from standard_annotation_backend.domain.annotations import (
+    AnnotationOrigin,
+    AnnotationStatus,
+    ChangeSource,
+    new_annotation_id,
+)
+from standard_annotation_backend.domain.audit import AuditAction, AuditResult
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetOperation,
+    ChangeSetState,
+)
+from standard_annotation_backend.domain.jobs import JobStatus, JobType
+
+
+class StrEnumColumn[E: StrEnum](TypeDecorator[E]):
+    """Store a string enum in a `VARCHAR` column and load it back as the enum.
+
+    The database column type is unchanged; only the Python value changes from
+    `str` to the enum. Writing a value that is not an enum member raises
+    `ValueError` before the statement runs.
+
+    Args:
+        enum_type: Enum whose values the column stores.
+        length: Maximum length of the `VARCHAR` column.
+    """
+
+    impl = String
+    cache_ok = True
+
+    def __init__(self, enum_type: type[E], length: int) -> None:
+        super().__init__(length)
+        self.enum_type = enum_type
+        self.length = length
+
+    def coerce_compared_value(self, op: object, value: object) -> TypeEngine[Any]:
+        """Compare with plain strings, such as `LIKE` patterns, as `VARCHAR`.
+
+        Only enum members are converted, so filters may use any string while
+        writes still require an enum value.
+        """
+        if isinstance(value, self.enum_type):
+            return self
+        return String(self.length)
+
+    def process_bind_param(self, value: E | str | None, dialect: Dialect) -> str | None:
+        """Convert an enum member, or its value, to the stored string."""
+        return None if value is None else self.enum_type(value).value
+
+    def process_result_value(self, value: str | None, dialect: Dialect) -> E | None:
+        """Convert a stored string to its enum member."""
+        return None if value is None else self.enum_type(value)
+
 
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
@@ -35,37 +89,6 @@ NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
-
-
-class AnnotationStatus(StrEnum):
-    """Values stored in an annotation's status column."""
-
-    ACTIVE = "active"
-    DELETED = "deleted"
-
-
-class AnnotationOrigin(StrEnum):
-    """Ways an annotation can enter the database."""
-
-    DIRECT = "direct"
-    IMPORT = "import"
-
-
-class ChangeSetOperation(StrEnum):
-    """Operations that a proposal can request."""
-
-    CREATE = "create"
-    UPDATE = "update"
-    DELETE = "delete"
-
-
-class ChangeSetState(StrEnum):
-    """Review states persisted for a change set."""
-
-    PROPOSED = "proposed"
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
-    STALE = "stale"
 
 
 class Base(DeclarativeBase):
@@ -328,8 +351,8 @@ class JobRecord(Base):
     job_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
     )
-    job_type: Mapped[str] = mapped_column(String(100))
-    status: Mapped[str] = mapped_column(String(50))
+    job_type: Mapped[JobType] = mapped_column(StrEnumColumn(JobType, 100))
+    status: Mapped[JobStatus] = mapped_column(StrEnumColumn(JobStatus, 50))
     requested_by: Mapped[str] = mapped_column(Text)
     parameters: Mapped[dict[str, object]] = mapped_column(
         JSONB, default=dict, server_default=text("'{}'::jsonb")
@@ -341,7 +364,6 @@ class JobRecord(Base):
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
     result: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
-    artifact_uri: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -661,12 +683,14 @@ class AnnotationRecord(Base):
     )
     annotation_data: Mapped[dict[str, object]] = mapped_column(JSONB)
     current_version: Mapped[int] = mapped_column(Integer, default=1)
-    status: Mapped[str] = mapped_column(
-        String(16), default=AnnotationStatus.ACTIVE.value
+    status: Mapped[AnnotationStatus] = mapped_column(
+        StrEnumColumn(AnnotationStatus, 16), default=AnnotationStatus.ACTIVE
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     owning_group_id: Mapped[str] = mapped_column(Text)
-    record_origin: Mapped[str] = mapped_column(String(32))
+    record_origin: Mapped[AnnotationOrigin] = mapped_column(
+        StrEnumColumn(AnnotationOrigin, 32)
+    )
     source_import_job_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True), ForeignKey("job.job_id")
     )
@@ -701,7 +725,9 @@ class AnnotationVersionRecord(Base):
     annotation_data: Mapped[dict[str, object]] = mapped_column(JSONB)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     actor_id: Mapped[str] = mapped_column(Text)
-    change_source: Mapped[str] = mapped_column(String(100))
+    change_source: Mapped[ChangeSource] = mapped_column(
+        StrEnumColumn(ChangeSource, 100)
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -853,8 +879,12 @@ class ChangeSetRecord(Base):
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
-    operation: Mapped[str] = mapped_column(String(16))
-    state: Mapped[str] = mapped_column(String(16), server_default=text("'proposed'"))
+    operation: Mapped[ChangeSetOperation] = mapped_column(
+        StrEnumColumn(ChangeSetOperation, 16)
+    )
+    state: Mapped[ChangeSetState] = mapped_column(
+        StrEnumColumn(ChangeSetState, 16), server_default=text("'proposed'")
+    )
     owning_group_id: Mapped[str] = mapped_column(Text)
     annotation_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
@@ -1081,9 +1111,9 @@ class AuditEventRecord(Base):
     audit_event_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
     )
-    action: Mapped[str] = mapped_column(String(100))
+    action: Mapped[AuditAction] = mapped_column(StrEnumColumn(AuditAction, 100))
     actor_id: Mapped[str] = mapped_column(Text)
-    result: Mapped[str] = mapped_column(String(50))
+    result: Mapped[AuditResult] = mapped_column(StrEnumColumn(AuditResult, 50))
     token_id: Mapped[str | None] = mapped_column(Text)
     token_name: Mapped[str | None] = mapped_column(Text)
     selected_role: Mapped[str | None] = mapped_column(String(100))

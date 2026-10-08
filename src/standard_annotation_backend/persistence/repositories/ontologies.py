@@ -1,14 +1,16 @@
 """Persist immutable ontology snapshots in caller-managed transactions."""
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from datetime import datetime
-from itertools import islice
+from itertools import batched
 from uuid import UUID
 
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.jobs import ACTIVE_JOB_STATUSES
 from standard_annotation_backend.domain.ontology import (
+    OntologyCandidateConflictError,
     OntologyClosureRow,
     OntologyDocument,
     OntologyKey,
@@ -46,9 +48,41 @@ class OntologyRepository:
         snapshot: OntologySnapshot,
         closure_rows: Iterable[OntologyClosureRow],
     ) -> OntologyMetadataRecord:
-        """Persist a complete inactive snapshot and flush all of its rows."""
+        """Persist a complete inactive snapshot and flush all of its rows.
+
+        Each job stages at most one snapshot. If the job already staged a snapshot
+        from the same source, that existing snapshot is returned unchanged, so a
+        retried job resumes its own candidate instead of staging another one.
+
+        Returns:
+            The job's staged snapshot metadata.
+
+        Raises:
+            ValueError: If `snapshot` was not parsed from `document`.
+            OntologyCandidateConflictError: If the job already staged a snapshot
+                from a different source type, locator, revision, or checksum.
+        """
         if snapshot.document != document:
             raise ValueError("snapshot document does not match staged document")
+        existing = self.get_by_job(job_id)
+        if existing is not None:
+            if (
+                existing.ontology_key,
+                existing.source_type,
+                existing.source_locator,
+                existing.source_revision,
+                existing.source_checksum,
+            ) != (
+                document.ontology_key.value,
+                document.source_type,
+                document.source_locator,
+                document.source_revision,
+                document.source_checksum,
+            ):
+                raise OntologyCandidateConflictError(
+                    "staged ontology source differs from the resolved document"
+                )
+            return existing
         record = OntologyMetadataRecord(
             ontology_key=document.ontology_key.value,
             source_type=document.source_type,
@@ -74,7 +108,7 @@ class OntologyRepository:
             }
             for term in sorted(snapshot.terms.values(), key=lambda value: value.term_id)
         )
-        for batch in _batches(term_rows):
+        for batch in batched(term_rows, _INSERT_BATCH_SIZE, strict=False):
             self.session.execute(insert(OntologyTermRecord), batch)
 
         closure_values = (
@@ -87,7 +121,7 @@ class OntologyRepository:
             }
             for row in closure_rows
         )
-        for batch in _batches(closure_values):
+        for batch in batched(closure_values, _INSERT_BATCH_SIZE, strict=False):
             self.session.execute(insert(OntologyClosureRecord), batch)
         self.session.flush()
         return record
@@ -103,7 +137,17 @@ class OntologyRepository:
     def lock_activation_state(
         self, job_id: UUID
     ) -> tuple[OntologyMetadataRecord, OntologyMetadataRecord | None]:
-        """Lock and return a job's candidate and the active snapshot for its key."""
+        """Lock and return a job's candidate and the active snapshot for its key.
+
+        The active snapshot is the candidate itself when the candidate was already
+        activated. Snapshots are ordered by when they were staged, so a candidate
+        staged before the active snapshot can never replace it.
+
+        Raises:
+            OntologyVersionNotFoundError: If the job has not staged a snapshot.
+            OntologyCandidateConflictError: If the candidate is inactive and a
+                snapshot staged after it is already active.
+        """
         candidate = self.session.scalar(
             select(OntologyMetadataRecord)
             .where(OntologyMetadataRecord.job_id == job_id)
@@ -129,6 +173,12 @@ class OntologyRepository:
         )
         if candidate.active:
             active = candidate
+        elif (
+            active is not None and active.staging_sequence > candidate.staging_sequence
+        ):
+            raise OntologyCandidateConflictError(
+                "a newer ontology snapshot is already active"
+            )
         return candidate, active
 
     def get_active(self, key: OntologyKey) -> OntologyMetadataRecord | None:
@@ -220,7 +270,7 @@ class OntologyRepository:
             for record, status in rows
             if not record.active
             and record is not predecessor
-            and status not in {"queued", "running"}
+            and status not in ACTIVE_JOB_STATUSES
         )
         version_ids = tuple(record.version_id for record in candidates)
         if not version_ids:
@@ -244,11 +294,6 @@ class OntologyRepository:
         self.session.flush(candidates)
         return version_ids
 
-    def closure_supported(self, key: OntologyKey, predicate_id: str) -> bool:
-        """Return whether the active snapshot loaded closure for a predicate."""
-        active = self.get_active(key)
-        return active is not None and predicate_id in active.loaded_predicates
-
     def list_terms(self, version_id: UUID) -> list[OntologyTermRecord]:
         """Return snapshot terms in stable identifier order."""
         self._require_complete(version_id)
@@ -257,21 +302,6 @@ class OntologyRepository:
                 select(OntologyTermRecord)
                 .where(OntologyTermRecord.version_id == version_id)
                 .order_by(OntologyTermRecord.term_id)
-            )
-        )
-
-    def list_closure(self, version_id: UUID) -> list[OntologyClosureRecord]:
-        """Return snapshot closure in stable subject, predicate, and object order."""
-        self._require_complete(version_id)
-        return list(
-            self.session.scalars(
-                select(OntologyClosureRecord)
-                .where(OntologyClosureRecord.version_id == version_id)
-                .order_by(
-                    OntologyClosureRecord.subject_term_id,
-                    OntologyClosureRecord.predicate_id,
-                    OntologyClosureRecord.object_term_id,
-                )
             )
         )
 
@@ -335,10 +365,3 @@ class OntologyRepository:
         if record.bulk_data_pruned_at is not None:
             raise OntologySnapshotPrunedError(version_id)
         return record
-
-
-def _batches[T](rows: Iterable[T]) -> Iterator[list[T]]:
-    """Yield lists of at most 5,000 rows without loading every row at once."""
-    iterator = iter(rows)
-    while batch := list(islice(iterator, _INSERT_BATCH_SIZE)):
-        yield batch

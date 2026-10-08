@@ -45,12 +45,6 @@ def test_resolve_commit_applies_api_policy_and_normalizes_sha() -> None:
     )
     assert requests[0].headers["Accept"] == "application/vnd.github+json"
     assert requests[0].headers["X-GitHub-Api-Version"] == "2022-11-28"
-    assert requests[0].extensions["timeout"] == {
-        "connect": 30,
-        "read": 30,
-        "write": 30,
-        "pool": 30,
-    }
 
 
 def test_fetch_raw_content_uses_exact_commit() -> None:

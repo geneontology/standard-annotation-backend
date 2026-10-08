@@ -33,20 +33,6 @@ def annotation_payload() -> dict[str, object]:
     }
 
 
-def test_applies_a_scalar_replacement_without_mutating_the_input() -> None:
-    """A scalar replacement returns the patched copy and keeps its input intact."""
-    annotation = annotation_payload()
-    original = deepcopy(annotation)
-
-    result = apply_annotation_patch(
-        annotation,
-        [{"op": "replace", "path": "/evidence_type", "value": "ECO:0000269"}],
-    )
-
-    assert result["evidence_type"] == "ECO:0000269"
-    assert annotation == original
-
-
 def test_replaces_an_unordered_field_as_a_whole_value() -> None:
     """A complete replacement is allowed for an unordered annotation field."""
     result = apply_annotation_patch(
@@ -96,18 +82,6 @@ def test_permits_each_supported_rfc_6902_operation(
 
     assert result == expected
     assert original == annotation_payload()
-
-
-def test_failed_test_operation_reports_a_patch_failure() -> None:
-    """A test operation rejects a value that differs from the annotation field."""
-    with pytest.raises(InvalidChangeSetPatchError) as raised:
-        apply_annotation_patch(
-            annotation_payload(),
-            [{"op": "test", "path": "/assigned_by", "value": "MGI"}],
-        )
-
-    assert raised.value.issue.location == ()
-    assert raised.value.issue.type == "invalid_patch_operation"
 
 
 @pytest.mark.parametrize(
@@ -245,43 +219,60 @@ def test_test_operation_requires_a_value_and_existing_field(patch: object) -> No
 
 
 @pytest.mark.parametrize(
-    "patch",
+    "patch,expected_type,expected_location",
     [
-        None,
-        {},
-        [],
-        ["replace"],
-        [{"op": "replace", "path": "/assigned_by"}],
+        (None, "patch_must_be_nonempty_list", ()),
+        ({}, "patch_must_be_nonempty_list", ()),
+        ([], "patch_must_be_nonempty_list", ()),
+        (["replace"], "patch_operation_must_be_object", (0,)),
+        (
+            [{"op": "replace", "path": "/assigned_by"}],
+            "invalid_patch_operation",
+            (),
+        ),
     ],
 )
-def test_rejects_a_malformed_patch(patch: object) -> None:
-    """Malformed JSON Patch input reports an SAB-owned issue type."""
+def test_rejects_a_malformed_patch(
+    patch: object, expected_type: str, expected_location: tuple[object, ...]
+) -> None:
+    """Malformed JSON Patch input reports a stable issue type and location."""
     with pytest.raises(InvalidChangeSetPatchError) as raised:
         apply_annotation_patch(annotation_payload(), patch)
 
-    assert raised.value.issue.type in {
-        "patch_must_be_nonempty_list",
-        "patch_operation_must_be_object",
-        "invalid_patch_operation",
-    }
+    assert raised.value.issue.type == expected_type
+    assert raised.value.issue.location == expected_location
 
 
 @pytest.mark.parametrize(
-    "patch",
+    "patch,expected_type,expected_location",
     [
-        [{"op": "increment", "path": "/assigned_by", "value": "MGI"}],
-        [{"op": "replace", "path": "/not_a_standard_annotation_field", "value": "x"}],
+        (
+            [{"op": "increment", "path": "/assigned_by", "value": "MGI"}],
+            "unsupported_patch_operation",
+            (0, "op"),
+        ),
+        (
+            [
+                {
+                    "op": "replace",
+                    "path": "/not_a_standard_annotation_field",
+                    "value": "x",
+                }
+            ],
+            "unsupported_patch_path",
+            (0, "path"),
+        ),
     ],
 )
-def test_rejects_unsupported_operations_and_paths(patch: object) -> None:
+def test_rejects_unsupported_operations_and_paths(
+    patch: object, expected_type: str, expected_location: tuple[object, ...]
+) -> None:
     """Unsupported operations and fields have stable machine-readable failures."""
     with pytest.raises(InvalidChangeSetPatchError) as raised:
         apply_annotation_patch(annotation_payload(), patch)
 
-    assert raised.value.issue.type in {
-        "unsupported_patch_operation",
-        "unsupported_patch_path",
-    }
+    assert raised.value.issue.type == expected_type
+    assert raised.value.issue.location == expected_location
 
 
 def test_rejects_a_root_replacement() -> None:

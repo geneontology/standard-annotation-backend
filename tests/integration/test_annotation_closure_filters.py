@@ -120,39 +120,67 @@ def _load_active_ontology(unit_of_work_factory: UnitOfWorkFactory) -> None:
 
 
 @pytest.mark.parametrize(
-    ("params", "expected_status", "expected_code"),
+    ("params", "expected_code", "expected_message", "expected_location"),
     [
         (
             {"ontology_class_id_closure": "rdfs:subClassOf"},
-            status.HTTP_400_BAD_REQUEST,
             "closure_term_required",
+            "ontology_class_id is required for closure search",
+            ["query", "ontology_class_id"],
         ),
         (
             {"evidence_type_closure": "rdfs:subClassOf"},
-            status.HTTP_400_BAD_REQUEST,
             "unsupported_closure_field",
-        ),
-        (
-            {
-                "ontology_class_id": "GO:1",
-                "ontology_class_id_closure": "rdfs:subClassOf",
-            },
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "ontology_unavailable",
+            "Closure search is supported only for ontology_class_id",
+            ["query", "evidence_type_closure"],
         ),
     ],
 )
-def test_closure_filter_errors_are_stable(
+def test_closure_filter_input_errors_are_located(
     integration_api_client: TestClient,
     params: dict[str, str],
-    expected_status: int,
     expected_code: str,
+    expected_message: str,
+    expected_location: list[str],
 ) -> None:
-    """Invalid closure requests use stable statuses and machine-readable codes."""
+    """Invalid closure requests return 422 with the offending query parameter."""
     response = integration_api_client.get("/annotations", params=params)
 
-    assert response.status_code == expected_status
-    assert response.json()["error"]["code"] == expected_code
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json() == {
+        "error": {
+            "code": expected_code,
+            "message": expected_message,
+            "details": [
+                {
+                    "location": expected_location,
+                    "message": expected_message,
+                    "type": expected_code,
+                }
+            ],
+        }
+    }
+
+
+def test_closure_filter_without_active_ontology_is_unavailable(
+    integration_api_client: TestClient,
+) -> None:
+    """Closure search without an active ontology returns 503 without details."""
+    response = integration_api_client.get(
+        "/annotations",
+        params={
+            "ontology_class_id": "GO:1",
+            "ontology_class_id_closure": "rdfs:subClassOf",
+        },
+    )
+
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert response.json() == {
+        "error": {
+            "code": "ontology_unavailable",
+            "message": "The ontology required for closure search is unavailable",
+        }
+    }
 
 
 def test_closure_filter_rejects_predicate_not_loaded_by_active_snapshot(
@@ -170,8 +198,21 @@ def test_closure_filter_rejects_predicate_not_loaded_by_active_snapshot(
         },
     )
 
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert response.json()["error"]["code"] == "unsupported_closure_predicate"
+    message = "Closure predicate is not loaded for the active ontology"
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json() == {
+        "error": {
+            "code": "unsupported_closure_predicate",
+            "message": message,
+            "details": [
+                {
+                    "location": ["query", "ontology_class_id_closure"],
+                    "message": message,
+                    "type": "unsupported_closure_predicate",
+                }
+            ],
+        }
+    }
 
 
 def test_closure_filter_combines_descendants_with_other_filters(

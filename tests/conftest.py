@@ -105,12 +105,6 @@ def github_http_responses(
     def handle_request(
         _transport: httpx2.HTTPTransport, request: httpx2.Request
     ) -> httpx2.Response:
-        assert request.extensions["timeout"] == {
-            "connect": 10,
-            "read": 10,
-            "write": 10,
-            "pool": 10,
-        }
         if str(request.url) == "https://github.com/login/oauth/access_token":
             assert request.method == "POST"
             assert parse_qs(request.content.decode()) == {

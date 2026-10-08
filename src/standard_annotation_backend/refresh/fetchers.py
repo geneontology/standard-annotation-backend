@@ -2,22 +2,22 @@
 
 There is one fetcher per source type. Both return a `SourceDocument`: the
 downloaded bytes plus provenance that identifies exactly what was fetched. Each
-refresh kind decodes the bytes itself. Failures raise `SourceError` with a fixed
+refresh service decodes the bytes itself. Failures raise `SourceError` with a fixed
 code; messages and logs never include URLs or content.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import Protocol
 
 import httpx2
 
 from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
-    SourceProvenance,
+    SourceDocument,
+    TerminalRefreshError,
 )
 from standard_annotation_backend.integrations.github import (
     GitHubClient,
@@ -36,58 +36,24 @@ _RETRIEVAL_CODES = frozenset(
 )
 
 
-@dataclass(frozen=True, slots=True)
-class SourceDocument:
-    """Contain fetched bytes and the provenance that identifies them.
-
-    Attributes:
-        source_key: Configured key of the fetched source.
-        source_type: `github` or `https`.
-        source_locator: `github:<repository>:<path>`, or the configured URL even
-            when redirects were followed.
-        source_revision: Resolved commit SHA for GitHub sources, otherwise `None`.
-        source_checksum: Lowercase SHA-256 of `content`.
-        fetched_at: When retrieval completed.
-        content: The downloaded bytes, before any decompression.
-    """
-
-    source_key: str
-    source_type: Literal["github", "https"]
-    source_locator: str
-    source_revision: str | None
-    source_checksum: str
-    fetched_at: datetime
-    content: bytes = field(repr=False)
-
-    @property
-    def provenance(self) -> SourceProvenance:
-        """Return the provenance fields stored with every snapshot."""
-        return SourceProvenance(
-            source_type=self.source_type,
-            source_locator=self.source_locator,
-            source_revision=self.source_revision,
-            source_checksum=self.source_checksum,
-            fetched_at=self.fetched_at,
-        )
-
-
-class SourceError(RuntimeError):
+class SourceError(TerminalRefreshError):
     """Report a retrieval or decoding failure with a fixed code.
 
     Attributes:
         code: One of `source_error`, `http_status`, `timeout`, `invalid_gzip`, or
-            `invalid_utf8`. Any other value is recorded as `source_error`.
+            `invalid_utf8`.
+
+    Raises:
+        ValueError: If `code` is not one of those retrieval codes.
     """
 
-    def __init__(self, code: RefreshFailureCode | str) -> None:
-        try:
-            parsed = RefreshFailureCode(code)
-        except ValueError:
-            parsed = RefreshFailureCode.SOURCE_ERROR
-        self.code = (
-            parsed if parsed in _RETRIEVAL_CODES else RefreshFailureCode.SOURCE_ERROR
+    def __init__(self, code: RefreshFailureCode) -> None:
+        if code not in _RETRIEVAL_CODES:
+            raise ValueError("source errors require a retrieval failure code")
+        self.code = code
+        super().__init__(
+            f"Source retrieval failed: {self.code.value}", failure_code=self.code
         )
-        super().__init__(f"Source retrieval failed: {self.code.value}")
 
 
 class SourceFetcher(Protocol):

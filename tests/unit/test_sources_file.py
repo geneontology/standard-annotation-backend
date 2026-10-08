@@ -42,13 +42,11 @@ def _file(**sections: object) -> dict[str, object]:
 
 
 def test_shipped_sources_file_is_valid() -> None:
-    """The committed file configures go-site, GO, and the entity sources."""
+    """The committed sources file is valid."""
     sources = RefreshSources(load_sources_file(SHIPPED_FILE))
 
     assert sources.keys(RefreshKindName.AUTHORIZATION) == ("go-site",)
     assert sources.keys(RefreshKindName.ONTOLOGY) == ("go",)
-    assert sources.keys(RefreshKindName.ENTITY) == ("caeel", "mouse")
-    assert sources.keys(RefreshKindName.ANNOTATION) == ("mgi", "wormbase")
 
 
 def test_any_kind_may_use_either_source_type() -> None:

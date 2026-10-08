@@ -3,9 +3,9 @@
 Every method works in the caller's transaction; the caller commits.
 """
 
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
-from itertools import islice
+from itertools import batched
 from uuid import UUID
 
 from sqlalchemy import delete, false, func, insert, literal, null, or_, select
@@ -14,17 +14,22 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotation_management import (
+    STORED_REJECTION_REPORT,
     AnnotationImportConflictError,
     AnnotationManagementMode,
-    AnnotationRefreshResult,
     CutoverRejectedError,
     GroupSabManagedError,
     RejectionReport,
     RejectionReportBuilder,
     unknown_subject_rejection,
 )
-from standard_annotation_backend.domain.annotations import new_annotation_id
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.annotations import (
+    AnnotationOrigin,
+    AnnotationStatus,
+    ChangeSource,
+    new_annotation_id,
+)
+from standard_annotation_backend.domain.jobs import TERMINAL_JOB_STATUSES, JobType
 from standard_annotation_backend.domain.refresh import SourceProvenance
 from standard_annotation_backend.gpad.parser import ParsedAnnotation
 from standard_annotation_backend.persistence.annotation_data import (
@@ -38,12 +43,10 @@ from standard_annotation_backend.persistence.models import (
     AnnotationDuplicateReferenceRecord,
     AnnotationImportRecord,
     AnnotationMultivaluedFieldValueRecord,
-    AnnotationOrigin,
     AnnotationRecord,
     AnnotationStagingDuplicateReferenceRecord,
     AnnotationStagingMultivaluedValueRecord,
     AnnotationStagingRecord,
-    AnnotationStatus,
     AnnotationVersionRecord,
     AuditEventRecord,
     ChangeSetRecord,
@@ -51,11 +54,10 @@ from standard_annotation_backend.persistence.models import (
     GroupAnnotationManagementRecord,
     JobRecord,
 )
+from standard_annotation_backend.persistence.repositories.jobs import lock_job_record
 
-_GPAD_JOB_TYPES = frozenset(
-    {JobType.ANNOTATION_REFRESH.value, JobType.ANNOTATION_CUTOVER.value}
-)
-_SYSTEM_CHANGE_SOURCES = ("ontology_refresh",)
+_GPAD_JOB_TYPES = frozenset({JobType.ANNOTATION_REFRESH, JobType.ANNOTATION_CUTOVER})
+_SYSTEM_CHANGE_SOURCES = (ChangeSource.ONTOLOGY_REFRESH,)
 """Version sources that are system maintenance rather than local edits."""
 _INSERT_BATCH_SIZE = 5_000
 
@@ -75,12 +77,7 @@ class AnnotationImportRepository:
             AnnotationImportConflictError: If the job does not exist or is not a
                 GPAD job.
         """
-        job = self.session.scalar(
-            select(JobRecord)
-            .where(JobRecord.job_id == job_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+        job = lock_job_record(self.session, job_id)
         if job is None or job.job_type not in _GPAD_JOB_TYPES:
             raise AnnotationImportConflictError
         return job
@@ -150,46 +147,18 @@ class AnnotationImportRepository:
         for parsed in annotations:
             annotation_id = new_annotation_id()
             data = prepare_annotation_for_persistence(parsed.annotation)
+            keys = {"job_id": job_id, "annotation_id": annotation_id}
             staged.append(
-                {
-                    "job_id": job_id,
-                    "annotation_id": annotation_id,
-                    "line_number": parsed.line_number,
-                    "annotation_data": data.annotation_data,
-                    "duplicate_base_signature": data.duplicate_base_signature,
-                    "db_object_id": data.db_object_id,
-                    "negation": data.negation,
-                    "relation": data.relation,
-                    "ontology_class_id": data.ontology_class_id,
-                    "evidence_type": data.evidence_type,
-                    "annotation_date": data.annotation_date,
-                    "assigned_by": data.assigned_by,
-                }
+                {**keys, "line_number": parsed.line_number, **data.column_values()}
             )
-            multivalued.extend(
-                {
-                    "job_id": job_id,
-                    "annotation_id": annotation_id,
-                    "field_name": value.field_name,
-                    "field_value": value.field_value,
-                }
-                for value in data.multivalued_field_values
-            )
-            references.extend(
-                {
-                    "job_id": job_id,
-                    "annotation_id": annotation_id,
-                    "canonical_reference": reference,
-                    "duplicate_base_signature": data.duplicate_base_signature,
-                }
-                for reference in data.canonical_references
-            )
+            multivalued.extend({**keys, **row} for row in data.multivalued_rows())
+            references.extend({**keys, **row} for row in data.reference_rows())
         for model, rows in (
             (AnnotationStagingRecord, staged),
             (AnnotationStagingMultivaluedValueRecord, multivalued),
             (AnnotationStagingDuplicateReferenceRecord, references),
         ):
-            for batch in _batches(rows):
+            for batch in batched(rows, _INSERT_BATCH_SIZE, strict=False):
                 self.session.execute(insert(model), batch)
 
     def record_staged(
@@ -220,19 +189,19 @@ class AnnotationImportRepository:
             data_rows=data_rows,
             annotations_staged=annotations_staged,
             records_rejected=report.issue_count,
-            rejection_report=report.to_json(),
+            rejection_report=STORED_REJECTION_REPORT.dump(report),
             staged_at=datetime.now(UTC),
         )
         self.session.add(record)
         self.session.flush([record])
         return record
 
-    def published_result(self, job_id: UUID) -> AnnotationRefreshResult | None:
-        """Return a job's publication result, or `None` if it has not published."""
+    def published_import(self, job_id: UUID) -> AnnotationImportRecord | None:
+        """Return a job's import record, or `None` if it has not published."""
         record = self.session.get(AnnotationImportRecord, job_id)
         if record is None or record.published_at is None:
             return None
-        return _result(record)
+        return record
 
     def last_import(self, group_key: str) -> AnnotationImportRecord | None:
         """Return the group's most recently published import, if any."""
@@ -264,7 +233,7 @@ class AnnotationImportRepository:
             # through an accepted change set, or left from an earlier import.
             group_annotations.where(
                 or_(
-                    AnnotationRecord.record_origin != AnnotationOrigin.IMPORT.value,
+                    AnnotationRecord.record_origin != AnnotationOrigin.IMPORT,
                     AnnotationRecord.source_import_job_id.is_distinct_from(
                         import_job_id
                     ),
@@ -305,10 +274,10 @@ class AnnotationImportRepository:
                 GPAD job.
         """
         job = self.lock_job(job_id)
-        if job.status in {"failed", "succeeded"}:
+        if job.status in TERMINAL_JOB_STATUSES:
             self.discard_unpublished(job_id)
 
-    def publish(self, job_id: UUID, *, actor_id: str) -> AnnotationRefreshResult:
+    def publish(self, job_id: UUID, *, actor_id: str) -> AnnotationImportRecord:
         """Replace the job's group's annotations with its staged annotations.
 
         For this group only, deletes the annotations with their versions,
@@ -322,8 +291,8 @@ class AnnotationImportRepository:
         the group's old annotations or the new ones, never a mix.
 
         Returns:
-            The publication result. If the job already published, its stored
-            result is returned and nothing changes.
+            The published import record. If the job already published, its
+            record is returned and nothing changes.
 
         Raises:
             AnnotationImportConflictError: If the job does not exist, is not a
@@ -339,7 +308,7 @@ class AnnotationImportRepository:
         if record is None:
             raise AnnotationImportConflictError
         if record.published_at is not None:
-            return _result(record)
+            return record
         acquire_global_annotation_write_lock(self.session, exclusive=True)
         state = self._lock_group(record.group_key)
         if state.mode == AnnotationManagementMode.SAB_MANAGED.value:
@@ -348,7 +317,9 @@ class AnnotationImportRepository:
             self._require_staged_subjects(job_id)
         deleted = self._delete_group_data(record.group_key)
         change_source = (
-            "annotation_cutover" if record.is_cutover else "annotation_refresh"
+            ChangeSource.ANNOTATION_CUTOVER
+            if record.is_cutover
+            else ChangeSource.ANNOTATION_REFRESH
         )
         self._copy_staging(job_id, record.group_key, actor_id, change_source)
         now = datetime.now(UTC)
@@ -365,7 +336,7 @@ class AnnotationImportRepository:
             )
         )
         self.session.flush()
-        return _result(record)
+        return record
 
     def _lock_group(self, group_key: str) -> GroupAnnotationManagementRecord:
         """Create the group's row if needed and lock it until the transaction ends."""
@@ -473,7 +444,7 @@ class AnnotationImportRepository:
         return len(deleted_ids.all())
 
     def _copy_staging(
-        self, job_id: UUID, group_key: str, actor_id: str, change_source: str
+        self, job_id: UUID, group_key: str, actor_id: str, change_source: ChangeSource
     ) -> None:
         """Insert a job's staged annotations, versions, and lookup rows."""
         staging = AnnotationStagingRecord
@@ -534,7 +505,7 @@ class AnnotationImportRepository:
                     staging.annotation_data,
                     false(),
                     literal(actor_id),
-                    literal(change_source),
+                    literal(change_source.value),
                 ).where(staging.job_id == job_id),
             )
         )
@@ -558,39 +529,3 @@ class AnnotationImportRepository:
                 ).where(references.job_id == job_id),
             )
         )
-
-
-def _result(record: AnnotationImportRecord) -> AnnotationRefreshResult:
-    """Build a publication result from a published import row."""
-    if record.annotations_deleted is None:
-        raise AnnotationImportConflictError
-    return AnnotationRefreshResult(
-        source_key=record.source_key,
-        group_key=record.group_key,
-        import_job_id=record.job_id,
-        is_cutover=record.is_cutover,
-        provenance=SourceProvenance(
-            source_type=record.source_type,
-            source_locator=record.source_locator,
-            source_revision=record.source_revision,
-            source_checksum=record.source_checksum,
-            fetched_at=record.fetched_at,
-        ),
-        data_rows=record.data_rows,
-        annotations_published=record.annotations_staged,
-        records_rejected=record.records_rejected,
-        annotations_deleted=record.annotations_deleted,
-        mode=(
-            AnnotationManagementMode.SAB_MANAGED
-            if record.is_cutover
-            else AnnotationManagementMode.GPAD_IMPORTED
-        ),
-        rejection_report=RejectionReport.from_json(record.rejection_report),
-    )
-
-
-def _batches(rows: Sequence[dict[str, object]]) -> Iterator[list[dict[str, object]]]:
-    """Split rows into lists of at most 5,000 for batched inserts."""
-    iterator = iter(rows)
-    while batch := list(islice(iterator, _INSERT_BATCH_SIZE)):
-        yield batch

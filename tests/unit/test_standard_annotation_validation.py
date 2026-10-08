@@ -1,12 +1,15 @@
 """Tests for validating payloads with the Standard Annotation schema."""
 
 from datetime import date
-from uuid import UUID
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
-from standard_annotation_backend.domain.annotations import new_annotation_id
-from standard_annotation_backend.domain.validation import validate_annotation
+from standard_annotation_backend.domain.validation import (
+    field_path,
+    validate_annotation,
+    validation_issues,
+)
 
 
 def valid_annotation_payload() -> dict[str, object]:
@@ -25,9 +28,8 @@ def valid_annotation_payload() -> dict[str, object]:
 def test_valid_payload_returns_schema_annotation() -> None:
     result = validate_annotation(valid_annotation_payload())
 
-    assert result.is_valid
-    assert result.errors == ()
     assert result.annotation is not None
+    assert result.errors == ()
     assert result.annotation.db_object_id == "UniProtKB:P12345"
     assert result.annotation.annotation_date == date(2026, 9, 9)
 
@@ -38,15 +40,12 @@ def test_invalid_payload_returns_structured_errors() -> None:
 
     result = validate_annotation(payload)
 
-    assert not result.is_valid
     assert result.annotation is None
-    assert result.errors == (
-        {
-            "location": ("ontology_class_id",),
-            "message": "Field required",
-            "type": "missing",
-        },
-    )
+    assert len(result.errors) == 1
+    error = result.errors[0]
+    assert error["location"] == ("annotation", "ontology_class_id")
+    assert error["type"] == "missing"
+    assert isinstance(error["message"], str) and error["message"]
 
 
 @pytest.mark.parametrize(
@@ -63,8 +62,8 @@ def test_schema_constraints_reject_invalid_values(field: str, value: object) -> 
 
     result = validate_annotation(payload)
 
-    assert not result.is_valid
-    assert result.errors[0]["location"][0] == field
+    assert result.annotation is None
+    assert result.errors[0]["location"][:2] == ("annotation", field)
 
 
 def test_extra_sab_identifier_is_rejected_by_core_schema() -> None:
@@ -73,14 +72,61 @@ def test_extra_sab_identifier_is_rejected_by_core_schema() -> None:
 
     result = validate_annotation(payload)
 
-    assert not result.is_valid
     assert result.annotation is None
-    assert result.errors[0]["location"] == ("annotation_id",)
+    assert result.errors[0]["location"] == ("annotation", "annotation_id")
     assert result.errors[0]["type"] == "extra_forbidden"
 
 
-def test_new_annotation_id_is_a_uuid() -> None:
-    annotation_id = new_annotation_id()
+class _Nested(BaseModel):
+    count: int
 
-    assert isinstance(annotation_id, UUID)
-    assert UUID(str(annotation_id)) == annotation_id
+
+class _Outer(BaseModel):
+    name: str
+    nested: list[_Nested]
+
+
+def test_validation_issues_keep_location_message_and_type_only() -> None:
+    """Each Pydantic error becomes an issue with its location, message, and type."""
+    with pytest.raises(ValidationError) as caught:
+        _Outer.model_validate({"nested": [{"count": "secret-value"}]})
+
+    issues = validation_issues(caught.value)
+
+    assert [(issue["location"], issue["type"]) for issue in issues] == [
+        (("name",), "missing"),
+        (("nested", 0, "count"), "int_parsing"),
+    ]
+    assert all(
+        isinstance(issue["message"], str) and issue["message"] for issue in issues
+    )
+    assert all(set(issue) == {"location", "message", "type"} for issue in issues)
+    assert "secret-value" not in str(issues)
+
+
+def test_validation_issues_place_a_root_before_each_location() -> None:
+    """A supplied root names what was checked before each Pydantic location."""
+    with pytest.raises(ValidationError) as caught:
+        _Outer.model_validate({"nested": [{"count": "x"}]})
+
+    issues = validation_issues(caught.value, root=("body",))
+
+    assert [issue["location"] for issue in issues] == [
+        ("body", "name"),
+        ("body", "nested", 0, "count"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        (("db_object_symbol",), "db_object_symbol"),
+        (("extensions", 0, "term"), "extensions.0.term"),
+        ((), "row"),
+    ],
+)
+def test_field_path_joins_location_parts_or_names_the_row(
+    location: tuple[str | int, ...], expected: str
+) -> None:
+    """A location becomes a dotted path, and an empty location names the row."""
+    assert field_path(location) == expected

@@ -6,26 +6,20 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.annotations import AnnotationNotFoundError
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetNotFoundError,
+    ChangeSetOperation,
+    ChangeSetState,
+    ChangeSetStateError,
+)
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
-    ChangeSetOperation,
     ChangeSetRecord,
-    ChangeSetState,
 )
-from standard_annotation_backend.persistence.repositories.annotations import (
-    AnnotationNotFoundError,
-)
-
-
-class ChangeSetNotFoundError(LookupError):
-    """Raised when a review or preview targets an unknown change set."""
-
-
-class InvalidChangeSetStateError(RuntimeError):
-    """Raised when a completed review is asked to transition again."""
 
 
 class ChangeSetRepository:
@@ -76,7 +70,8 @@ class ChangeSetRepository:
 
         Raises:
             AnnotationNotFoundError: If a targeted annotation does not exist.
-            ValueError: If the operation or required ownership is invalid.
+            ValueError: If the operation, required ownership, or required target
+                is invalid.
         """
         operation = ChangeSetOperation(operation)
         acquire_global_annotation_write_lock(self.session)
@@ -84,18 +79,18 @@ class ChangeSetRepository:
             if owning_group_id is None:
                 raise ValueError("create proposals require an owning group")
         else:
+            if annotation_id is None:
+                raise ValueError("update and delete proposals require a target")
             target = self.session.scalar(
                 select(AnnotationRecord)
                 .where(AnnotationRecord.annotation_id == annotation_id)
                 .execution_options(populate_existing=True)
             )
             if target is None:
-                raise AnnotationNotFoundError(
-                    f"annotation {annotation_id} was not found"
-                )
+                raise AnnotationNotFoundError(annotation_id)
             owning_group_id = target.owning_group_id
         record = ChangeSetRecord(
-            operation=operation.value,
+            operation=operation,
             owning_group_id=owning_group_id,
             annotation_id=annotation_id,
             base_version=base_version,
@@ -130,7 +125,7 @@ class ChangeSetRepository:
             .execution_options(populate_existing=True)
         )
         if record is None:
-            raise ChangeSetNotFoundError(f"change set {change_set_id} was not found")
+            raise ChangeSetNotFoundError(change_set_id)
         return record
 
     def record_preview(
@@ -205,11 +200,15 @@ class ChangeSetRepository:
         )
 
     def _proposed_for_transition(self, change_set_id: UUID) -> ChangeSetRecord:
+        """Lock a proposal that a review transition is about to complete.
+
+        Raises:
+            ChangeSetNotFoundError: If no proposal has this ID.
+            ChangeSetStateError: If the proposal has already been reviewed.
+        """
         record = self.lock_for_review(change_set_id)
         if record.state != ChangeSetState.PROPOSED:
-            raise InvalidChangeSetStateError(
-                f"change set {change_set_id} is no longer proposed"
-            )
+            raise ChangeSetStateError(change_set_id, record.state)
         return record
 
     def _record_transition(
@@ -219,7 +218,7 @@ class ChangeSetRepository:
         reviewed_by: str,
         review_reason: str | None,
     ) -> ChangeSetRecord:
-        record.state = state.value
+        record.state = state
         record.reviewed_by = reviewed_by
         record.reviewed_at = datetime.now(UTC)
         record.review_reason = review_reason

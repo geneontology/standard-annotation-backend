@@ -20,7 +20,11 @@ from standard_annotation_backend.api.dependencies import (
     get_authenticated_context,
     get_unit_of_work_factory,
 )
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+    ChangeSource,
+)
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
@@ -32,7 +36,6 @@ from standard_annotation_backend.persistence.database import (
     create_session_factory,
 )
 from standard_annotation_backend.persistence.models import (
-    AnnotationOrigin,
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
     JobRecord,
@@ -309,6 +312,11 @@ def seed_annotation(
     session_factory: sessionmaker[Session],
 ) -> Callable[[str], UUID]:
     """Provide a helper that creates one active direct annotation for a subject."""
+    # Imported here, not at module level: unit tests load this module to check
+    # the database guard, and `tests/integration` is only on the import path
+    # when pytest collects integration tests.
+    from seeding import insert_annotation
+
     with session_factory() as session:
         if (
             session.scalar(
@@ -334,10 +342,11 @@ def seed_annotation(
             }
         )
         with unit_of_work_factory() as uow:
-            uow.annotations.create(
+            insert_annotation(
+                uow.annotations.session,
                 annotation=annotation,
                 actor_id="curator",
-                change_source="test",
+                change_source=ChangeSource.API,
                 owning_group_id="MGI",
                 record_origin=AnnotationOrigin.DIRECT,
                 annotation_id=annotation_id,

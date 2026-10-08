@@ -7,15 +7,29 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Annotated
 from uuid import UUID
 
+from pydantic import Field
+
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.refresh import (
+    RefreshFailureCode,
+    TerminalRefreshError,
+)
+from standard_annotation_backend.domain.stored_json import StoredJson
 
 
 class OntologyKey(StrEnum):
     """Identify ontologies configured for loading by SAB."""
 
     GO = "go"
+
+
+class OntologyCandidateConflictError(TerminalRefreshError):
+    """Report that a staged job conflicts with its source or activation order."""
+
+    failure_code = RefreshFailureCode.CANDIDATE_CONFLICT
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +178,6 @@ class OntologyVersion:
 class OntologyRefreshResult:
     """Summarize ontology activation, warnings, and annotation updates."""
 
-    applied: bool
     ontology_version: OntologyVersion | None
     annotation_scan_count: int
     annotation_update_count: int
@@ -174,96 +187,124 @@ class OntologyRefreshResult:
     ontology_warnings: tuple[OntologyRefreshWarning, ...] = ()
 
     @classmethod
-    def unchanged(cls, document: OntologyDocument) -> OntologyRefreshResult:
+    def for_active_document(cls, document: OntologyDocument) -> OntologyRefreshResult:
         """Return a refresh result for a document matching the active snapshot."""
-        return cls(False, None, 0, 0, 0, (), document)
+        return cls(None, 0, 0, 0, (), document)
+
+    def to_stored(self) -> StoredOntologyRefresh:
+        """Return the outcome in the form stored on snapshots and jobs.
+
+        Snapshot details are used when a snapshot was activated. Otherwise only the
+        fetched document's source details are known.
+        """
+        version = self.ontology_version
+        document = self.document
+        source = version if version is not None else document
+        return StoredOntologyRefresh(
+            ontology=source.ontology_key if source is not None else None,
+            ontology_version_id=version.version_id if version is not None else None,
+            source_type=source.source_type if source is not None else None,
+            source_locator=source.source_locator if source is not None else None,
+            source_revision=source.source_revision if source is not None else None,
+            source_checksum=source.source_checksum if source is not None else None,
+            document_version=version.document_version if version is not None else None,
+            loaded_predicates=version.loaded_predicates if version is not None else (),
+            term_count=version.term_count if version is not None else 0,
+            closure_count=version.closure_count if version is not None else 0,
+            annotation_scan_count=self.annotation_scan_count,
+            annotation_update_count=self.annotation_update_count,
+            annotation_skip_count=self.annotation_skip_count,
+            ontology_warnings=self.ontology_warnings,
+            findings=tuple(
+                StoredOntologyFinding(
+                    code=finding.code,
+                    ontology=finding.ontology_key,
+                    term_id=finding.term_id,
+                    annotation_id=finding.annotation_id,
+                    field_paths=finding.field_paths,
+                    replacement_ids=finding.replacement_ids,
+                    conflicting_annotation_ids=finding.conflicting_annotation_ids,
+                )
+                for finding in self.findings
+            ),
+        )
 
     def to_job_result(self) -> dict[str, object]:
         """Return the complete successful outcome in job-storage format."""
-        version = self.ontology_version
-        document = self.document
-        return {
-            "applied": self.applied,
-            "ontology": (
-                version.ontology_key.value
-                if version is not None
-                else document.ontology_key.value
-                if document is not None
-                else None
-            ),
-            "ontology_version_id": (
-                str(version.version_id) if version is not None else None
-            ),
-            "source_type": (
-                version.source_type
-                if version is not None
-                else document.source_type
-                if document is not None
-                else None
-            ),
-            "source_locator": (
-                version.source_locator
-                if version is not None
-                else document.source_locator
-                if document is not None
-                else None
-            ),
-            "source_revision": (
-                version.source_revision
-                if version is not None
-                else document.source_revision
-                if document is not None
-                else None
-            ),
-            "source_checksum": (
-                version.source_checksum
-                if version is not None
-                else document.source_checksum
-                if document is not None
-                else None
-            ),
-            "document_version": (
-                version.document_version if version is not None else None
-            ),
-            "loaded_predicates": (
-                list(version.loaded_predicates) if version is not None else []
-            ),
-            "term_count": version.term_count if version is not None else 0,
-            "closure_count": version.closure_count if version is not None else 0,
-            "annotation_scan_count": self.annotation_scan_count,
-            "annotation_update_count": self.annotation_update_count,
-            "annotation_skip_count": self.annotation_skip_count,
-            "ontology_warnings": [
-                _ontology_warning_result(warning) for warning in self.ontology_warnings
-            ],
-            "findings": [_finding_result(finding) for finding in self.findings],
-        }
+        return STORED_ONTOLOGY_REFRESH_RESULT.dump(self.to_stored())
 
 
-def _ontology_warning_result(warning: OntologyRefreshWarning) -> dict[str, object]:
-    """Convert one ontology warning to data stored in a job result."""
-    return {
-        "code": warning.code,
-        "term_id": warning.term_id,
-        "referenced_term_id": warning.referenced_term_id,
-    }
+@dataclass(frozen=True, slots=True)
+class StoredOntologyFinding:
+    """Describe one finding as it is stored in an ontology refresh result.
+
+    Attributes:
+        code: The machine-readable finding code.
+        ontology: The ontology the term belongs to.
+        term_id: The term that caused the finding.
+        annotation_id: The affected annotation, if the finding concerns one.
+        field_paths: The annotation fields the finding concerns.
+        replacement_ids: The replacement terms the ontology offers.
+        conflicting_annotation_ids: Annotations that conflict with the update.
+    """
+
+    code: str
+    ontology: OntologyKey
+    term_id: str
+    annotation_id: UUID | None
+    field_paths: tuple[str, ...]
+    replacement_ids: tuple[str, ...]
+    conflicting_annotation_ids: tuple[UUID, ...]
 
 
-def _finding_result(finding: OntologyFinding) -> dict[str, object]:
-    """Convert one finding to data that can be stored in a job result."""
-    return {
-        "code": finding.code,
-        "ontology": finding.ontology_key.value,
-        "term_id": finding.term_id,
-        "annotation_id": (
-            str(finding.annotation_id) if finding.annotation_id is not None else None
-        ),
-        "field_paths": list(finding.field_paths),
-        "replacement_ids": list(finding.replacement_ids),
-        "conflicting_annotation_ids": [
-            str(annotation_id) for annotation_id in finding.conflicting_annotation_ids
-        ],
-    }
+@dataclass(frozen=True, slots=True)
+class StoredOntologyRefresh:
+    """Describe an ontology refresh result as stored on its snapshot and job.
+
+    The snapshot's details are written at the top level. When the fetched document
+    already matched the active snapshot, only the document's source details are
+    known, so the snapshot fields are `None` or empty and every count is zero.
+
+    Attributes:
+        ontology: The refreshed ontology.
+        ontology_version_id: The activated snapshot, or `None` if nothing was
+            activated.
+        source_type: How the source document was retrieved.
+        source_locator: Where the source document was retrieved from.
+        source_revision: The source's revision identifier, if it has one.
+        source_checksum: The checksum of the source document.
+        document_version: The version declared by the ontology document, if any.
+        loaded_predicates: The relationship predicates loaded into the closure.
+        term_count: The number of terms in the snapshot.
+        closure_count: The number of closure rows in the snapshot.
+        annotation_scan_count: The number of annotations examined.
+        annotation_update_count: The number of annotations updated.
+        annotation_skip_count: The number of annotations left unchanged because of
+            findings.
+        ontology_warnings: Nonfatal conditions found in the loaded ontology.
+        findings: Conditions that prevented automatic annotation updates.
+    """
+
+    ontology: OntologyKey | None
+    ontology_version_id: UUID | None
+    source_type: str | None
+    source_locator: str | None
+    source_revision: str | None
+    source_checksum: str | None
+    document_version: str | None
+    loaded_predicates: tuple[str, ...]
+    term_count: Annotated[int, Field(ge=0)]
+    closure_count: Annotated[int, Field(ge=0)]
+    annotation_scan_count: Annotated[int, Field(ge=0)]
+    annotation_update_count: Annotated[int, Field(ge=0)]
+    annotation_skip_count: Annotated[int, Field(ge=0)]
+    ontology_warnings: tuple[OntologyRefreshWarning, ...]
+    findings: tuple[StoredOntologyFinding, ...]
+
+
+STORED_ONTOLOGY_REFRESH_RESULT = StoredJson(
+    StoredOntologyRefresh, label="ontology refresh result"
+)
 
 
 def propose_term_replacements(

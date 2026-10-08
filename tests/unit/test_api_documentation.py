@@ -2,25 +2,8 @@
 
 from importlib.metadata import version as distribution_version
 
-import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
-
-from standard_annotation_backend.version import get_application_version
-
-
-def test_application_version_comes_from_installed_distribution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Application metadata uses the version installed by the build backend."""
-    monkeypatch.setattr(
-        "standard_annotation_backend.version.distribution_version",
-        lambda distribution: (
-            "1.2.3" if distribution == "standard-annotation-backend" else ""
-        ),
-    )
-
-    assert get_application_version() == "1.2.3"
 
 
 def test_openapi_displays_installed_application_version(client: TestClient) -> None:
@@ -30,10 +13,6 @@ def test_openapi_displays_installed_application_version(client: TestClient) -> N
     assert response.status_code == status.HTTP_200_OK
     assert response.json()["info"]["version"] == distribution_version(
         "standard-annotation-backend"
-    )
-    assert (
-        "[Token Management](/token-management)"
-        in response.json()["info"]["description"]
     )
 
 

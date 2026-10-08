@@ -3,28 +3,31 @@
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID
 
 import httpx2
 import pytest
+from seeding import create_job, insert_annotation
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.config import get_settings
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+    ChangeSource,
+)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.models import (
-    AnnotationOrigin,
     AuditEventRecord,
     JobRecord,
     OntologyMetadataRecord,
 )
+from standard_annotation_backend.persistence.repositories import OntologyRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.job_service import JobService
-from standard_annotation_backend.services.ontology_refresh_service import (
-    OntologyRefreshService,
-)
 from standard_annotation_backend.workers import tasks
 from standard_annotation_backend.workers.tasks import (
     WorkerTaskUnavailableError,
@@ -58,15 +61,12 @@ def suppress_pruning_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _create_job(factory: UnitOfWorkFactory) -> UUID:
-    return (
-        JobService(factory)
-        .create(
-            job_type=JobType.ONTOLOGY_REFRESH,
-            requested_by="ontology-worker",
-            parameters={"source_key": "go"},
-        )
-        .job_id
-    )
+    return create_job(
+        factory,
+        job_type=JobType.ONTOLOGY_REFRESH,
+        requested_by="ontology-worker",
+        parameters={"source_key": "go"},
+    ).job_id
 
 
 def _load_job(factory: UnitOfWorkFactory, job_id: UUID) -> JobRecord:
@@ -127,8 +127,8 @@ def test_worker_loads_ontology_then_skips_unchanged_source(
     first = _load_job(unit_of_work_factory, first_id)
     second = _load_job(unit_of_work_factory, second_id)
     assert first.status == second.status == JobStatus.SUCCEEDED.value
-    assert first.result is not None and first.result["applied"] is True
-    assert second.result is not None and second.result["applied"] is False
+    assert first.result is not None and first.result["unchanged"] is False
+    assert second.result is not None and second.result["unchanged"] is True
     assert len(requests) == 4
     with session_factory() as session:
         assert (
@@ -210,8 +210,8 @@ def test_pruning_task_retries_infrastructure_failure(
 ) -> None:
     """A pruning infrastructure failure requests a task retry."""
     monkeypatch.setattr(
-        OntologyRefreshService,
-        "prune",
+        OntologyRepository,
+        "prune_candidates",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database")),
     )
 
@@ -226,8 +226,8 @@ def test_pruning_task_ignores_an_unknown_ontology_key(
     """A key that is not a supported ontology is neither pruned nor retried."""
     pruned: list[object] = []
     monkeypatch.setattr(
-        OntologyRefreshService,
-        "prune",
+        OntologyRepository,
+        "prune_candidates",
         lambda *_args, **_kwargs: pruned.append(object()),
     )
 
@@ -301,6 +301,13 @@ def test_source_and_parse_failures_store_only_public_error(
     assert "secret" not in job.error
     assert job.progress["failure_code"] == failure_code
     assert "secret" not in str(job.progress)
+    if failure_code == "invalid_document":
+        details = cast(dict[str, Any], job.progress["failure_details"])
+        message = details["message"]
+        assert isinstance(message, str)
+        assert message.strip()
+    else:
+        assert "failure_details" not in job.progress
 
 
 @pytest.mark.parametrize("method_name", ["stage", "activate"])
@@ -314,7 +321,7 @@ def test_staging_and_activation_infrastructure_failures_request_retry(
     job_id = _create_job(unit_of_work_factory)
     _install_source(monkeypatch, _source_responses())
     monkeypatch.setattr(
-        OntologyRefreshService,
+        OntologyRepository,
         method_name,
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("detail")),
     )
@@ -355,10 +362,11 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
         }
     )
     with unit_of_work_factory() as uow:
-        uow.annotations.create(
+        insert_annotation(
+            uow.annotations.session,
             annotation=annotation,
             actor_id="creator",
-            change_source="test",
+            change_source=ChangeSource.API,
             owning_group_id="group-1",
             record_origin=AnnotationOrigin.DIRECT,
             annotation_id=annotation_id,
@@ -471,7 +479,8 @@ def test_redelivery_recovers_result_after_a_later_load_becomes_active(
 
     recovered = _load_job(unit_of_work_factory, first_id)
     assert recovered.status == JobStatus.SUCCEEDED.value
-    assert recovered.result == stored_result
+    # The recovered job reports the result its snapshot stored when activated.
+    assert recovered.result == {**stored_result, "unchanged": False}
     assert len(requests) == 4
 
 

@@ -2,10 +2,9 @@
 
 import hashlib
 import json
-from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from itertools import islice
-from typing import cast
+from itertools import batched
 from uuid import UUID
 
 from psycopg.errors import UniqueViolation
@@ -13,7 +12,12 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.annotations import (
+    AnnotationStatus,
+)
 from standard_annotation_backend.domain.entities import (
+    STORED_ENTITY_REFRESH_RESULT,
+    STORED_ENTITY_RETIREMENT_RESULT,
     EntityCandidateConflictError,
     EntityCatalog,
     EntityCatalogCollisionError,
@@ -22,19 +26,42 @@ from standard_annotation_backend.domain.entities import (
     EntityRemovalImpact,
     UnknownDbObjectIdError,
 )
-from standard_annotation_backend.persistence.locks import acquire_entity_catalog_lock
+from standard_annotation_backend.domain.jobs import (
+    ACTIVE_JOB_STATUSES,
+    TERMINAL_JOB_STATUSES,
+)
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    acquire_transaction_lock,
+)
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
-    AnnotationStatus,
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
     EntitySourceRecord,
     EntityStagingRecord,
     JobRecord,
 )
+from standard_annotation_backend.persistence.repositories.jobs import lock_job_record
 
 _INSERT_BATCH_SIZE = 5_000
+"""Rows per batched statement, keeping each within PostgreSQL's parameter limit."""
 _ENTITY_JOB_TYPES = frozenset({"entity_refresh", "entity_retirement"})
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedStaging:
+    """Staged rows that match the candidate's stored counts and checksum.
+
+    Attributes:
+        rows: Staged rows in line-number order, as inserted into source records.
+        db_object_ids: Distinct identifiers in the staging.
+        warnings: The catalog warnings stored when the staging was written.
+    """
+
+    rows: list[dict[str, object]]
+    db_object_ids: frozenset[str]
+    warnings: tuple[str, ...]
 
 
 class EntityRepository:
@@ -63,12 +90,7 @@ class EntityRepository:
             EntityCandidateConflictError: If the job does not exist or is not an
                 entity job.
         """
-        job = self.session.scalar(
-            select(JobRecord)
-            .where(JobRecord.job_id == job_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+        job = lock_job_record(self.session, job_id)
         if job is None or job.job_type not in _ENTITY_JOB_TYPES:
             raise EntityCandidateConflictError
         return job
@@ -94,7 +116,7 @@ class EntityRepository:
             The result and whether this call changed any state.
         """
         self.lock_job(job_id)
-        acquire_entity_catalog_lock(self.session, source_key)
+        acquire_transaction_lock(self.session, LockNamespace.ENTITY_CATALOG, source_key)
         recorded = self.session.scalar(
             select(EntityCatalogSnapshotRecord).where(
                 EntityCatalogSnapshotRecord.retired_by_job_id == job_id
@@ -102,9 +124,7 @@ class EntityRepository:
         )
         if recorded is not None and recorded.retirement_result is not None:
             return (
-                EntityCatalogRetirementResult.from_job_result(
-                    recorded.retirement_result
-                ),
+                STORED_ENTITY_RETIREMENT_RESULT.load(recorded.retirement_result),
                 False,
             )
         not_retired = EntityCatalogRetirementResult(source_key, False, None, ())
@@ -196,7 +216,7 @@ class EntityRepository:
             if existing.publication_result is None:
                 self._verify_staging(existing)
             return existing
-        if job.status not in {"queued", "running"}:
+        if job.status not in ACTIVE_JOB_STATUSES:
             raise EntityCandidateConflictError
         candidate = EntityCatalogSnapshotRecord(
             job_id=job_id,
@@ -219,7 +239,7 @@ class EntityRepository:
         )
         self.session.add(candidate)
         self.session.flush([candidate])
-        for batch in _batches(rows):
+        for batch in batched(rows, _INSERT_BATCH_SIZE, strict=False):
             self.session.execute(insert(EntityStagingRecord), batch)
         return candidate
 
@@ -255,10 +275,12 @@ class EntityRepository:
         candidate = self._candidate(job_id)
         if candidate is None:
             raise EntityCandidateConflictError
-        acquire_entity_catalog_lock(self.session, candidate.source_key)
+        acquire_transaction_lock(
+            self.session, LockNamespace.ENTITY_CATALOG, candidate.source_key
+        )
         if candidate.publication_result is not None:
-            return EntityRefreshResult.from_job_result(candidate.publication_result)
-        if candidate.active or job.status not in {"queued", "running"}:
+            return STORED_ENTITY_REFRESH_RESULT.load(candidate.publication_result)
+        if candidate.active or job.status not in ACTIVE_JOB_STATUSES:
             raise EntityCandidateConflictError
         current = self.session.scalar(
             select(EntityCatalogSnapshotRecord)
@@ -271,8 +293,9 @@ class EntityRepository:
         )
         if current is not None and current.staged_at > candidate.staged_at:
             raise EntityCandidateConflictError
-        rows = self._verify_staging(candidate)
-        new_ids = {cast(str, row["db_object_id"]) for row in rows}
+        staging = self._verify_staging(candidate)
+        rows = staging.rows
+        new_ids = set(staging.db_object_ids)
         old_ids = set(
             self.session.scalars(
                 select(EntityMembershipRecord.db_object_id)
@@ -302,9 +325,13 @@ class EntityRepository:
             )
         )
         self._insert_memberships(candidate, new_ids)
-        for batch in _batches(
-            {key: value for key, value in row.items() if key != "job_id"}
-            for row in rows
+        for batch in batched(
+            (
+                {key: value for key, value in row.items() if key != "job_id"}
+                for row in rows
+            ),
+            _INSERT_BATCH_SIZE,
+            strict=False,
         ):
             self.session.execute(insert(EntitySourceRecord), batch)
         result = EntityRefreshResult(
@@ -319,7 +346,7 @@ class EntityRepository:
             added_count=len(new_ids - old_ids),
             retained_count=len(new_ids & old_ids),
             removed_count=len(removed),
-            warnings=tuple(cast(list[str], candidate.record_statistics["warnings"])),
+            warnings=staging.warnings,
             removal_impacts=impacts,
         )
         candidate.active = True
@@ -331,10 +358,15 @@ class EntityRepository:
         )
         return result
 
-    def completed(self, job_id: UUID) -> dict[str, object] | None:
+    def completed(self, job_id: UUID) -> EntityRefreshResult | None:
         """Return a job's stored publication result, or `None` if it has not published.
 
         The result stays available after a later refresh replaces the catalog.
+
+        Raises:
+            EntityCandidateConflictError: If the candidate is active but has no
+                stored result.
+            StoredDataError: If the stored result is malformed.
         """
         candidate = self._candidate(job_id)
         if candidate is None:
@@ -344,9 +376,7 @@ class EntityRepository:
         return (
             None
             if candidate.publication_result is None
-            else EntityRefreshResult.from_job_result(
-                candidate.publication_result
-            ).to_job_result()
+            else STORED_ENTITY_REFRESH_RESULT.load(candidate.publication_result)
         )
 
     def active_snapshot(self, source_key: str) -> EntityCatalogSnapshotRecord | None:
@@ -388,7 +418,7 @@ class EntityRepository:
         kept.
         """
         job = self.lock_job(job_id)
-        if job.status in {"failed", "succeeded"}:
+        if job.status in TERMINAL_JOB_STATUSES:
             self.session.execute(
                 delete(EntityStagingRecord).where(EntityStagingRecord.job_id == job_id)
             )
@@ -453,25 +483,27 @@ class EntityRepository:
 
     def _verify_staging(
         self, candidate: EntityCatalogSnapshotRecord
-    ) -> list[dict[str, object]]:
-        """Reject incomplete or altered staging.
+    ) -> _VerifiedStaging:
+        """Return the staging if it matches the candidate's stored counts and checksum.
 
         Rows are read in line-number order. The stored record counts and catalog
         checksum, which covers every line number and entity, detect missing,
         added, or changed rows.
         """
+        records = self.session.scalars(
+            select(EntityStagingRecord)
+            .where(EntityStagingRecord.job_id == candidate.job_id)
+            .order_by(EntityStagingRecord.line_number)
+        ).all()
         rows: list[dict[str, object]] = [
             {
-                "line_number": row.line_number,
-                "db_object_id": row.db_object_id,
-                "entity": row.entity,
+                "line_number": record.line_number,
+                "db_object_id": record.db_object_id,
+                "entity": record.entity,
             }
-            for row in self.session.scalars(
-                select(EntityStagingRecord)
-                .where(EntityStagingRecord.job_id == candidate.job_id)
-                .order_by(EntityStagingRecord.line_number)
-            )
+            for record in records
         ]
+        db_object_ids = frozenset(record.db_object_id for record in records)
         warnings = candidate.record_statistics.get("warnings")
         if not isinstance(warnings, list) or not all(
             isinstance(item, str) for item in warnings
@@ -479,7 +511,7 @@ class EntityRepository:
             raise EntityCandidateConflictError
         if (
             len(rows) != candidate.record_statistics.get("source_record_count")
-            or len({cast(str, row["db_object_id"]) for row in rows})
+            or len(db_object_ids)
             != candidate.record_statistics.get("active_identifier_count")
             or _catalog_digest(
                 candidate.source_format,
@@ -490,7 +522,7 @@ class EntityRepository:
             != candidate.source_statistics.get("catalog_sha256")
         ):
             raise EntityCandidateConflictError
-        return rows
+        return _VerifiedStaging(rows, db_object_ids, tuple(warnings))
 
     def _collisions(self, candidate: EntityCatalogSnapshotRecord) -> tuple[str, ...]:
         return tuple(
@@ -527,13 +559,17 @@ class EntityRepository:
         collided = False
         try:
             with self.session.begin_nested():
-                for batch in _batches(
-                    {
-                        "db_object_id": identifier,
-                        "source_key": candidate.source_key,
-                        "snapshot_id": candidate.snapshot_id,
-                    }
-                    for identifier in sorted(identifiers)
+                for batch in batched(
+                    (
+                        {
+                            "db_object_id": identifier,
+                            "source_key": candidate.source_key,
+                            "snapshot_id": candidate.snapshot_id,
+                        }
+                        for identifier in sorted(identifiers)
+                    ),
+                    _INSERT_BATCH_SIZE,
+                    strict=False,
                 ):
                     self.session.execute(insert(EntityMembershipRecord), batch)
         except IntegrityError as error:
@@ -550,12 +586,16 @@ class EntityRepository:
         impacts: dict[str, list[UUID]] = {
             identifier: [] for identifier in sorted(removed)
         }
-        for batch in _batches({"id": identifier} for identifier in sorted(removed)):
+        for batch in batched(
+            ({"id": identifier} for identifier in sorted(removed)),
+            _INSERT_BATCH_SIZE,
+            strict=False,
+        ):
             rows = self.session.execute(
                 select(AnnotationRecord.db_object_id, AnnotationRecord.annotation_id)
                 .where(
                     AnnotationRecord.db_object_id.in_([row["id"] for row in batch]),
-                    AnnotationRecord.status == AnnotationStatus.ACTIVE.value,
+                    AnnotationRecord.status == AnnotationStatus.ACTIVE,
                 )
                 .order_by(AnnotationRecord.db_object_id, AnnotationRecord.annotation_id)
             )
@@ -589,14 +629,3 @@ def _catalog_digest(
         )
         hasher.update(b"\n")
     return hasher.hexdigest()
-
-
-def _batches(rows: Iterable[dict[str, object]]) -> Iterator[list[dict[str, object]]]:
-    """Split rows into lists of at most 5,000 for batched inserts.
-
-    This keeps each statement within PostgreSQL's parameter limit and matches the
-    batch size used for ontology terms.
-    """
-    iterator = iter(rows)
-    while batch := list(islice(iterator, _INSERT_BATCH_SIZE)):
-        yield batch

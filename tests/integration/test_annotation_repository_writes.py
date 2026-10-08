@@ -1,16 +1,32 @@
-"""Test database rules for annotations created and changed through the API."""
+"""Test the database rules enforced by the annotation repository's write methods."""
 
 from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import pytest
+from seeding import insert_annotation
 
-from standard_annotation_backend.domain.annotations import Annotation
-from standard_annotation_backend.persistence import repositories
-from standard_annotation_backend.persistence.models import AnnotationOrigin, JobRecord
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationOrigin,
+    ChangeSource,
+    DuplicateAnnotationError,
+)
+from standard_annotation_backend.persistence.models import (
+    JobRecord,
+)
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 UnitOfWorkFactory = Callable[[], SqlAlchemyUnitOfWork]
+
+
+@pytest.fixture(autouse=True)
+def _active_subjects(seed_active_subjects: Callable[..., None]) -> None:
+    """Make the subjects these tests write active in the entity catalog.
+
+    Direct annotation writes require an active subject.
+    """
+    seed_active_subjects("UniProtKB:P12345", "UniProtKB:DISTINCT")
 
 
 def _changed(annotation: Annotation, **changes: object) -> Annotation:
@@ -25,11 +41,13 @@ def _create_existing(
     *,
     annotation_id: UUID | None = None,
 ) -> UUID:
+
     with unit_of_work_factory() as unit_of_work:
-        record = unit_of_work.annotations.create(
+        record = insert_annotation(
+            unit_of_work.annotations.session,
             annotation=annotation,
             actor_id="creator",
-            change_source="api",
+            change_source=ChangeSource.API,
             owning_group_id="group-1",
             record_origin=AnnotationOrigin.DIRECT,
             annotation_id=annotation_id,
@@ -54,10 +72,11 @@ def _create_legacy_annotations(
         unit_of_work.annotations.session.add(source_job)
         unit_of_work.annotations.session.flush([source_job])
         for annotation_id, annotation in annotations:
-            unit_of_work.annotations.create(
+            insert_annotation(
+                unit_of_work.annotations.session,
                 annotation=annotation,
                 actor_id="importer",
-                change_source="legacy-import",
+                change_source=ChangeSource.ANNOTATION_REFRESH,
                 owning_group_id="legacy",
                 record_origin=AnnotationOrigin.IMPORT,
                 source_import_job_id=job_id,
@@ -66,7 +85,7 @@ def _create_legacy_annotations(
         unit_of_work.commit()
 
 
-def test_create_direct_rejects_an_active_duplicate(
+def test_create_rejects_an_active_duplicate(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
@@ -74,9 +93,9 @@ def test_create_direct_rejects_an_active_duplicate(
 
     with (
         unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.DuplicateAnnotationError) as raised,
+        pytest.raises(DuplicateAnnotationError) as raised,
     ):
-        unit_of_work.annotations.create_direct(
+        unit_of_work.annotations.create(
             annotation=validated_annotation,
             actor_id="api-user",
             owning_group_id="group-1",
@@ -85,28 +104,7 @@ def test_create_direct_rejects_an_active_duplicate(
     assert raised.value.peer_ids == (existing_id,)
 
 
-def test_update_direct_rejects_a_stale_expected_version(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-) -> None:
-    annotation_id = _create_existing(unit_of_work_factory, validated_annotation)
-    changed_annotation = _changed(validated_annotation, assigned_by="MGI")
-
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.StaleAnnotationVersionError) as raised,
-    ):
-        unit_of_work.annotations.update_direct(
-            annotation_id,
-            changed_annotation,
-            expected_version=2,
-            actor_id="api-user",
-        )
-
-    assert raised.value.current_version == 1
-
-
-def test_update_direct_rejects_only_a_new_duplicate_peer(
+def test_update_rejects_only_a_new_duplicate_peer(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
@@ -127,7 +125,7 @@ def test_update_direct_rejects_only_a_new_duplicate_peer(
     )
 
     with unit_of_work_factory() as unit_of_work:
-        preserved = unit_of_work.annotations.update_direct(
+        preserved = unit_of_work.annotations.update(
             first_id,
             _changed(validated_annotation, assigned_by="MGI"),
             expected_version=1,
@@ -138,9 +136,9 @@ def test_update_direct_rejects_only_a_new_duplicate_peer(
 
     with (
         unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.DuplicateAnnotationError) as raised,
+        pytest.raises(DuplicateAnnotationError) as raised,
     ):
-        unit_of_work.annotations.update_direct(
+        unit_of_work.annotations.update(
             candidate_id,
             validated_annotation,
             expected_version=1,
@@ -149,7 +147,7 @@ def test_update_direct_rejects_only_a_new_duplicate_peer(
     assert raised.value.peer_ids == (first_id, second_id)
 
 
-def test_update_direct_rejects_expansion_of_a_legacy_peer_set(
+def test_update_rejects_expansion_of_a_legacy_peer_set(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
@@ -171,9 +169,9 @@ def test_update_direct_rejects_expansion_of_a_legacy_peer_set(
 
     with (
         unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.DuplicateAnnotationError) as raised,
+        pytest.raises(DuplicateAnnotationError) as raised,
     ):
-        unit_of_work.annotations.update_direct(
+        unit_of_work.annotations.update(
             first_id,
             _changed(original, references=["PMID:1", "PMID:2"]),
             expected_version=1,
@@ -183,77 +181,12 @@ def test_update_direct_rejects_expansion_of_a_legacy_peer_set(
     assert raised.value.peer_ids == (new_peer_id,)
     with unit_of_work_factory() as unit_of_work:
         retained = unit_of_work.annotations.get(first_id)
-        versions = unit_of_work.annotations.list_versions(first_id)
+        versions = unit_of_work.annotations.list_versions_page(
+            first_id, limit=100, offset=0
+        ).items
         assert retained is not None
         assert retained.current_version == 1
         assert retained.annotation_data["references"] == ["PMID:1"]
         assert [(version.version, version.is_deleted) for version in versions] == [
             (1, False)
         ]
-
-
-def test_soft_delete_direct_requires_the_current_version(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-) -> None:
-    annotation_id = _create_existing(unit_of_work_factory, validated_annotation)
-
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.StaleAnnotationVersionError),
-    ):
-        unit_of_work.annotations.soft_delete_direct(
-            annotation_id,
-            expected_version=2,
-            actor_id="api-user",
-        )
-
-
-def test_soft_delete_direct_appends_the_deleted_version(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-) -> None:
-    annotation_id = _create_existing(unit_of_work_factory, validated_annotation)
-
-    with unit_of_work_factory() as unit_of_work:
-        deleted = unit_of_work.annotations.soft_delete_direct(
-            annotation_id,
-            expected_version=1,
-            actor_id="api-user",
-        )
-        unit_of_work.commit()
-
-    assert deleted.current_version == 2
-    with unit_of_work_factory() as unit_of_work:
-        versions = unit_of_work.annotations.list_versions(annotation_id)
-        version_states = tuple(
-            (version.version, version.is_deleted) for version in versions
-        )
-    assert version_states == (
-        (1, False),
-        (2, True),
-    )
-
-
-def test_soft_delete_direct_rejects_an_already_deleted_annotation(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-) -> None:
-    annotation_id = _create_existing(unit_of_work_factory, validated_annotation)
-    with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete_direct(
-            annotation_id,
-            expected_version=1,
-            actor_id="api-user",
-        )
-        unit_of_work.commit()
-
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(repositories.AnnotationDeletedError),
-    ):
-        unit_of_work.annotations.soft_delete_direct(
-            annotation_id,
-            expected_version=2,
-            actor_id="api-user",
-        )

@@ -1,5 +1,6 @@
 """Validate, preview, and review proposed annotation changes atomically."""
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
@@ -12,7 +13,13 @@ from pydantic import (
     ValidationError,
 )
 
-from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationDeletedError,
+    AnnotationNotFoundError,
+    ChangeSource,
+    StaleAnnotationVersionError,
+)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
     PermissionAction,
@@ -24,32 +31,30 @@ from standard_annotation_backend.domain.auth import (
     derive_creation_group,
 )
 from standard_annotation_backend.domain.change_sets import (
+    ChangeSetNotFoundError,
+    ChangeSetOperation,
+    ChangeSetState,
+    ChangeSetStateError,
+    InvalidChangeSetError,
     InvalidChangeSetPatchError,
+    StaleChangeSetError,
     apply_annotation_patch,
 )
+from standard_annotation_backend.domain.duplicate_policy import duplicate_key
+from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.domain.validation import (
     AnnotationValidationResult,
     ValidationIssue,
     validate_annotation,
-)
-from standard_annotation_backend.persistence.annotation_data import (
-    prepare_annotation_for_persistence,
+    validation_issues,
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
-    ChangeSetOperation,
     ChangeSetRecord,
-    ChangeSetState,
 )
 from standard_annotation_backend.persistence.repositories import (
-    AnnotationDeletedError,
-    AnnotationNotFoundError,
     AnnotationRepository,
-    StaleAnnotationVersionError,
-)
-from standard_annotation_backend.persistence.repositories import (
-    ChangeSetNotFoundError as RepositoryChangeSetNotFoundError,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
@@ -57,12 +62,13 @@ from standard_annotation_backend.persistence.unit_of_work import (
 )
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.resource_authorization import (
-    authorize_annotation,
+    load_authorized_annotation,
 )
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 
-class ChangeSetPreview(BaseModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChangeSetPreview:
     """Describe a proposal's candidate and the current obstacles to acceptance.
 
     A preview is advisory: acceptance repeats validation and repository checks.
@@ -70,8 +76,6 @@ class ChangeSetPreview(BaseModel):
     `before_annotation` is the saved base snapshot for an update or deletion.
     Duplicate peer IDs identify only conflicts that the operation would introduce.
     """
-
-    model_config = ConfigDict(frozen=True)
 
     change_set_id: UUID
     operation: ChangeSetOperation
@@ -87,10 +91,13 @@ class ChangeSetPreview(BaseModel):
     can_accept: bool
 
 
-class ChangeSet(BaseModel):
-    """Return proposal data and review metadata detached from its transaction."""
+STORED_CHANGE_SET_PREVIEW = StoredJson(ChangeSetPreview, label="change-set preview")
+"""Stored form of a change-set preview, as kept on the proposal record."""
 
-    model_config = ConfigDict(frozen=True, from_attributes=True)
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChangeSet:
+    """Return proposal data and review metadata detached from its transaction."""
 
     change_set_id: UUID
     operation: ChangeSetOperation
@@ -111,10 +118,9 @@ class ChangeSet(BaseModel):
     result_annotation_version: int | None
 
 
-class AcceptedChangeSet(BaseModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AcceptedChangeSet:
     """Return a completed review and the annotation version it produced."""
-
-    model_config = ConfigDict(frozen=True)
 
     change_set: ChangeSet
     annotation_id: UUID
@@ -123,54 +129,41 @@ class AcceptedChangeSet(BaseModel):
     annotation: Annotation
 
 
-class ChangeSetNotFoundError(LookupError):
-    """Report a change-set ID that does not exist."""
+def _change_set(record: ChangeSetRecord) -> ChangeSet:
+    """Build a change-set result from its record.
 
-    def __init__(self, change_set_id: UUID) -> None:
-        self.change_set_id = change_set_id
-        super().__init__(f"change set {change_set_id} was not found")
-
-
-class InvalidChangeSetError(ValueError):
-    """Report stable validation issues in a proposal or its candidate annotation."""
-
-    def __init__(self, errors: tuple[ValidationIssue, ...]) -> None:
-        self.errors = errors
-        super().__init__("change set is invalid")
-
-
-class ChangeSetStateError(RuntimeError):
-    """Report a review operation attempted after a proposal became terminal."""
-
-    def __init__(self, change_set_id: UUID, state: str) -> None:
-        self.change_set_id = change_set_id
-        self.state = state
-        super().__init__(f"change set {change_set_id} is already {state}")
-
-
-class StaleChangeSetError(RuntimeError):
-    """Report a stale proposal after its state and audit event have committed."""
-
-    def __init__(
-        self,
-        change_set_id: UUID,
-        annotation_id: UUID,
-        expected_version: int,
-        current_version: int,
-    ) -> None:
-        self.change_set_id = change_set_id
-        self.annotation_id = annotation_id
-        self.expected_version = expected_version
-        self.current_version = current_version
-        super().__init__(
-            f"change set {change_set_id} targets an older annotation version"
-        )
+    Raises:
+        StoredDataError: If the stored preview is malformed.
+    """
+    return ChangeSet(
+        change_set_id=record.change_set_id,
+        operation=record.operation,
+        state=record.state,
+        owning_group_id=record.owning_group_id,
+        annotation_id=record.annotation_id,
+        base_version=record.base_version,
+        annotation_payload=record.annotation_payload,
+        patch=record.patch,
+        reason=record.reason,
+        preview=(
+            None
+            if record.preview is None
+            else STORED_CHANGE_SET_PREVIEW.load(record.preview)
+        ),
+        previewed_at=record.previewed_at,
+        proposed_by=record.proposed_by,
+        proposed_at=record.proposed_at,
+        reviewed_by=record.reviewed_by,
+        reviewed_at=record.reviewed_at,
+        review_reason=record.review_reason,
+        result_annotation_version=record.result_annotation_version,
+    )
 
 
 class _CreateProposal(BaseModel):
     model_config = ConfigDict(strict=True, allow_inf_nan=False)
 
-    payload: dict[str, JsonValue]
+    annotation: dict[str, JsonValue]
     owning_group_id: TrimmedNonBlankString
     reason: TrimmedNonBlankString
 
@@ -241,7 +234,7 @@ class ChangeSetService:
         proposal = _validate_input(
             _CreateProposal,
             {
-                "payload": payload,
+                "annotation": payload,
                 "owning_group_id": group,
                 "reason": reason,
             },
@@ -249,7 +242,7 @@ class ChangeSetService:
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.change_sets.create(
                 operation=ChangeSetOperation.CREATE,
-                annotation_payload=proposal.model_dump(mode="json")["payload"],
+                annotation_payload=proposal.model_dump(mode="json")["annotation"],
                 owning_group_id=proposal.owning_group_id,
                 proposed_by=context.actor_id,
                 reason=proposal.reason,
@@ -257,7 +250,7 @@ class ChangeSetService:
             _record_audit(
                 unit_of_work, record, AuditAction.CHANGE_SET_PROPOSED, context
             )
-            result = ChangeSet.model_validate(record)
+            result = _change_set(record)
             unit_of_work.commit()
         return result
 
@@ -301,12 +294,12 @@ class ChangeSetService:
             },
         )
         with self._unit_of_work_factory() as unit_of_work:
-            target = _current_target(unit_of_work.annotations, annotation_id)
-            authorize_annotation(
+            load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.CHANGE_SET_PROPOSE,
-                target,
+                annotation_id,
+                include_deleted=True,
             )
             base = _base_snapshot(unit_of_work.annotations, annotation_id, base_version)
             _apply_patch(base.annotation_data, proposal.patch)
@@ -321,7 +314,7 @@ class ChangeSetService:
             _record_audit(
                 unit_of_work, record, AuditAction.CHANGE_SET_PROPOSED, context
             )
-            result = ChangeSet.model_validate(record)
+            result = _change_set(record)
             unit_of_work.commit()
         return result
 
@@ -350,7 +343,7 @@ class ChangeSetService:
                 context,
                 PermissionAction.CHANGE_SET_READ,
             )
-            return ChangeSet.model_validate(record)
+            return _change_set(record)
 
     def propose_delete(
         self,
@@ -386,12 +379,12 @@ class ChangeSetService:
             },
         )
         with self._unit_of_work_factory() as unit_of_work:
-            target = _current_target(unit_of_work.annotations, annotation_id)
-            authorize_annotation(
+            load_authorized_annotation(
                 unit_of_work.annotations,
                 context,
                 PermissionAction.CHANGE_SET_PROPOSE,
-                target,
+                annotation_id,
+                include_deleted=True,
             )
             _base_snapshot(unit_of_work.annotations, annotation_id, base_version)
             record = unit_of_work.change_sets.create(
@@ -404,7 +397,7 @@ class ChangeSetService:
             _record_audit(
                 unit_of_work, record, AuditAction.CHANGE_SET_PROPOSED, context
             )
-            result = ChangeSet.model_validate(record)
+            result = _change_set(record)
             unit_of_work.commit()
         return result
 
@@ -435,7 +428,7 @@ class ChangeSetService:
             )
             preview = _build_preview(unit_of_work.annotations, record)
             unit_of_work.change_sets.record_preview(
-                change_set_id, preview=preview.model_dump(mode="json")
+                change_set_id, preview=STORED_CHANGE_SET_PREVIEW.dump(preview)
             )
             unit_of_work.commit()
         return preview
@@ -498,7 +491,7 @@ class ChangeSetService:
                 )
                 preview = _build_preview(unit_of_work.annotations, record)
                 unit_of_work.change_sets.record_preview(
-                    change_set_id, preview=preview.model_dump(mode="json")
+                    change_set_id, preview=STORED_CHANGE_SET_PREVIEW.dump(preview)
                 )
                 stale = unit_of_work.change_sets.mark_stale(
                     change_set_id,
@@ -555,7 +548,7 @@ class ChangeSetService:
             _record_audit(
                 unit_of_work, rejected, AuditAction.CHANGE_SET_REJECTED, context
             )
-            result = ChangeSet.model_validate(rejected)
+            result = _change_set(rejected)
             unit_of_work.commit()
         return result
 
@@ -590,8 +583,13 @@ def _authorize_change_set(
             )
         else:
             assert record.annotation_id is not None
-            target = _current_target(repository, record.annotation_id)
-            authorize_annotation(repository, context, action, target)
+            load_authorized_annotation(
+                repository,
+                context,
+                action,
+                record.annotation_id,
+                include_deleted=True,
+            )
     except (PermissionDeniedError, AnnotationNotFoundError):
         raise ChangeSetNotFoundError(record.change_set_id) from None
 
@@ -602,7 +600,12 @@ def _accept_proposal(
     context: RequestContext,
     review_reason: str | None,
 ) -> AcceptedChangeSet:
-    """Apply the repository's write policy and record acceptance without committing."""
+    """Apply the repository's write policy and record acceptance without committing.
+
+    The resulting annotation version is attributed to the proposer for every
+    operation. The reviewer is recorded on the change set and its acceptance
+    audit event.
+    """
     if record.annotation_id is not None:
         current = _current_target(unit_of_work.annotations, record.annotation_id)
         assert record.base_version is not None
@@ -613,35 +616,33 @@ def _accept_proposal(
     before, validation = _candidate(unit_of_work.annotations, record)
     if validation.annotation is None:
         raise InvalidChangeSetError(validation.errors)
-    if record.operation != ChangeSetOperation.DELETE:
-        unit_of_work.entities.require_active(validation.annotation.db_object_id)
     if record.operation == ChangeSetOperation.CREATE:
-        changed = unit_of_work.annotations.create_direct(
+        changed = unit_of_work.annotations.create(
             annotation=validation.annotation,
             owning_group_id=record.owning_group_id,
             actor_id=record.proposed_by,
-            change_source="change_set",
+            change_source=ChangeSource.CHANGE_SET,
         )
     else:
         assert record.annotation_id is not None and record.base_version is not None
         if record.operation == ChangeSetOperation.UPDATE:
-            changed = unit_of_work.annotations.update_direct(
+            changed = unit_of_work.annotations.update(
                 record.annotation_id,
                 validation.annotation,
                 expected_version=record.base_version,
-                actor_id=context.actor_id,
-                change_source="change_set",
+                actor_id=record.proposed_by,
+                change_source=ChangeSource.CHANGE_SET,
             )
         else:
-            changed = unit_of_work.annotations.soft_delete_direct(
+            changed = unit_of_work.annotations.soft_delete(
                 record.annotation_id,
                 expected_version=record.base_version,
-                actor_id=context.actor_id,
-                change_source="change_set",
+                actor_id=record.proposed_by,
+                change_source=ChangeSource.CHANGE_SET,
             )
     preview = ChangeSetPreview(
         change_set_id=record.change_set_id,
-        operation=ChangeSetOperation(record.operation),
+        operation=record.operation,
         annotation_id=record.annotation_id,
         base_version=record.base_version,
         current_version=record.base_version,
@@ -651,7 +652,7 @@ def _accept_proposal(
         is_deleted=record.operation == ChangeSetOperation.DELETE,
     )
     unit_of_work.change_sets.record_preview(
-        record.change_set_id, preview=preview.model_dump(mode="json")
+        record.change_set_id, preview=STORED_CHANGE_SET_PREVIEW.dump(preview)
     )
     accepted = unit_of_work.change_sets.accept(
         record.change_set_id,
@@ -662,7 +663,7 @@ def _accept_proposal(
     )
     _record_audit(unit_of_work, accepted, AuditAction.CHANGE_SET_ACCEPTED, context)
     return AcceptedChangeSet(
-        change_set=ChangeSet.model_validate(accepted),
+        change_set=_change_set(accepted),
         annotation_id=changed.annotation_id,
         version=changed.current_version,
         is_deleted=changed.status == "deleted",
@@ -691,7 +692,7 @@ def _base_snapshot(
         raise InvalidChangeSetError(
             (
                 ValidationIssue(
-                    location=("base_version",),
+                    location=("body", "base_version"),
                     type="base_version_not_found",
                     message="The target annotation has no such saved version.",
                 ),
@@ -701,7 +702,7 @@ def _base_snapshot(
         raise InvalidChangeSetError(
             (
                 ValidationIssue(
-                    location=("base_version",),
+                    location=("body", "base_version"),
                     type="base_version_deleted",
                     message="The saved version represents a deleted annotation.",
                 ),
@@ -718,7 +719,7 @@ def _apply_patch(annotation: dict[str, object], patch: object) -> dict[str, obje
         raise InvalidChangeSetError(
             (
                 ValidationIssue(
-                    location=("patch", *error.issue.location),
+                    location=("body", "patch", *error.issue.location),
                     type=error.issue.type,
                     message="The patch cannot be applied to the annotation.",
                 ),
@@ -774,7 +775,7 @@ def _build_preview(
     )
     return ChangeSetPreview(
         change_set_id=record.change_set_id,
-        operation=ChangeSetOperation(record.operation),
+        operation=record.operation,
         annotation_id=record.annotation_id,
         base_version=record.base_version,
         current_version=current_version,
@@ -789,18 +790,14 @@ def _build_preview(
 
 
 def _validate_input[T: BaseModel](model: type[T], payload: object) -> T:
-    """Validate workflow input and expose stable annotation-style issue details."""
+    """Validate workflow input and report issues located in the request body.
+
+    Each model's field names match the request body fields they hold.
+    """
     try:
         return model.model_validate(payload)
     except ValidationError as error:
-        raise InvalidChangeSetError(
-            tuple(
-                ValidationIssue(
-                    location=issue["loc"], message=issue["msg"], type=issue["type"]
-                )
-                for issue in error.errors(include_url=False, include_context=False)
-            )
-        ) from None
+        raise InvalidChangeSetError(validation_issues(error, root=("body",))) from None
 
 
 def _lock_proposal(
@@ -824,10 +821,7 @@ def _lock_proposal(
         ChangeSetNotFoundError: If the proposal is missing or inaccessible.
         ChangeSetStateError: If the proposal has already been reviewed.
     """
-    try:
-        record = unit_of_work.change_sets.lock_for_review(change_set_id)
-    except RepositoryChangeSetNotFoundError:
-        raise ChangeSetNotFoundError(change_set_id) from None
+    record = unit_of_work.change_sets.lock_for_review(change_set_id)
     _authorize_change_set(unit_of_work.annotations, record, context, action)
     if record.state != ChangeSetState.PROPOSED:
         raise ChangeSetStateError(change_set_id, record.state)
@@ -841,10 +835,10 @@ def _duplicate_peers(
     exclude_annotation_id: UUID | None = None,
 ) -> tuple[UUID, ...]:
     """Look up active peers for advisory preview without performing a write."""
-    candidate = prepare_annotation_for_persistence(annotation)
+    key = duplicate_key(annotation)
     return repository.find_duplicate_peer_ids(
-        candidate.duplicate_base_signature,
-        candidate.canonical_references,
+        key.signature,
+        key.references,
         exclude_annotation_id=exclude_annotation_id,
     )
 

@@ -1,12 +1,12 @@
 """Define typed request and response models for SAB's HTTP APIs.
 
-Response constructors list fields explicitly even when service results currently
-have the same shape. This prevents newly added service fields from appearing in API
-responses automatically and allows each representation to change independently.
-Page constructors convert each item through its resource constructor for the same
-reason.
+Each resource that represents a service result converts it through `from_service`.
+Conversion reads only the attributes the resource declares, so fields added to a
+service result do not appear in API responses until the resource declares them.
+Page constructors convert each item through its resource constructor.
 """
 
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import Annotated, Literal, Self
 from uuid import UUID
@@ -14,13 +14,24 @@ from uuid import UUID
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 
+from standard_annotation_backend.api.dependencies import PageLimit, PageOffset
 from standard_annotation_backend.api.examples import CHANGE_SET_PROPOSAL_EXAMPLES
+from standard_annotation_backend.domain.annotation_search import AnnotationFilter
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationExtension,
     AnnotationProperties,
 )
+from standard_annotation_backend.domain.auth import (
+    AuthorizationRole,
+    AuthorizationScope,
+)
+from standard_annotation_backend.domain.change_sets import (
+    ChangeSetOperation,
+    ChangeSetState,
+)
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.tokens import TokenMetadata
 from standard_annotation_backend.refresh.sources import SourceKey
 from standard_annotation_backend.services.annotation_service import (
     AnnotationVersion,
@@ -34,7 +45,11 @@ from standard_annotation_backend.services.change_set_service import (
 from standard_annotation_backend.services.comment_service import AnnotationComment
 from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.pagination import ResultPage
-from standard_annotation_backend.services.token_service import TokenCreateInput
+from standard_annotation_backend.services.token_service import (
+    CreatedToken,
+    TokenContext,
+    TokenCreateInput,
+)
 from standard_annotation_backend.validation_types import (
     NonBlankString,
 )
@@ -157,6 +172,92 @@ class AnnotationPatchRequest(BaseModel):
         return self.model_dump(mode="json", exclude_unset=True)
 
 
+class AnnotationSearchQuery(BaseModel):
+    """Describe the query parameters that filter an annotation search.
+
+    Each scalar parameter must match exactly. Repeating a list-valued parameter
+    requires every supplied value to be present. Unknown parameter names are not
+    rejected here; the search route reports them with its own error codes.
+
+    Attributes:
+        db_object_id: Database object identifier to match.
+        negation: Negation value to match.
+        relation: Relation identifier to match.
+        ontology_class_id: Ontology class identifier to match.
+        ontology_class_id_closure: Loaded predicate for descendant-or-self matching.
+        references: Reference identifiers that must all be present.
+        evidence_type: Evidence type identifier to match.
+        with_or_from: Supporting identifiers that must all be present.
+        interacting_taxon_id: Taxon identifiers that must all be present.
+        annotation_date: Annotation date to match.
+        assigned_by: Assigning organization to match.
+    """
+
+    db_object_id: str | None = None
+    negation: bool | None = None
+    relation: str | None = None
+    ontology_class_id: str | None = None
+    ontology_class_id_closure: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Return annotations whose ontology class is a descendant-or-self "
+                "of `ontology_class_id` through this loaded predicate."
+            )
+        ),
+    ] = None
+    references: list[str] | None = None
+    evidence_type: str | None = None
+    with_or_from: list[str] | None = None
+    interacting_taxon_id: list[str] | None = None
+    annotation_date: date | None = None
+    assigned_by: str | None = None
+
+    def to_filter(self) -> AnnotationFilter:
+        """Return these parameters as annotation search criteria.
+
+        Call this from the route body rather than during query parsing so that
+        an invalid combination is reported with its own error code instead of as
+        a generic request-validation failure.
+
+        Returns:
+            Criteria with omitted list parameters represented as empty tuples.
+
+        Raises:
+            ClosureTermRequiredError: If `ontology_class_id_closure` is supplied
+                without `ontology_class_id`.
+        """
+        return AnnotationFilter(
+            db_object_id=self.db_object_id,
+            negation=self.negation,
+            relation=self.relation,
+            ontology_class_id=self.ontology_class_id,
+            ontology_class_id_closure=self.ontology_class_id_closure,
+            references=tuple(self.references or ()),
+            evidence_type=self.evidence_type,
+            with_or_from=tuple(self.with_or_from or ()),
+            interacting_taxon_id=tuple(self.interacting_taxon_id or ()),
+            annotation_date=self.annotation_date,
+            assigned_by=self.assigned_by,
+        )
+
+
+class AnnotationListQuery(AnnotationSearchQuery):
+    """Describe every query parameter accepted by the annotation search route.
+
+    FastAPI documents a query-parameter model as individual parameters only when
+    it is the route's sole query input, so the pagination parameters are part of
+    this model rather than separate route arguments.
+
+    Attributes:
+        limit: Maximum number of annotations to return.
+        offset: Number of matching annotations to skip.
+    """
+
+    limit: PageLimit = 50
+    offset: PageOffset = 0
+
+
 class AnnotationResource(BaseModel):
     """Represent the latest active state of an annotation in an API response."""
 
@@ -179,16 +280,7 @@ class AnnotationResource(BaseModel):
         Returns:
             The same data represented as a validated API response model.
         """
-        return cls(
-            annotation_id=result.annotation_id,
-            version=result.version,
-            owning_group_id=result.owning_group_id,
-            record_origin=result.record_origin,
-            source_import_job_id=result.source_import_job_id,
-            created_at=result.created_at,
-            updated_at=result.updated_at,
-            annotation=result.annotation,
-        )
+        return cls.model_validate(result, from_attributes=True)
 
 
 class JobResource(BaseModel):
@@ -204,8 +296,9 @@ class JobResource(BaseModel):
             "a failure_code, and, when available, failure_details describing the "
             "problem: a message for an invalid header, or issue_count and up to "
             "100 issues (line number, category, and invalid fields) for invalid "
-            "rows. Refresh jobs whose source document was already active, so "
-            "nothing was applied, include unchanged=true."
+            "rows. Completed refresh jobs, except entity retirement, include "
+            "unchanged, which is true when the source document was already "
+            "active so nothing was applied."
         ),
         examples=[
             {
@@ -237,13 +330,13 @@ class JobResource(BaseModel):
     warnings: tuple[str, ...]
     result: dict[str, object] | None = Field(
         description=(
-            "Type-specific durable result. Successful entity refreshes include "
-            "warning_count and warnings; refreshes whose source is unchanged "
-            "return unchanged: true instead."
+            "Type-specific durable result. Successful results of every refresh "
+            "job, except entity retirement, include unchanged, true when "
+            "nothing was applied. Entity refresh results also include "
+            "warning_count and warnings."
         ),
-        examples=[{"warning_count": 0, "warnings": []}],
+        examples=[{"unchanged": False, "warning_count": 0, "warnings": []}],
     )
-    artifact_uri: str | None
     error: str | None
     created_at: datetime
     updated_at: datetime
@@ -252,22 +345,8 @@ class JobResource(BaseModel):
 
     @classmethod
     def from_service(cls, job: Job) -> Self:
-        """Convert a `JobService` result to a response without worker parameters."""
-        return cls(
-            job_id=job.job_id,
-            job_type=job.job_type,
-            status=job.status,
-            requested_by=job.requested_by,
-            progress=job.progress,
-            warnings=job.warnings,
-            result=job.result,
-            artifact_uri=job.artifact_uri,
-            error=job.error,
-            created_at=job.created_at,
-            updated_at=job.updated_at,
-            started_at=job.started_at,
-            completed_at=job.completed_at,
-        )
+        """Convert a `JobService` result; worker parameters are not included."""
+        return cls.model_validate(job, from_attributes=True)
 
 
 class RefreshRequest(BaseModel):
@@ -338,24 +417,51 @@ class AnnotationCommentResource(BaseModel):
         Returns:
             Serialized public comment resource.
         """
-        return cls(
-            comment_id=result.comment_id,
-            annotation_id=result.annotation_id,
-            annotation_version=result.annotation_version,
-            body=result.body,
-            created_by=result.created_by,
-            created_at=result.created_at,
-            updated_at=result.updated_at,
-        )
+        return cls.model_validate(result, from_attributes=True)
 
 
-class AnnotationCommentPageResponse(BaseModel):
-    """Represent one requested page of visible annotation comments."""
+class PageResource[T](BaseModel):
+    """Represent one requested page of API resources.
 
-    items: list[AnnotationCommentResource]
+    Each paginated endpoint declares its own subclass with a concrete item type, so
+    every page keeps its own name and description in the OpenAPI document.
+
+    Attributes:
+        items: Resources included in this page.
+        total: Number of matching resources across all pages.
+        limit: Maximum number of resources requested for this page.
+        offset: Number of matching resources skipped before this page.
+    """
+
+    items: list[T]
     total: int
     limit: int
     offset: int
+
+    @classmethod
+    def from_result_page[S](
+        cls, result: ResultPage[S], convert: Callable[[S], T]
+    ) -> Self:
+        """Build a response page by converting each service result.
+
+        Args:
+            result: Page returned by an application service.
+            convert: Resource constructor applied to each result in order.
+
+        Returns:
+            A validated page with the converted items and the service's pagination
+            values.
+        """
+        return cls(
+            items=[convert(item) for item in result.items],
+            total=result.total,
+            limit=result.limit,
+            offset=result.offset,
+        )
+
+
+class AnnotationCommentPageResponse(PageResource[AnnotationCommentResource]):
+    """Represent one requested page of visible annotation comments."""
 
     @classmethod
     def from_service(cls, result: ResultPage[AnnotationComment]) -> Self:
@@ -367,14 +473,7 @@ class AnnotationCommentPageResponse(BaseModel):
         Returns:
             Serialized public comment page.
         """
-        return cls(
-            items=[
-                AnnotationCommentResource.from_service(item) for item in result.items
-            ],
-            total=result.total,
-            limit=result.limit,
-            offset=result.offset,
-        )
+        return cls.from_result_page(result, AnnotationCommentResource.from_service)
 
 
 class AnnotationVersionResource(BaseModel):
@@ -398,24 +497,11 @@ class AnnotationVersionResource(BaseModel):
         Returns:
             The saved version represented as a validated API response model.
         """
-        return cls(
-            annotation_id=result.annotation_id,
-            version=result.version,
-            is_deleted=result.is_deleted,
-            actor_id=result.actor_id,
-            change_source=result.change_source,
-            created_at=result.created_at,
-            annotation=result.annotation,
-        )
+        return cls.model_validate(result, from_attributes=True)
 
 
-class AnnotationPageResponse(BaseModel):
+class AnnotationPageResponse(PageResource[AnnotationResource]):
     """Represent one requested page of active annotations."""
-
-    items: list[AnnotationResource]
-    total: int
-    limit: int
-    offset: int
 
     @classmethod
     def from_service(cls, result: ResultPage[CurrentAnnotation]) -> Self:
@@ -427,21 +513,11 @@ class AnnotationPageResponse(BaseModel):
         Returns:
             A validated page suitable for an API response.
         """
-        return cls(
-            items=[AnnotationResource.from_service(item) for item in result.items],
-            total=result.total,
-            limit=result.limit,
-            offset=result.offset,
-        )
+        return cls.from_result_page(result, AnnotationResource.from_service)
 
 
-class AnnotationVersionPageResponse(BaseModel):
+class AnnotationVersionPageResponse(PageResource[AnnotationVersionResource]):
     """Represent one requested page of saved annotation versions."""
-
-    items: list[AnnotationVersionResource]
-    total: int
-    limit: int
-    offset: int
 
     @classmethod
     def from_service(cls, result: ResultPage[AnnotationVersion]) -> Self:
@@ -453,14 +529,7 @@ class AnnotationVersionPageResponse(BaseModel):
         Returns:
             A validated page suitable for an API response.
         """
-        return cls(
-            items=[
-                AnnotationVersionResource.from_service(item) for item in result.items
-            ],
-            total=result.total,
-            limit=result.limit,
-            offset=result.offset,
-        )
+        return cls.from_result_page(result, AnnotationVersionResource.from_service)
 
 
 class ApiValidationIssue(BaseModel):
@@ -477,10 +546,8 @@ class ChangeSetPreviewResource(BaseModel):
     A preview is advisory. Acceptance repeats validation and concurrency checks.
     """
 
-    model_config = ConfigDict(from_attributes=True)
-
     change_set_id: UUID
-    operation: Literal["create", "update", "delete"]
+    operation: ChangeSetOperation
     annotation_id: UUID | None
     base_version: int | None
     current_version: int | None
@@ -495,17 +562,15 @@ class ChangeSetPreviewResource(BaseModel):
     @classmethod
     def from_service(cls, result: ChangeSetPreview) -> Self:
         """Convert a service preview to the public response model."""
-        return cls.model_validate(result)
+        return cls.model_validate(result, from_attributes=True)
 
 
 class ChangeSetResource(BaseModel):
     """Expose a proposal, its last stored preview, and its review outcome."""
 
-    model_config = ConfigDict(from_attributes=True)
-
     change_set_id: UUID
-    operation: Literal["create", "update", "delete"]
-    state: Literal["proposed", "accepted", "rejected", "stale"]
+    operation: ChangeSetOperation
+    state: ChangeSetState
     owning_group_id: str
     annotation_id: UUID | None
     base_version: int | None
@@ -524,13 +589,11 @@ class ChangeSetResource(BaseModel):
     @classmethod
     def from_service(cls, result: ChangeSet) -> Self:
         """Convert a service proposal and its stored preview to an API resource."""
-        return cls.model_validate(result)
+        return cls.model_validate(result, from_attributes=True)
 
 
 class AcceptedChangeSetResource(BaseModel):
     """Identify an accepted proposal and its resulting annotation version."""
-
-    model_config = ConfigDict(from_attributes=True)
 
     change_set: ChangeSetResource
     annotation_id: UUID
@@ -541,7 +604,7 @@ class AcceptedChangeSetResource(BaseModel):
     @classmethod
     def from_service(cls, result: AcceptedChangeSet) -> Self:
         """Convert acceptance data, including deletion results, to an API response."""
-        return cls.model_validate(result)
+        return cls.model_validate(result, from_attributes=True)
 
 
 class DuplicateAnnotationDetails(BaseModel):
@@ -596,12 +659,15 @@ class TokenCreateRequest(TokenCreateInput):
 class TokenContextResource(BaseModel):
     """Expose one current context available to the authenticated user."""
 
-    model_config = ConfigDict(from_attributes=True)
-
     assignment_id: UUID
-    role: Literal["read", "edit", "admin"]
-    scope: Literal["self", "group", "global"]
+    role: AuthorizationRole
+    scope: AuthorizationScope
     group_id: str | None
+
+    @classmethod
+    def from_service(cls, context: TokenContext) -> Self:
+        """Build a response from a context the user may select for a token."""
+        return cls.model_validate(context, from_attributes=True)
 
 
 class TokenContextListResponse(BaseModel):
@@ -613,8 +679,6 @@ class TokenContextListResponse(BaseModel):
 class TokenResource(BaseModel):
     """Expose token metadata without a bearer secret or lookup digest."""
 
-    model_config = ConfigDict(from_attributes=True)
-
     token_id: UUID
     user_id: UUID
     assignment_id: UUID
@@ -623,10 +687,15 @@ class TokenResource(BaseModel):
     expires_at: datetime
     last_used_at: datetime | None
     revoked_at: datetime | None
-    role: Literal["read", "edit", "admin"]
-    scope: Literal["self", "group", "global"]
+    role: AuthorizationRole
+    scope: AuthorizationScope
     group_id: str | None
     assignment_is_active: bool
+
+    @classmethod
+    def from_service(cls, metadata: TokenMetadata) -> Self:
+        """Build a response from token metadata, which never includes the secret."""
+        return cls.model_validate(metadata, from_attributes=True)
 
 
 class TokenCreatedResponse(TokenResource):
@@ -635,6 +704,18 @@ class TokenCreatedResponse(TokenResource):
     token: str = Field(
         repr=False, description="Copy this secret now; it cannot be retrieved again."
     )
+
+    @classmethod
+    def from_service(  # ty: ignore[invalid-method-override] -- Creation has its own result type.
+        cls, created: CreatedToken
+    ) -> Self:
+        """Build the creation response, the only one to include the secret."""
+        return cls.model_validate(
+            {
+                "token": created.raw_token,
+                **TokenResource.from_service(created.metadata).model_dump(),
+            }
+        )
 
 
 class TokenListResponse(BaseModel):

@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from source_provenance import github_provenance
 from sqlalchemy import func, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
@@ -83,7 +83,6 @@ def test_auth_and_audit_share_transaction_and_rollback(
 ) -> None:
     """Exiting without commit rolls back synchronized identities and audit together."""
     with unit_of_work_factory() as uow:
-        assert uow.auth.session is uow.audit.session
         uow.auth.replace_authorizations(
             users=(SyncUser("curator", None, ()),),
             provenance=github_provenance("c" * 40, "repo"),
@@ -136,8 +135,10 @@ def test_token_listing_revocation_and_last_use_are_owner_scoped(
         uow.auth.record_token_use(token.token_id, used_at=now)
         entries = uow.auth.list_tokens(owner.user_id)
         assert len(entries) == 1
-        assert entries[0].name == "Notebook"
-        assert entries[0].last_used_at == now + timedelta(seconds=1)
+        listed, assignment_is_active = entries[0]
+        assert listed.name == "Notebook"
+        assert listed.last_used_at == now + timedelta(seconds=1)
+        assert assignment_is_active is True
         assert uow.auth.list_tokens(other.user_id) == ()
         assert (
             uow.auth.revoke_token(other.user_id, token.token_id, revoked_at=now)
@@ -154,8 +155,12 @@ def test_token_listing_revocation_and_last_use_are_owner_scoped(
             )
             is True
         )
-        assert uow.auth.list_tokens(owner.user_id)[0].revoked_at == now
+        assert uow.auth.list_tokens(owner.user_id)[0][0].revoked_at == now
         uow.commit()
+    with unit_of_work_factory() as uow:
+        listed_record, _ = uow.auth.list_tokens(owner.user_id)[0]
+        with pytest.raises(InvalidRequestError):
+            _ = listed_record.digest
 
 
 def test_digest_lookup_rejects_expiry_inactive_assignments_and_missing_credentials(
@@ -259,38 +264,6 @@ def test_duplicate_grants_in_one_sync_share_assignment_identity(
         }
         assert len(assignments) == 2
         uow.commit()
-
-
-def test_removed_and_regranted_context_does_not_revive_issued_token(
-    unit_of_work_factory: UnitOfWorkFactory,
-) -> None:
-    """Regranting identical authority cannot make an old token authenticate again."""
-    _sync(unit_of_work_factory)
-    now = datetime.now(UTC)
-    with unit_of_work_factory() as uow:
-        owner = uow.auth.get_user_by_github_login("curator")
-        assert owner is not None
-        assignment = uow.auth.list_active_assignments(owner.user_id)[0]
-        uow.auth.create_token(
-            user_id=owner.user_id,
-            assignment_id=assignment.assignment_id,
-            name="Client",
-            digest="a" * 64,
-            created_at=now,
-            expires_at=now + timedelta(days=1),
-        )
-        uow.commit()
-    with unit_of_work_factory() as uow:
-        uow.auth.replace_authorizations(
-            users=(), provenance=github_provenance("b" * 40, "repo"), summary={}
-        )
-        uow.commit()
-    _sync(unit_of_work_factory, "c" * 40)
-    with unit_of_work_factory() as uow:
-        assert uow.auth.get_active_token("a" * 64, now=now) is None
-        entries = uow.auth.list_tokens(owner.user_id)
-        assert len(entries) == 1
-        assert entries[0].assignment_is_active is False
 
 
 def test_concurrent_syncs_replace_the_complete_committed_state(

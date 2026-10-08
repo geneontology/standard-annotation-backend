@@ -6,9 +6,11 @@ import pytest
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.duplicate_policy import (
+    DuplicateKey,
     are_duplicate_annotations,
     canonicalize_duplicate_fields,
     duplicate_base_signature,
+    duplicate_key,
 )
 
 
@@ -184,3 +186,29 @@ def test_reference_overlap_is_pairwise_and_not_transitive() -> None:
     assert are_duplicate_annotations(first, bridge)
     assert are_duplicate_annotations(bridge, third)
     assert not are_duplicate_annotations(first, third)
+
+
+def test_duplicate_key_carries_the_signature_and_canonical_references() -> None:
+    """The key holds the base signature and the sorted, unique references."""
+    subject = annotation(references=["PMID:2", "PMID:1", "PMID:2"])
+
+    assert duplicate_key(subject) == DuplicateKey(
+        signature=duplicate_base_signature(subject),
+        references=("PMID:1", "PMID:2"),
+    )
+
+
+def test_duplicate_keys_overlap_exactly_when_annotations_are_duplicates() -> None:
+    """Equal signatures with overlapping references identify duplicates."""
+    first = annotation(references=["PMID:1", "PMID:2"])
+    overlapping = annotation(references=["PMID:2", "PMID:3"])
+    disjoint = annotation(references=["PMID:4"])
+    different = annotation(references=["PMID:1"], relation="RO:0002264")
+
+    for other in (overlapping, disjoint, different):
+        left, right = duplicate_key(first), duplicate_key(other)
+        overlaps = left.signature == right.signature and not set(
+            left.references
+        ).isdisjoint(right.references)
+        assert overlaps is are_duplicate_annotations(first, other)
+    assert are_duplicate_annotations(first, overlapping)
