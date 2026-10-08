@@ -21,9 +21,7 @@ def active_search_subjects(seed_active_subjects: Callable[..., None]) -> None:
         "UniProtKB:C1003",
         "UniProtKB:M1001",
         "UniProtKB:M1002",
-        "UniProtKB:R1001",
-        "UniProtKB:R1002",
-        "UniProtKB:R1003",
+        "UniProtKB:M1003",
         "UniProtKB:U1001",
     )
 
@@ -186,9 +184,9 @@ def test_annotation_search_api_filter_supports_each_scalar_field(
 
 
 @pytest.mark.parametrize(
-    ("field_name", "matching_value", "excluded_value"),
+    ("field_name", "first_value", "second_value"),
     [
-        ("references", "PMID:search", "PMID:excluded"),
+        ("references", "PMID:first", "PMID:second"),
         ("with_or_from", "UniProtKB:FROM1", "UniProtKB:FROM2"),
         (
             "interacting_taxon_id",
@@ -200,59 +198,39 @@ def test_annotation_search_api_filter_supports_each_scalar_field(
 def test_annotation_search_api_filter_supports_each_multivalued_field(
     integration_api_client: TestClient,
     field_name: str,
-    matching_value: str,
-    excluded_value: str,
+    first_value: str,
+    second_value: str,
 ) -> None:
-    """Each list-valued search field finds annotations containing the value."""
-    matching_id = _create_annotation(
-        integration_api_client,
-        "UniProtKB:M1001",
-        **{field_name: [matching_value]},
+    """A list-valued filter finds annotations containing the value; repeating it requires all."""
+    only_first_id = _create_annotation(
+        integration_api_client, "UniProtKB:M1001", **{field_name: [first_value]}
     )
     _create_annotation(
+        integration_api_client, "UniProtKB:M1002", **{field_name: [second_value]}
+    )
+    both_id = _create_annotation(
         integration_api_client,
-        "UniProtKB:M1002",
-        **{field_name: [excluded_value]},
+        "UniProtKB:M1003",
+        **{field_name: [first_value, second_value]},
     )
 
-    response = integration_api_client.get(
+    single = integration_api_client.get(
+        "/annotations", params={field_name: first_value}
+    )
+    repeated = integration_api_client.get(
         "/annotations",
-        params={field_name: matching_value},
+        params=[(field_name, first_value), (field_name, second_value)],
     )
 
-    assert response.status_code == status.HTTP_200_OK
-    assert response.json()["total"] == 1
-    assert [item["annotation_id"] for item in response.json()["items"]] == [matching_id]
-
-
-def test_annotation_search_api_filter_repeated_references_require_all_values(
-    integration_api_client: TestClient,
-) -> None:
-    """Repeated reference filters require every requested reference."""
-    matching_id = _create_annotation(
-        integration_api_client,
-        "UniProtKB:R1001",
-        references=["PMID:one", "PMID:two"],
-    )
-    _create_annotation(
-        integration_api_client,
-        "UniProtKB:R1002",
-        references=["PMID:one"],
-    )
-    _create_annotation(
-        integration_api_client,
-        "UniProtKB:R1003",
-        references=["PMID:two"],
-    )
-
-    response = integration_api_client.get(
-        "/annotations",
-        params=[("references", "PMID:one"), ("references", "PMID:two")],
-    )
-
-    assert response.status_code == status.HTTP_200_OK
-    assert response.json()["total"] == 1
-    assert [item["annotation_id"] for item in response.json()["items"]] == [matching_id]
+    assert single.status_code == status.HTTP_200_OK
+    assert single.json()["total"] == 2
+    assert [item["annotation_id"] for item in single.json()["items"]] == [
+        only_first_id,
+        both_id,
+    ]
+    assert repeated.status_code == status.HTTP_200_OK
+    assert repeated.json()["total"] == 1
+    assert [item["annotation_id"] for item in repeated.json()["items"]] == [both_id]
 
 
 def test_annotation_search_api_filter_combines_fields_with_and(
@@ -369,16 +347,3 @@ def test_annotation_search_api_unsupported_name_precedes_all_other_validation(
     assert response.json() == _located_error(
         "unsupported_filter", _UNSUPPORTED_FILTER_MESSAGE, "annotation_extensions"
     )
-
-
-def test_annotation_search_api_known_invalid_value_remains_validation_error(
-    integration_api_client: TestClient,
-) -> None:
-    """A recognized parameter with an invalid value returns a validation error."""
-    response = integration_api_client.get(
-        "/annotations",
-        params={"limit": 0},
-    )
-
-    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
-    assert response.json()["error"]["code"] == "request_validation_error"

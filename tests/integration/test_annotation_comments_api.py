@@ -127,7 +127,7 @@ def test_create_and_list_comments_pin_the_current_annotation_version(
 def test_create_pins_the_actual_current_annotation_version(
     integration_api_client: TestClient,
 ) -> None:
-    """A comment created after an annotation update records that new version."""
+    """A comment records the current annotation version and keeps it after later updates."""
     annotation = _create_annotation(integration_api_client)
     annotation_id = annotation["annotation_id"]
     updated = integration_api_client.patch(
@@ -142,6 +142,17 @@ def test_create_pins_the_actual_current_annotation_version(
     comment = _create_comment(integration_api_client, annotation_id)
 
     assert comment["annotation_version"] == 2
+
+    updated_again = integration_api_client.patch(
+        f"/annotations/{annotation_id}",
+        headers={"If-Match": '"2"'},
+        json={"assigned_by": "ZFIN"},
+    )
+
+    assert updated_again.status_code == status.HTTP_200_OK
+    assert updated_again.json()["version"] == 3
+    listed = integration_api_client.get(f"/annotations/{annotation_id}/comments")
+    assert [item["annotation_version"] for item in listed.json()["items"]] == [2]
 
 
 def test_comment_listing_paginates_visible_comments(
@@ -255,6 +266,7 @@ def test_author_can_edit_and_soft_delete_without_changing_annotation_history(
     assert edited.json()["body"] == "Corrected comment"
     assert edited.json()["created_by"] == "api-test-user"
     assert edited.json()["annotation_version"] == 1
+    assert edited.json()["created_at"] == comment["created_at"]
     assert edited.json()["updated_at"] > comment["updated_at"]
 
     deleted = integration_api_client.delete(path)
@@ -409,6 +421,7 @@ def test_comment_mutations_record_authenticated_audit_context(
         for event in events
     )
     assert all(event.annotation_version == 1 for event in events)
+    assert all(event.details == {"change_source": "api"} for event in events)
 
 
 @pytest.mark.parametrize("operation", ["create", "edit", "delete"])

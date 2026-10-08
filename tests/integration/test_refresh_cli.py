@@ -198,7 +198,7 @@ def test_cli_reports_when_no_sources_are_configured(
 
 
 def test_unknown_kind_is_a_usage_error() -> None:
-    """Only the three refresh kinds are accepted."""
+    """An unknown refresh kind is a usage error (exit status 2)."""
     with pytest.raises(SystemExit) as raised:
         cli.main(["users"])
 

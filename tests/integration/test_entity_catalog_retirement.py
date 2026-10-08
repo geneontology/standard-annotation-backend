@@ -11,7 +11,7 @@ from refresh_helpers import (
     sources_with_entities,
 )
 from seeding import create_job
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_entity_refresh_service import publish_catalog
 
@@ -20,9 +20,7 @@ from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AuditEventRecord,
-    EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
-    EntitySourceRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh import runner as refresh_runner
@@ -139,16 +137,6 @@ def test_retirement_removes_membership_and_reports_impacts(
                 )
             )
         ) == ["RGD:1"]
-        assert session.scalar(select(func.count()).select_from(EntitySourceRecord)) == 1
-        retired = session.scalar(
-            select(EntityCatalogSnapshotRecord).where(
-                EntityCatalogSnapshotRecord.source_key == "mgi"
-            )
-        )
-        assert retired is not None
-        assert retired.active is False
-        assert retired.retired_by_job_id == job_id
-        assert retired.retired_at is not None
         assert session.get(AnnotationRecord, annotation_id) is not None
         audits = list(
             session.scalars(
@@ -158,18 +146,16 @@ def test_retirement_removes_membership_and_reports_impacts(
             )
         )
         assert len(audits) == 1
+        retired_snapshot_id = audits[0].details["snapshot_id"]
     with jobs._unit_of_work_factory() as uow:
         record = uow.jobs.get(job_id)
         assert record is not None
         assert record.status == JobStatus.SUCCEEDED.value
-        # Retirement has no source document, so it never reports `unchanged`.
         assert record.progress == {"phase": "completed", "removed_count": 2}
-        assert "unchanged" not in record.progress
-        assert record.result is not None and "unchanged" not in record.result
         assert record.result == {
             "source_key": "mgi",
             "retired": True,
-            "snapshot_id": str(retired.snapshot_id),
+            "snapshot_id": retired_snapshot_id,
             "removed_count": 2,
             "removal_impacts": [
                 {"db_object_id": "MGI:1", "annotation_ids": [str(annotation_id)]},

@@ -5,10 +5,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from seeding import insert_annotation
-from sqlalchemy import func, select, text
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
+from standard_annotation_backend.domain.annotation_search import (
+    AnnotationFilter,
+    OwnershipScope,
+)
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationDeletedError,
@@ -22,10 +26,7 @@ from standard_annotation_backend.persistence.annotation_data import (
 )
 from standard_annotation_backend.persistence.locks import acquire_signature_locks
 from standard_annotation_backend.persistence.models import (
-    AnnotationDuplicateReferenceRecord,
-    AnnotationMultivaluedFieldValueRecord,
     AnnotationRecord,
-    AnnotationVersionRecord,
     JobRecord,
 )
 from standard_annotation_backend.persistence.repositories import (
@@ -81,73 +82,38 @@ def _create_source_job(session_factory: sessionmaker[Session]) -> UUID:
 
 def test_direct_create_stores_current_version_and_derived_values(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
+    """A created annotation is readable, versioned, searchable, and a duplicate peer."""
     persistence_data = prepare_annotation_for_persistence(validated_annotation)
 
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
 
-    with session_factory() as session:
-        current = session.get(AnnotationRecord, annotation_id)
-        versions = session.scalars(
-            select(AnnotationVersionRecord).where(
-                AnnotationVersionRecord.annotation_id == annotation_id
+    with unit_of_work_factory() as unit_of_work:
+        repository = unit_of_work.annotations
+        current = repository.get(annotation_id)
+        versions = repository.list_versions_page(annotation_id, limit=100, offset=0)
+        assert current is not None
+        assert current.current_version == 1
+        assert current.status == AnnotationStatus.ACTIVE
+        assert current.owning_group_id == "group-1"
+        assert current.record_origin == AnnotationOrigin.DIRECT
+        assert current.source_import_job_id is None
+        assert current.annotation_data == validated_annotation.model_dump(mode="json")
+        assert [(v.version, v.is_deleted) for v in versions.items] == [(1, False)]
+        for criteria in (
+            AnnotationFilter(references=("PMID:1",)),
+            AnnotationFilter(with_or_from=("UniProtKB:Q1",)),
+            AnnotationFilter(interacting_taxon_id=("NCBITaxon:9606",)),
+        ):
+            found = repository.list_active(
+                criteria, OwnershipScope(), limit=10, offset=0
             )
-        ).all()
-        field_rows = session.scalars(
-            select(AnnotationMultivaluedFieldValueRecord)
-            .where(AnnotationMultivaluedFieldValueRecord.annotation_id == annotation_id)
-            .order_by(
-                AnnotationMultivaluedFieldValueRecord.field_name,
-                AnnotationMultivaluedFieldValueRecord.field_value,
-            )
-        ).all()
-        reference_rows = session.scalars(
-            select(AnnotationDuplicateReferenceRecord)
-            .where(AnnotationDuplicateReferenceRecord.annotation_id == annotation_id)
-            .order_by(AnnotationDuplicateReferenceRecord.canonical_reference)
-        ).all()
-
-    assert current is not None
-    assert current.annotation_data == persistence_data.annotation_data
-    assert current.current_version == 1
-    assert current.status == AnnotationStatus.ACTIVE
-    assert current.owning_group_id == "group-1"
-    assert current.record_origin == AnnotationOrigin.DIRECT
-    assert current.source_import_job_id is None
-    assert current.duplicate_base_signature == persistence_data.duplicate_base_signature
-    assert (
-        current.db_object_id,
-        current.negation,
-        current.relation,
-        current.ontology_class_id,
-        current.evidence_type,
-        current.annotation_date,
-        current.assigned_by,
-    ) == (
-        persistence_data.db_object_id,
-        persistence_data.negation,
-        persistence_data.relation,
-        persistence_data.ontology_class_id,
-        persistence_data.evidence_type,
-        persistence_data.annotation_date,
-        persistence_data.assigned_by,
-    )
-    assert [(row.version, row.annotation_data, row.is_deleted) for row in versions] == [
-        (1, persistence_data.annotation_data, False)
-    ]
-    assert [(row.field_name, row.field_value) for row in field_rows] == [
-        (value.field_name, value.field_value)
-        for value in persistence_data.multivalued_field_values
-    ]
-    assert [row.canonical_reference for row in reference_rows] == list(
-        persistence_data.canonical_references
-    )
-    assert all(
-        row.duplicate_base_signature == persistence_data.duplicate_base_signature
-        for row in reference_rows
-    )
+            assert [record.annotation_id for record in found.items] == [annotation_id]
+        assert repository.find_duplicate_peer_ids(
+            persistence_data.duplicate_base_signature,
+            [persistence_data.canonical_references[0]],
+        ) == (annotation_id,)
 
 
 def test_imported_duplicate_peers_coexist_and_find_each_other(
@@ -189,9 +155,9 @@ def test_imported_duplicate_peers_coexist_and_find_each_other(
 
 def test_update_appends_version_and_replaces_current_derived_values(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
+    """An update appends a version and makes search and duplicate checks use new values."""
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     changed = _changed_annotation(
         validated_annotation,
@@ -214,8 +180,9 @@ def test_update_appends_version_and_replaces_current_derived_values(
         assert record.current_version == 2
 
     with unit_of_work_factory() as unit_of_work:
-        current = unit_of_work.annotations.get(annotation_id)
-        versions = unit_of_work.annotations.list_versions_page(
+        repository = unit_of_work.annotations
+        current = repository.get(annotation_id)
+        versions = repository.list_versions_page(
             annotation_id, limit=100, offset=0
         ).items
         assert current is not None
@@ -226,20 +193,28 @@ def test_update_appends_version_and_replaces_current_derived_values(
             (version.version, version.is_deleted, version.annotation_data)
             for version in versions
         )
-    with session_factory() as session:
-        field_rows = session.scalars(
-            select(AnnotationMultivaluedFieldValueRecord)
-            .where(AnnotationMultivaluedFieldValueRecord.annotation_id == annotation_id)
-            .order_by(
-                AnnotationMultivaluedFieldValueRecord.field_name,
-                AnnotationMultivaluedFieldValueRecord.field_value,
+
+        def matching_ids(criteria: AnnotationFilter) -> list[UUID]:
+            page = repository.list_active(
+                criteria, OwnershipScope(), limit=10, offset=0
             )
-        ).all()
-        reference_rows = session.scalars(
-            select(AnnotationDuplicateReferenceRecord).where(
-                AnnotationDuplicateReferenceRecord.annotation_id == annotation_id
-            )
-        ).all()
+            return [record.annotation_id for record in page.items]
+
+        assert matching_ids(AnnotationFilter(references=("PMID:99",))) == [
+            annotation_id
+        ]
+        assert matching_ids(AnnotationFilter(with_or_from=("UniProtKB:NEW",))) == [
+            annotation_id
+        ]
+        assert matching_ids(AnnotationFilter(references=("PMID:1",))) == []
+        assert matching_ids(AnnotationFilter(with_or_from=("UniProtKB:Q1",))) == []
+        assert (
+            matching_ids(AnnotationFilter(interacting_taxon_id=("NCBITaxon:9606",)))
+            == []
+        )
+        assert repository.find_duplicate_peer_ids(
+            changed_persistence_data.duplicate_base_signature, ["PMID:99"]
+        ) == (annotation_id,)
 
     assert version_snapshots == (
         (
@@ -249,11 +224,6 @@ def test_update_appends_version_and_replaces_current_derived_values(
         ),
         (2, False, changed_persistence_data.annotation_data),
     )
-    assert [(row.field_name, row.field_value) for row in field_rows] == [
-        (value.field_name, value.field_value)
-        for value in changed_persistence_data.multivalued_field_values
-    ]
-    assert [row.canonical_reference for row in reference_rows] == ["PMID:99"]
 
 
 def test_update_locks_intervening_signature_for_retained_orm_object(
@@ -355,9 +325,10 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
 
 def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
+    """A deleted annotation leaves search and duplicate checks but keeps its history."""
+    persistence_data = prepare_annotation_for_persistence(validated_annotation)
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
 
     with unit_of_work_factory() as unit_of_work:
@@ -373,9 +344,10 @@ def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
         assert deleted.deleted_at is not None
 
     with unit_of_work_factory() as unit_of_work:
-        assert unit_of_work.annotations.get(annotation_id) is None
-        retained = unit_of_work.annotations.get(annotation_id, include_deleted=True)
-        versions = unit_of_work.annotations.list_versions_page(
+        repository = unit_of_work.annotations
+        assert repository.get(annotation_id) is None
+        retained = repository.get(annotation_id, include_deleted=True)
+        versions = repository.list_versions_page(
             annotation_id, limit=100, offset=0
         ).items
         assert retained is not None
@@ -384,16 +356,19 @@ def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
             (version.version, version.is_deleted, version.annotation_data)
             for version in versions
         )
-    with session_factory() as session:
-        field_count = session.scalar(
-            select(func.count())
-            .select_from(AnnotationMultivaluedFieldValueRecord)
-            .where(AnnotationMultivaluedFieldValueRecord.annotation_id == annotation_id)
+        found = repository.list_active(
+            AnnotationFilter(references=("PMID:1",)),
+            OwnershipScope(),
+            limit=10,
+            offset=0,
         )
-        reference_count = session.scalar(
-            select(func.count())
-            .select_from(AnnotationDuplicateReferenceRecord)
-            .where(AnnotationDuplicateReferenceRecord.annotation_id == annotation_id)
+        assert found.total == 0
+        assert (
+            repository.find_duplicate_peer_ids(
+                persistence_data.duplicate_base_signature,
+                persistence_data.canonical_references,
+            )
+            == ()
         )
 
     assert [(version, is_deleted) for version, is_deleted, _ in version_snapshots] == [
@@ -401,8 +376,10 @@ def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
         (2, True),
     ]
     assert version_snapshots[1][2] == version_snapshots[0][2]
-    assert field_count == 0
-    assert reference_count == 0
+    # The identical annotation can be created again, so it no longer counts as a duplicate.
+    assert (
+        _create_annotation(unit_of_work_factory, validated_annotation) != annotation_id
+    )
 
 
 def test_missing_and_deleted_write_transitions_raise_focused_errors(
@@ -457,9 +434,9 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
 
 def test_unit_of_work_rolls_back_without_explicit_commit(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
+    """Changes made in a unit of work that is never committed are not saved."""
     with unit_of_work_factory() as unit_of_work:
         annotation_id = unit_of_work.annotations.create(
             annotation=validated_annotation,
@@ -467,33 +444,9 @@ def test_unit_of_work_rolls_back_without_explicit_commit(
             owning_group_id="group-1",
         ).annotation_id
 
-    with session_factory() as session:
-        assert session.get(AnnotationRecord, annotation_id) is None
+    with unit_of_work_factory() as unit_of_work:
+        repository = unit_of_work.annotations
+        assert repository.get(annotation_id, include_deleted=True) is None
         assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AnnotationVersionRecord)
-                .where(AnnotationVersionRecord.annotation_id == annotation_id)
-            )
-            == 0
-        )
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AnnotationMultivaluedFieldValueRecord)
-                .where(
-                    AnnotationMultivaluedFieldValueRecord.annotation_id == annotation_id
-                )
-            )
-            == 0
-        )
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AnnotationDuplicateReferenceRecord)
-                .where(
-                    AnnotationDuplicateReferenceRecord.annotation_id == annotation_id
-                )
-            )
-            == 0
+            repository.list_versions_page(annotation_id, limit=100, offset=0).total == 0
         )

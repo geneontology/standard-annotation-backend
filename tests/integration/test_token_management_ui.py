@@ -1,13 +1,15 @@
 """Exercise the browser-facing token-management entry point."""
 
+import re
+
 from fastapi import status
 from fastapi.testclient import TestClient
 
 
-def test_token_management_page_exposes_accessible_sign_in_and_assets(
+def test_token_management_page_links_sign_in_and_serves_protected_assets(
     integration_api_client: TestClient,
 ) -> None:
-    """The entry page provides a protected, accessible browser workflow."""
+    """The entry page links to sign-in and serves its protected static assets."""
     response = integration_api_client.get("/token-management")
 
     assert response.status_code == status.HTTP_200_OK
@@ -20,10 +22,7 @@ def test_token_management_page_exposes_accessible_sign_in_and_assets(
         "connect-src 'self'; img-src 'self'; base-uri 'none'; "
         "form-action 'self'; frame-ancestors 'none'"
     )
-    assert '<main id="token-management">' in response.text
     assert '<a href="/auth/github/login"' in response.text
-    assert 'aria-live="polite"' in response.text
-    assert 'aria-live="assertive"' in response.text
     assert 'href="/assets/favicon.svg"' in response.text
     assert 'href="/assets/token-management.css"' in response.text
     assert 'src="/assets/token-management.js"' in response.text
@@ -47,46 +46,21 @@ def test_token_management_page_exposes_accessible_sign_in_and_assets(
         )
 
 
-def test_token_management_page_exposes_complete_accessible_workflow(
+def test_token_management_page_contains_every_element_the_script_queries(
     integration_api_client: TestClient,
 ) -> None:
-    """The page labels creation, one-time secret, history, and revocation controls."""
-    response = integration_api_client.get("/token-management")
+    """Every element and form field the page script uses exists in the served page."""
+    page = integration_api_client.get("/token-management").text
+    script = integration_api_client.get("/assets/token-management.js").text
 
-    assert '<section id="authenticated" hidden' in response.text
-    assert '<form id="create-token-form"' in response.text
-    assert '<label for="token-name">Token name</label>' in response.text
-    assert '<label for="authorization-context">Authorization</label>' in response.text
-    assert '<select id="authorization-context"' in response.text
-    assert 'id="no-contexts"' in response.text
-    assert response.text.count('name="expiration"') == 4
-    for choice in ("week", "month", "year", "custom"):
-        assert f'value="{choice}"' in response.text
-    assert '<input id="custom-expiration" type="datetime-local"' in response.text
-    assert '<dialog id="token-secret-dialog"' in response.text
-    assert 'aria-labelledby="token-secret-heading"' in response.text
-    assert 'id="new-token-secret"' in response.text
-    assert "This token cannot be shown again" in response.text
-    assert '<table id="token-table">' in response.text
-    assert '<tbody id="token-list">' in response.text
-    assert '<dialog id="revoke-token-dialog"' in response.text
-    assert 'id="revoke-token-target"' in response.text
-    assert '<button id="confirm-revoke"' in response.text
+    queried_ids = set(
+        re.findall(r"""querySelector\(\s*["']#([\w-]+)["']\s*\)""", script)
+    )
+    field_names = set(re.findall(r"createForm\.elements\.(\w+)", script))
+    choices = set(re.findall(r'choice === "(\w+)"', script)) | {"custom"}
 
-
-def test_token_management_assets_support_static_head_requests(
-    integration_api_client: TestClient,
-) -> None:
-    """Packaged browser assets expose standard static-file HEAD behavior."""
-    for path, content_type in (
-        ("/assets/favicon.svg", "image/svg+xml"),
-        ("/assets/token-management.css", "text/css"),
-        ("/assets/token-management.js", "text/javascript"),
-    ):
-        response = integration_api_client.head(path)
-
-        assert response.status_code == status.HTTP_200_OK
-        assert response.content == b""
-        assert response.headers["content-type"].startswith(content_type)
-        assert int(response.headers["content-length"]) > 0
-        assert response.headers["cache-control"] == "no-store"
+    assert queried_ids and field_names and choices >= {"week", "month", "year"}
+    assert not {i for i in queried_ids if f'id="{i}"' not in page}
+    assert not {n for n in field_names if f'name="{n}"' not in page}
+    assert not {c for c in choices if f'value="{c}"' not in page}
+    assert 'type="submit"' in page

@@ -265,6 +265,7 @@ def test_contexts_and_token_creation_are_owned_and_keep_secret_out_of_history(
         assert token.expires_at == datetime.fromisoformat(
             str(result["expires_at"]).replace("Z", "+00:00")
         )
+        token_expires_at = token.expires_at
         stored = session.execute(
             text("SELECT row_to_json(api_token) FROM api_token")
         ).scalar_one()
@@ -275,6 +276,10 @@ def test_contexts_and_token_creation_are_owned_and_keep_secret_out_of_history(
         assert event.actor_id == str(user_assignments["user_id"])
         assert event.details["token_id"] == str(token_id)
         assert set(event.details) == {"token_id", "assignment_id", "expires_at"}
+        assert event.details["assignment_id"] == str(user_assignments["assignment_id"])
+        assert (
+            datetime.fromisoformat(str(event.details["expires_at"])) == token_expires_at
+        )
         assert raw not in json.dumps(event.details) and digest not in json.dumps(
             event.details
         )

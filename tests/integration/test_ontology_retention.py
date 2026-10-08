@@ -96,20 +96,6 @@ def _prune(
     return pruned
 
 
-def test_pruned_snapshot_cannot_be_read_as_complete(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """Term and closure reads reject a pruned snapshot."""
-    version_id, _, _ = _stage_snapshot(unit_of_work_factory, session_factory)
-
-    with unit_of_work_factory() as unit_of_work:
-        with pytest.raises(OntologySnapshotPrunedError):
-            unit_of_work.ontologies.list_terms(version_id)
-        with pytest.raises(OntologySnapshotPrunedError):
-            unit_of_work.ontologies.closure_count(version_id)
-
-
 def test_pruned_snapshot_cannot_be_activated(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],

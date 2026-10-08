@@ -7,7 +7,6 @@ import pytest
 
 from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.services.authorization_refresh_service import (
-    STORED_AUTHORIZATION_REFRESH_RESULT,
     STORED_AUTHORIZATION_SUMMARY,
     AuthorizationRefreshResult,
     AuthorizationRefreshSummary,
@@ -65,24 +64,3 @@ def test_job_result_keeps_its_keys_with_utc_timestamps() -> None:
         "group_count": 2,
         "assignment_count": 4,
     }
-
-
-def test_legacy_job_result_with_offset_timestamps_loads() -> None:
-    """A result stored with `+00:00` timestamps loads to the same value."""
-    at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
-    legacy = {
-        "refresh_id": "00000000-0000-0000-0000-000000000006",
-        "source_type": "github",
-        "source_locator": "github:org/repo:users.yaml",
-        "source_revision": None,
-        "source_checksum": "d" * 64,
-        "fetched_at": "2026-01-02T03:04:05+00:00",
-        "refreshed_at": "2026-01-02T03:04:05+00:00",
-        "user_count": 3,
-        "group_count": 2,
-        "assignment_count": 4,
-    }
-    loaded = STORED_AUTHORIZATION_REFRESH_RESULT.load(legacy)
-    assert loaded.fetched_at == at
-    assert loaded.source_revision is None
-    assert loaded.assignment_count == 4

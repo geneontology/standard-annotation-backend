@@ -50,7 +50,7 @@ _RESULT = OntologyRefreshResult(
         OntologyRefreshWarning("undefined_consider_target", "GO:1", "GO:2"),
     ),
 )
-_LEGACY = {
+_JOB_RESULT = {
     "ontology": "go",
     "ontology_version_id": str(_VERSION_ID),
     "source_type": "https",
@@ -86,18 +86,8 @@ _LEGACY = {
 
 
 def test_job_result_keeps_its_keys() -> None:
-    """The ontology job result has the same flattened keys and values as before."""
-    assert _RESULT.to_job_result() == _LEGACY
-
-
-def test_stored_result_loads_back() -> None:
-    """A result stored by earlier code loads and writes back unchanged."""
-    assert (
-        STORED_ONTOLOGY_REFRESH_RESULT.dump(
-            STORED_ONTOLOGY_REFRESH_RESULT.load(_LEGACY)
-        )
-        == _LEGACY
-    )
+    """An ontology refresh result serializes to the flattened job-result keys clients read."""
+    assert _RESULT.to_job_result() == _JOB_RESULT
 
 
 def test_already_active_result_keeps_every_key() -> None:
@@ -143,13 +133,15 @@ def test_already_active_result_keeps_every_key() -> None:
 def test_corrupt_stored_result_is_rejected(change: dict[str, object]) -> None:
     """A stored result with a missing or invalid field is rejected instead of being read as zero."""
     with pytest.raises(StoredDataError):
-        STORED_ONTOLOGY_REFRESH_RESULT.load({**_LEGACY, **change})
+        STORED_ONTOLOGY_REFRESH_RESULT.load({**_JOB_RESULT, **change})
 
 
 def test_missing_count_is_rejected() -> None:
     """A stored result without one of its counts is rejected."""
-    legacy = {
-        key: value for key, value in _LEGACY.items() if key != "annotation_skip_count"
+    incomplete = {
+        key: value
+        for key, value in _JOB_RESULT.items()
+        if key != "annotation_skip_count"
     }
     with pytest.raises(StoredDataError):
-        STORED_ONTOLOGY_REFRESH_RESULT.load(legacy)
+        STORED_ONTOLOGY_REFRESH_RESULT.load(incomplete)

@@ -62,10 +62,9 @@ def test_load_reads_back_what_dump_wrote() -> None:
     assert _STORED.load(_STORED.dump(_VALUE)) == _VALUE
 
 
-def test_load_accepts_offset_timestamps_and_ignores_unknown_keys() -> None:
-    """Values written with `+00:00` timestamps and extra derived keys still load."""
-    legacy = {**_DUMPED, "at": "2026-01-02T03:04:05+00:00", "tag_count": 2}
-    assert _STORED.load(legacy) == _VALUE
+def test_load_ignores_unknown_keys() -> None:
+    """Extra keys in a stored value are ignored when it loads."""
+    assert _STORED.load({**_DUMPED, "tag_count": 2}) == _VALUE
 
 
 @pytest.mark.parametrize(

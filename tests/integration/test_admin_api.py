@@ -195,20 +195,16 @@ def test_only_global_admins_can_refresh_and_denial_precedes_lookup(
         assert session.scalar(select(func.count()).select_from(JobRecord)) == 0
 
 
-def test_global_admin_reads_a_job_and_others_cannot(
+def test_global_admin_reads_a_job_and_unknown_job_is_404(
     integration_api_client: TestClient, dispatched: list[Job]
 ) -> None:
-    """Job status is readable only with the admin role and global scope."""
+    """A global admin reads a job by id; an unknown job id is a 404."""
     created = integration_api_client.post(
         "/admin/ontology-refreshes", json={"source_key": "go"}
     ).json()["jobs"][0]
 
     found = integration_api_client.get(f"/admin/jobs/{created['job_id']}")
     missing = integration_api_client.get(f"/admin/jobs/{uuid4()}")
-    app.dependency_overrides[get_authenticated_context] = lambda: _context(
-        AuthorizationRole.ADMIN, AuthorizationScope.GROUP
-    )
-    denied = integration_api_client.get(f"/admin/jobs/{created['job_id']}")
 
     assert found.status_code == status.HTTP_200_OK
     assert found.json()["job_id"] == created["job_id"]
@@ -216,7 +212,6 @@ def test_global_admin_reads_a_job_and_others_cannot(
     assert missing.json() == {
         "error": {"code": "job_not_found", "message": "Job was not found"}
     }
-    assert denied.status_code == status.HTTP_403_FORBIDDEN
 
 
 @pytest.mark.parametrize("path", sorted(ROUTES))
@@ -331,16 +326,24 @@ def test_job_read_returns_public_fields_without_worker_parameters(
     assert "source_token" not in response.text
 
 
+@pytest.mark.parametrize("job_exists", [True, False])
 @pytest.mark.parametrize(("role", "scope"), DENIED)
 def test_job_read_denial_does_not_reveal_whether_the_job_exists(
     integration_api_client: TestClient,
+    dispatched: list[Job],
     role: AuthorizationRole,
     scope: AuthorizationScope,
+    job_exists: bool,
 ) -> None:
-    """Callers without access get the same 403 for any job identifier."""
+    """Callers without access get the same 403 for an existing or unknown job."""
+    job_id = uuid4()
+    if job_exists:
+        job_id = integration_api_client.post(
+            "/admin/ontology-refreshes", json={"source_key": "go"}
+        ).json()["jobs"][0]["job_id"]
     app.dependency_overrides[get_authenticated_context] = lambda: _context(role, scope)
 
-    response = integration_api_client.get(f"/admin/jobs/{uuid4()}")
+    response = integration_api_client.get(f"/admin/jobs/{job_id}")
 
     assert response.status_code == status.HTTP_403_FORBIDDEN
     assert response.json() == {

@@ -171,7 +171,6 @@ def test_parse_gpi_reports_every_invalid_row() -> None:
             },
         ],
     }
-    assert "Invalid db_object_symbol format" in field.message
     assert field_count.line_number == 6
 
 

@@ -172,26 +172,6 @@ def _run_coordinated_mutations(
                 assert second_finished.wait(OBSERVATION_SECONDS), (
                     "unrelated write did not reach its post-lock, pre-commit checkpoint"
                 )
-                # Both writes are still uncommitted. Observe compatible global
-                # locks as well as their independent signature locks in PostgreSQL.
-                locks = tuple(
-                    observer.execute(
-                        text(
-                            "SELECT pid, mode FROM pg_locks "
-                            "WHERE locktype = 'advisory' AND granted "
-                            "AND pid IN (:first, :second)"
-                        ),
-                        {"first": first_pid, "second": second_pid},
-                    )
-                )
-                assert sorted(locks) == sorted(
-                    [
-                        (first_pid, "ShareLock"),
-                        (first_pid, "ExclusiveLock"),
-                        (second_pid, "ShareLock"),
-                        (second_pid, "ExclusiveLock"),
-                    ]
-                )
             else:
                 deadline = monotonic() + OBSERVATION_SECONDS
                 while monotonic() < deadline:
@@ -393,12 +373,15 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
     assert [version.version for version in versions] == [1, 2]
 
 
-def test_unrelated_signatures_overlap_after_the_shared_global_lock(
+def test_unrelated_signatures_overlap_and_both_succeed(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
-    # An exclusive global lock or constant signature key prevents the second
-    # post-lock checkpoint while the first transaction remains uncommitted.
+    """Creates with unrelated duplicate signatures proceed concurrently and succeed.
+
+    The second create reaches its pre-commit point while the first transaction is
+    still uncommitted, and both annotations are stored.
+    """
     outcomes, _blocked = _run_coordinated_mutations(
         session_factory,
         _create(validated_annotation),

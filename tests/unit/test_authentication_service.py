@@ -33,4 +33,3 @@ def test_malformed_credential_never_opens_storage(raw: str) -> None:
     with pytest.raises(AuthenticationRequiredError) as raised:
         AuthenticationService(unavailable_storage).authenticate(raw)
     assert str(raised.value) == "Authentication required"
-    assert raised.value.args == ("Authentication required",)

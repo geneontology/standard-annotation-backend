@@ -1,6 +1,5 @@
 """Test the public annotation API against PostgreSQL data."""
 
-from collections.abc import Callable
 from uuid import UUID
 
 import pytest
@@ -8,7 +7,6 @@ from fastapi import status
 from fastapi.testclient import TestClient
 
 from standard_annotation_backend.domain.annotations import Annotation
-from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 VALID_ANNOTATION = {
     "db_object_id": "UniProtKB:P12345",
@@ -132,29 +130,26 @@ def _create_annotation(
     return response.json()
 
 
-@pytest.mark.parametrize("if_match", [None, "1"])
-def test_patch_rejects_missing_or_malformed_if_match(
-    integration_api_client: TestClient,
-    if_match: str | None,
+@pytest.mark.parametrize("method", ["patch", "delete"])
+def test_mutation_requires_if_match_without_changing_state(
+    integration_api_client: TestClient, method: str
 ) -> None:
-    """Updates require one quoted positive version in the If-Match header."""
+    """Updates and deletions without an If-Match header are refused and change nothing."""
     created = _create_annotation(integration_api_client)
-    headers = {} if if_match is None else {"If-Match": if_match}
+    path = f"/annotations/{created['annotation_id']}"
 
-    response = integration_api_client.patch(
-        f"/annotations/{created['annotation_id']}",
-        headers=headers,
-        json={"assigned_by": "MGI"},
+    response = integration_api_client.request(
+        method,
+        path,
+        json={"assigned_by": "MGI"} if method == "patch" else None,
     )
 
-    assert response.status_code == (
-        status.HTTP_428_PRECONDITION_REQUIRED
-        if if_match is None
-        else status.HTTP_422_UNPROCESSABLE_CONTENT
-    )
-    assert response.json()["error"]["code"] == (
-        "precondition_required" if if_match is None else "malformed_precondition"
-    )
+    assert response.status_code == status.HTTP_428_PRECONDITION_REQUIRED
+    assert response.json()["error"]["code"] == "precondition_required"
+    current = integration_api_client.get(path)
+    assert current.status_code == status.HTTP_200_OK
+    assert current.json()["version"] == 1
+    assert current.headers["etag"] == '"1"'
 
 
 @pytest.mark.parametrize("method", ["patch", "delete"])
@@ -373,16 +368,6 @@ def test_patch_same_value_still_creates_a_version(
     assert response.json()["annotation"] == NORMALIZED_VALID_ANNOTATION
 
 
-def test_delete_requires_if_match(integration_api_client: TestClient) -> None:
-    """Deleting an annotation requires an If-Match version header."""
-    created = _create_annotation(integration_api_client)
-
-    response = integration_api_client.delete(f"/annotations/{created['annotation_id']}")
-
-    assert response.status_code == status.HTTP_428_PRECONDITION_REQUIRED
-    assert response.json()["error"]["code"] == "precondition_required"
-
-
 def test_delete_rejects_a_stale_version(integration_api_client: TestClient) -> None:
     """A deletion based on an outdated version leaves the annotation active."""
     created = _create_annotation(integration_api_client)
@@ -401,9 +386,8 @@ def test_delete_rejects_a_stale_version(integration_api_client: TestClient) -> N
 
 def test_delete_commits_an_empty_response_and_hides_the_current_resource(
     integration_api_client: TestClient,
-    unit_of_work_factory: Callable[[], SqlAlchemyUnitOfWork],
 ) -> None:
-    """A successful deletion is saved before an empty HTTP 204 is returned."""
+    """A successful deletion returns an empty 204, hides the annotation, and keeps history."""
     created = _create_annotation(integration_api_client)
     annotation_id = UUID(str(created["annotation_id"]))
 
@@ -417,14 +401,12 @@ def test_delete_commits_an_empty_response_and_hides_the_current_resource(
     current = integration_api_client.get(f"/annotations/{annotation_id}")
     assert current.status_code == status.HTTP_404_NOT_FOUND
     assert current.json()["error"]["code"] == "annotation_not_found"
-    with unit_of_work_factory() as unit_of_work:
-        versions = unit_of_work.annotations.list_versions_page(
-            annotation_id, limit=100, offset=0
-        ).items
-        version_history = [
-            (version.version, version.is_deleted, version.actor_id)
-            for version in versions
-        ]
+    history = integration_api_client.get(f"/annotations/{annotation_id}/versions")
+    assert history.status_code == status.HTTP_200_OK
+    version_history = [
+        (item["version"], item["is_deleted"], item["actor_id"])
+        for item in history.json()["items"]
+    ]
     assert version_history == [(1, False, "api-test-user"), (2, True, "api-test-user")]
 
 

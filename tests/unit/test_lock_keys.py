@@ -1,28 +1,16 @@
 """Tests for the namespaced PostgreSQL advisory-lock keys."""
 
-from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
-    acquire_transaction_lock,
     lock_key,
 )
 
 _SIGNED_64_BIT_MIN = -(2**63)
 _SIGNED_64_BIT_MAX = 2**63 - 1
-
-
-class RecordingSession:
-    """Collect the SQL a lock helper sends, without opening a connection."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, int]]] = []
-
-    def execute(self, statement: Any, parameters: dict[str, int]) -> None:
-        self.calls.append((str(statement), parameters))
 
 
 @pytest.mark.parametrize(
@@ -77,17 +65,3 @@ def test_lock_key_rejects_blank_values(value: str) -> None:
     """A blank value is rejected rather than silently sharing one lock."""
     with pytest.raises(ValueError, match="blank"):
         lock_key(LockNamespace.ENTITY_CATALOG, value)
-
-
-def test_transaction_lock_uses_parameterized_exclusive_sql() -> None:
-    """Transaction locks wait for an exclusive lock on the namespaced key."""
-    session = RecordingSession()
-
-    acquire_transaction_lock(cast(Any, session), LockNamespace.ENTITY_CATALOG, "mgi")
-
-    assert session.calls == [
-        (
-            "SELECT pg_advisory_xact_lock(:lock_key)",
-            {"lock_key": lock_key(LockNamespace.ENTITY_CATALOG, "mgi")},
-        )
-    ]

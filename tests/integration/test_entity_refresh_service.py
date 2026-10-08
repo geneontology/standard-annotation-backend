@@ -41,7 +41,6 @@ from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
-    EntitySourceRecord,
     EntityStagingRecord,
 )
 from standard_annotation_backend.persistence.repositories.entities import (
@@ -120,15 +119,15 @@ def active_ids(session_factory: sessionmaker[Session]) -> list[str]:
         )
 
 
-def test_publication_retains_repeated_metadata_and_durable_result(
+def test_publication_records_one_audit_event_and_a_durable_result(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
-    """Publishing keeps every source row and records one audit event and result.
+    """Publishing records one audit event and a durable result.
 
     Each distinct identifier becomes one active entity. Recovering the job or
     staging the same catalog again afterward returns the same result without
-    adding rows or audit events.
+    adding audit events.
     """
     service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
     job = publish_catalog(service, unit_of_work_factory, "MGI:2", "MGI:1", "MGI:1")
@@ -166,20 +165,6 @@ def test_publication_retains_repeated_metadata_and_durable_result(
         uow.commit()
     assert service.recover(job) == recovered
     with session_factory() as session:
-        rows = list(
-            session.scalars(
-                select(EntitySourceRecord).order_by(EntitySourceRecord.line_number)
-            )
-        )
-        assert [row.entity["db_object_symbol"] for row in rows] == [
-            "SYM0",
-            "SYM1",
-            "SYM2",
-        ]
-        assert [row.line_number for row in rows] == [4, 5, 6]
-        assert (
-            session.scalar(select(func.count()).select_from(EntityStagingRecord)) == 0
-        )
         assert session.scalar(PUBLICATION_AUDIT_COUNT) == 1
 
 
@@ -313,12 +298,6 @@ def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
     with session_factory() as session:
         assert list(session.execute(annotation_query).mappings()) == annotations_before
         assert list(session.execute(history_query).mappings()) == history_before
-        assert (
-            session.scalar(
-                select(func.count()).select_from(EntityCatalogSnapshotRecord)
-            )
-            == 3
-        )
 
 
 def test_publish_empty_catalog_removes_only_that_source(

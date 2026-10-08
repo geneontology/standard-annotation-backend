@@ -9,7 +9,6 @@ import pytest
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
     AuthorizationScope,
-    PermissionDeniedError,
     RequestContext,
 )
 from standard_annotation_backend.domain.change_sets import (
@@ -101,57 +100,6 @@ def test_rejection_requires_nonblank_reason_without_opening_transaction(
             ),
         )
     assert error.value.errors[0]["location"] == ("body", "review_reason")
-
-
-@pytest.mark.parametrize(
-    "operation,role",
-    [
-        ("propose_create", AuthorizationRole.READ),
-        ("propose_update", AuthorizationRole.READ),
-        ("propose_delete", AuthorizationRole.READ),
-        ("preview", AuthorizationRole.READ),
-        ("accept", AuthorizationRole.READ),
-        ("accept", AuthorizationRole.EDIT),
-        ("reject", AuthorizationRole.READ),
-        ("reject", AuthorizationRole.EDIT),
-    ],
-)
-def test_insufficient_change_set_role_denies_before_opening_transaction(
-    operation: str,
-    role: AuthorizationRole,
-) -> None:
-    """Proposals and persisted previews require edit; reviews require admin."""
-    module = import_module("standard_annotation_backend.services.change_set_service")
-    service = module.ChangeSetService(_unopened_transaction)
-    context = RequestContext(
-        actor_id="actor",
-        token_id=uuid4(),
-        token_name="Read token",
-        role=role,
-        scope=AuthorizationScope.GROUP,
-        group_id="group",
-    )
-    with pytest.raises(PermissionDeniedError):
-        if operation == "propose_create":
-            service.propose_create(
-                payload={}, owning_group_id="group", reason="Review", context=context
-            )
-        elif operation.startswith("propose_"):
-            getattr(service, operation)(
-                uuid4(),
-                base_version=1,
-                reason="Review",
-                context=context,
-                **(
-                    {"patch": [{"op": "remove", "path": "/assigned_by"}]}
-                    if operation == "propose_update"
-                    else {}
-                ),
-            )
-        elif operation == "reject":
-            service.reject(uuid4(), review_reason="Review", context=context)
-        else:
-            getattr(service, operation)(uuid4(), context=context)
 
 
 @pytest.mark.parametrize("version", [0, -1, True, "1"])

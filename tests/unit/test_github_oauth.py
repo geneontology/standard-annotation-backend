@@ -40,8 +40,6 @@ def test_code_exchange_validates_the_authenticated_github_profile(
     client = GitHubOAuthClient(Settings())
     token = client.exchange_code("test-oauth-code")
     assert token == "test-github-access-token"
-    profile = github_http_responses[0]
-    assert isinstance(profile, httpx2.Response)
     github_http_responses[0] = httpx2.Response(
         200, json={"login": "curator", "name": "Test Curator"}
     )

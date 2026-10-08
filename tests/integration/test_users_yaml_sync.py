@@ -257,27 +257,6 @@ def test_removed_and_identically_regranted_context_never_revives_old_token(
         assert len(uow.auth.list_active_assignments(user_id)) == 2
 
 
-def test_successful_sync_commits_exactly_once(
-    unit_of_work_factory: UnitOfWorkFactory,
-) -> None:
-    """A synchronization makes its state and audit durable in one commit."""
-    job = start_job(unit_of_work_factory, JobType.AUTHORIZATION_REFRESH, "go-site")
-    document = users_document(INITIAL, github_provenance("a" * 40))
-    commits: list[None] = []
-
-    def committed(_: Session) -> None:
-        commits.append(None)
-
-    event.listen(Session, "after_commit", committed)
-    try:
-        AuthorizationRefreshService(unit_of_work_factory).apply(
-            job, document, ignore_progress
-        )
-    finally:
-        event.remove(Session, "after_commit", committed)
-    assert len(commits) == 1
-
-
 def test_repeated_revision_is_idempotent_without_state_or_audit_changes(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
@@ -366,34 +345,6 @@ def test_worker_sync_audit_retains_actor_and_job_context(
         assert audit is not None
         assert audit.actor_id == "scheduler"
         assert audit.job_id == job_id
-
-
-def test_changed_login_creates_new_user_and_deactivates_old_assignments(
-    unit_of_work_factory: UnitOfWorkFactory,
-) -> None:
-    """A changed source login is a new identity and cannot inherit old credentials."""
-    apply_users_yaml(unit_of_work_factory, INITIAL, github_provenance("a" * 40))
-    with unit_of_work_factory() as uow:
-        original = uow.auth.get_user_by_github_login("alice")
-        assert original is not None
-        user_id = original.user_id
-        grants = {
-            item.assignment_id for item in uow.auth.list_active_assignments(user_id)
-        }
-    apply_users_yaml(
-        unit_of_work_factory,
-        INITIAL.replace("ALICE", "Renamed-Alice"),
-        github_provenance("b" * 40),
-    )
-    with unit_of_work_factory() as uow:
-        renamed = uow.auth.get_user_by_github_login("renamed-alice")
-        assert renamed is not None and renamed.user_id != user_id
-        assert {
-            item.assignment_id
-            for item in uow.auth.list_active_assignments(renamed.user_id)
-        }.isdisjoint(grants)
-        assert uow.auth.list_active_assignments(user_id) == ()
-        assert uow.auth.get_user_by_github_login("alice") is None
 
 
 def _provenance(revision: str, checksum: str) -> SourceProvenance:

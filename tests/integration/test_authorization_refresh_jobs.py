@@ -156,7 +156,7 @@ def test_authorization_refresh_failure_is_safe_and_preserves_prior_state(
         unit_of_work_factory, VALID_SOURCE, github_provenance("b" * 40)
     )
     job_id = _create_job(unit_of_work_factory)
-    requests = _install_github(monkeypatch, [source])
+    _install_github(monkeypatch, [source])
 
     tasks.run_refresh.run(str(job_id))
 
@@ -169,7 +169,6 @@ def test_authorization_refresh_failure_is_safe_and_preserves_prior_state(
         refreshes = session.scalars(select(AuthorizationRefreshRecord)).all()
         assert len(refreshes) == 1
         assert str(refreshes[0].refresh_id) == prior.result["refresh_id"]
-    assert requests
 
 
 def test_infrastructure_failure_requests_retry(

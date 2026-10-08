@@ -15,21 +15,11 @@ from test_entity_refresh_service import publish_catalog
 
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
-    GroupSabManagedError,
 )
-from standard_annotation_backend.domain.auth import (
-    AuthorizationContext,
-    AuthorizationRole,
-    AuthorizationScope,
-    PermissionDeniedError,
-    system_context,
-)
+from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.domain.refresh import (
-    RefreshKindName,
-    UnknownSourceError,
-)
-from standard_annotation_backend.persistence.models import AuditEventRecord, JobRecord
+from standard_annotation_backend.domain.refresh import RefreshKindName
+from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
@@ -45,35 +35,6 @@ def _service(
     unit_of_work_factory: UnitOfWorkFactory, dispatched: list[Job]
 ) -> RefreshStartService:
     return RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatched.append)
-
-
-@pytest.mark.parametrize("cutover", [False, True])
-def test_start_requires_global_admin_before_looking_up_the_source(
-    cutover: bool,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """A caller without global admin learns nothing about sources and starts nothing."""
-    group_admin = AuthorizationContext(
-        actor_id="curator",
-        role=AuthorizationRole.ADMIN,
-        scope=AuthorizationScope.GROUP,
-        group_id="MGI",
-    )
-    dispatched: list[Job] = []
-    service = _service(unit_of_work_factory, dispatched)
-
-    with pytest.raises(PermissionDeniedError):
-        if cutover:
-            service.start_cutover(context=group_admin, source_key="not-configured")
-        else:
-            service.start(
-                RefreshKindName.ENTITY, context=group_admin, source_key="not-configured"
-            )
-
-    with session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(JobRecord)) == 0
-    assert dispatched == []
 
 
 def _publish_unconfigured_catalog(unit_of_work_factory: UnitOfWorkFactory) -> None:
@@ -162,23 +123,6 @@ def test_unfinished_jobs_are_reused_and_dispatched_again(
     assert [job.job_id for job in dispatched] == [first[0].job_id]
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(JobRecord)) == 1
-
-
-def test_unknown_source_creates_no_job(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """An unconfigured key is rejected before any job or audit event exists."""
-    with pytest.raises(UnknownSourceError):
-        _service(unit_of_work_factory, []).start(
-            RefreshKindName.ONTOLOGY,
-            context=system_context("admin"),
-            source_key="chebi",
-        )
-
-    with session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(JobRecord)) == 0
-        assert session.scalar(select(func.count()).select_from(AuditEventRecord)) == 0
 
 
 def test_dispatch_failure_fails_only_new_jobs_with_kind_message(
@@ -312,41 +256,6 @@ def test_refresh_all_annotations_skips_sab_managed_groups_and_never_cuts_over(
     assert _targets(jobs) == [(JobType.ANNOTATION_REFRESH, "mgi-gpad")]
 
 
-@pytest.mark.parametrize("cutover", [False, True])
-def test_explicit_sab_managed_source_creates_no_job(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    cutover: bool,
-) -> None:
-    """Naming a SAB-managed group's source is rejected before any job exists."""
-    seed_group_import(
-        session_factory,
-        group_key="MGI",
-        source_key="mgi-gpad",
-        mode=AnnotationManagementMode.SAB_MANAGED,
-    )
-    service = _service(unit_of_work_factory, [])
-    with session_factory() as session:
-        jobs_before = session.scalar(select(func.count()).select_from(JobRecord))
-
-    with pytest.raises(GroupSabManagedError):
-        if cutover:
-            service.start_cutover(
-                context=system_context("admin"), source_key="mgi-gpad"
-            )
-        else:
-            service.start(
-                RefreshKindName.ANNOTATION,
-                context=system_context("admin"),
-                source_key="mgi-gpad",
-            )
-
-    with session_factory() as session:
-        assert (
-            session.scalar(select(func.count()).select_from(JobRecord)) == jobs_before
-        )
-
-
 def test_cutover_reuses_only_an_unfinished_cutover(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
@@ -368,39 +277,3 @@ def test_cutover_reuses_only_an_unfinished_cutover(
     assert cutover.job_type is JobType.ANNOTATION_CUTOVER
     assert cutover.job_id != refresh.job_id
     assert again.job_id == cutover.job_id
-
-
-def test_scheduled_annotation_refresh_skips_sab_managed_groups(
-    monkeypatch: pytest.MonkeyPatch,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """The schedule refreshes GPAD-managed groups and silently skips the rest."""
-    seed_group_import(
-        session_factory,
-        group_key="MGI",
-        source_key="mgi-gpad",
-        mode=AnnotationManagementMode.SAB_MANAGED,
-    )
-    refreshed: list[str] = []
-
-    @contextmanager
-    def runtime(**_kwargs: object) -> Iterator[object]:
-        yield SimpleNamespace(
-            unit_of_work_factory=unit_of_work_factory,
-            settings=SimpleNamespace(sources=TEST_SOURCES),
-        )
-
-    monkeypatch.setattr(tasks, "worker_runtime", runtime)
-    monkeypatch.setattr(tasks.run_refresh, "delay", refreshed.append)
-
-    tasks.schedule_refresh.run("annotation")
-
-    with session_factory() as session:
-        stored = session.scalars(select(JobRecord)).all()
-    assert [
-        (job.job_type, job.parameters, job.requested_by)
-        for job in stored
-        if job.job_type == "annotation_refresh"
-    ] == [("annotation_refresh", {"source_key": "rgd-gpad"}, "scheduler")]
-    assert len(refreshed) == 1

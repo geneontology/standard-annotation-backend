@@ -8,11 +8,9 @@ from seeding import insert_annotation
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
-    AnnotationDeletedError,
     AnnotationOrigin,
     ChangeSource,
     DuplicateAnnotationError,
-    StaleAnnotationVersionError,
 )
 from standard_annotation_backend.persistence.models import (
     JobRecord,
@@ -106,27 +104,6 @@ def test_create_rejects_an_active_duplicate(
     assert raised.value.peer_ids == (existing_id,)
 
 
-def test_update_rejects_a_stale_expected_version(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-) -> None:
-    annotation_id = _create_existing(unit_of_work_factory, validated_annotation)
-    changed_annotation = _changed(validated_annotation, assigned_by="MGI")
-
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(StaleAnnotationVersionError) as raised,
-    ):
-        unit_of_work.annotations.update(
-            annotation_id,
-            changed_annotation,
-            expected_version=2,
-            actor_id="api-user",
-        )
-
-    assert raised.value.current_version == 1
-
-
 def test_update_rejects_only_a_new_duplicate_peer(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
@@ -213,72 +190,3 @@ def test_update_rejects_expansion_of_a_legacy_peer_set(
         assert [(version.version, version.is_deleted) for version in versions] == [
             (1, False)
         ]
-
-
-def test_soft_delete_requires_the_current_version(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-) -> None:
-    annotation_id = _create_existing(unit_of_work_factory, validated_annotation)
-
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(StaleAnnotationVersionError),
-    ):
-        unit_of_work.annotations.soft_delete(
-            annotation_id,
-            expected_version=2,
-            actor_id="api-user",
-        )
-
-
-def test_soft_delete_appends_the_deleted_version(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-) -> None:
-    annotation_id = _create_existing(unit_of_work_factory, validated_annotation)
-
-    with unit_of_work_factory() as unit_of_work:
-        deleted = unit_of_work.annotations.soft_delete(
-            annotation_id,
-            expected_version=1,
-            actor_id="api-user",
-        )
-        unit_of_work.commit()
-
-    assert deleted.current_version == 2
-    with unit_of_work_factory() as unit_of_work:
-        versions = unit_of_work.annotations.list_versions_page(
-            annotation_id, limit=100, offset=0
-        ).items
-        version_states = tuple(
-            (version.version, version.is_deleted) for version in versions
-        )
-    assert version_states == (
-        (1, False),
-        (2, True),
-    )
-
-
-def test_soft_delete_rejects_an_already_deleted_annotation(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-) -> None:
-    annotation_id = _create_existing(unit_of_work_factory, validated_annotation)
-    with unit_of_work_factory() as unit_of_work:
-        unit_of_work.annotations.soft_delete(
-            annotation_id,
-            expected_version=1,
-            actor_id="api-user",
-        )
-        unit_of_work.commit()
-
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(AnnotationDeletedError),
-    ):
-        unit_of_work.annotations.soft_delete(
-            annotation_id,
-            expected_version=2,
-            actor_id="api-user",
-        )

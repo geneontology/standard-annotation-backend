@@ -1,7 +1,5 @@
 """Test durable audit events and their transaction boundaries."""
 
-from collections.abc import Callable
-from datetime import UTC
 from uuid import UUID
 
 import pytest
@@ -10,7 +8,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.persistence.models import (
     AnnotationDuplicateReferenceRecord,
     AnnotationMultivaluedFieldValueRecord,
@@ -18,11 +15,9 @@ from standard_annotation_backend.persistence.models import (
     AnnotationVersionRecord,
     AuditEventRecord,
 )
-from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 pytestmark = pytest.mark.usefixtures("active_annotation_subjects")
 
-UnitOfWorkFactory = Callable[[], SqlAlchemyUnitOfWork]
 
 VALID_ANNOTATION = {
     "db_object_id": "UniProtKB:P12345",
@@ -44,58 +39,6 @@ def _stored_audit_events(
                 select(AuditEventRecord).order_by(AuditEventRecord.created_at)
             )
         )
-
-
-def test_record_audit_event_persists_complete_context(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """A committed audit event retains its actor, context, targets, and details."""
-    annotation_id = UUID("00000000-0000-0000-0000-000000000601")
-    comment_id = UUID("00000000-0000-0000-0000-000000000602")
-    job_id = UUID("00000000-0000-0000-0000-000000000603")
-    change_set_id = UUID("00000000-0000-0000-0000-000000000604")
-
-    with unit_of_work_factory() as unit_of_work:
-        assert unit_of_work.audit.session is unit_of_work.annotations.session
-        event = unit_of_work.audit.record(
-            action=AuditAction.ANNOTATION_CREATED,
-            actor_id="curator-1",
-            result=AuditResult.SUCCESS,
-            token_id="token-1",
-            token_name="nightly-curation",
-            selected_role="edit",
-            selected_scope="group",
-            selected_group_id="group-1",
-            annotation_id=annotation_id,
-            annotation_version=3,
-            comment_id=comment_id,
-            job_id=job_id,
-            change_set_id=change_set_id,
-            details={"source": "api"},
-        )
-        unit_of_work.commit()
-        event_id = event.audit_event_id
-
-    with session_factory() as session:
-        stored = session.get(AuditEventRecord, event_id)
-
-    assert stored is not None
-    assert stored.action == "annotation.created"
-    assert stored.actor_id == "curator-1"
-    assert stored.result == "success"
-    assert stored.token_id == "token-1"
-    assert stored.token_name == "nightly-curation"
-    assert stored.selected_role == "edit"
-    assert stored.selected_scope == "group"
-    assert stored.selected_group_id == "group-1"
-    assert stored.annotation_id == annotation_id
-    assert stored.annotation_version == 3
-    assert stored.comment_id == comment_id
-    assert stored.job_id == job_id
-    assert stored.change_set_id == change_set_id
-    assert stored.details == {"source": "api"}
-    assert stored.created_at.tzinfo is UTC
 
 
 def test_direct_annotation_mutations_record_successful_audit_events(

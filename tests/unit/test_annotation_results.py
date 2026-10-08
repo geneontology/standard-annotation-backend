@@ -9,7 +9,6 @@ from standard_annotation_backend.domain.annotation_management import (
     STORED_REJECTION_REPORT,
     AnnotationManagementMode,
     AnnotationRefreshResult,
-    AnnotationRefreshUnchanged,
     AnnotationRejection,
     RejectionReport,
 )
@@ -26,7 +25,7 @@ _REPORT = RejectionReport(
         ),
     ),
 )
-_LEGACY_REPORT = {
+_REPORT_JSON = {
     "issue_count": 2,
     "by_code": {"syntax": 1, "unknown_db_object_id": 1},
     "issues": [
@@ -38,16 +37,6 @@ _LEGACY_REPORT = {
         },
     ],
 }
-
-
-def test_rejection_report_keeps_its_stored_form() -> None:
-    """The stored report has the same keys and values as before."""
-    assert STORED_REJECTION_REPORT.dump(_REPORT) == _LEGACY_REPORT
-
-
-def test_stored_rejection_report_loads_back() -> None:
-    """A report stored by earlier code loads into an equal report."""
-    assert STORED_REJECTION_REPORT.load(_LEGACY_REPORT) == _REPORT
 
 
 @pytest.mark.parametrize(
@@ -65,11 +54,11 @@ def test_stored_rejection_report_loads_back() -> None:
 def test_corrupt_stored_rejection_report_is_rejected(change: dict[str, object]) -> None:
     """Negative or non-integer counts and malformed issues raise `StoredDataError`."""
     with pytest.raises(StoredDataError):
-        STORED_REJECTION_REPORT.load({**_LEGACY_REPORT, **change})
+        STORED_REJECTION_REPORT.load({**_REPORT_JSON, **change})
 
 
 def test_refresh_job_result_keeps_its_keys() -> None:
-    """The published-import job result flattens provenance as before."""
+    """The published-import job result flattens provenance and includes the rejection report."""
     fetched = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
     job_id = UUID("00000000-0000-0000-0000-000000000003")
     result = AnnotationRefreshResult(
@@ -102,17 +91,5 @@ def test_refresh_job_result_keeps_its_keys() -> None:
         "records_rejected": 2,
         "annotations_deleted": 1,
         "mode": "gpad_imported",
-        "rejection_report": _LEGACY_REPORT,
-    }
-
-
-def test_unchanged_job_result_keeps_its_keys() -> None:
-    """The skipped-refresh job result has the same keys as before."""
-    job_id = UUID("00000000-0000-0000-0000-000000000003")
-    unchanged = AnnotationRefreshUnchanged("mgi", "MGI", job_id, "c" * 64)
-    assert unchanged.to_job_result() == {
-        "source_key": "mgi",
-        "group_key": "MGI",
-        "import_job_id": str(job_id),
-        "source_checksum": "c" * 64,
+        "rejection_report": _REPORT_JSON,
     }

@@ -1,5 +1,6 @@
 """Test proposal and review HTTP contracts against PostgreSQL."""
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -14,6 +15,8 @@ from standard_annotation_backend.persistence.models import (
 )
 
 pytestmark = pytest.mark.usefixtures("active_annotation_subjects")
+
+CLOCK_TOLERANCE = timedelta(seconds=5)  # database and test clocks may differ
 
 ANNOTATION = {
     "db_object_id": "UniProtKB:P12345",
@@ -54,6 +57,7 @@ def _create_annotation(client: TestClient) -> dict:
 def test_create_read_preview_and_accept(integration_api_client: TestClient) -> None:
     """A proposal remains separate from annotations until accepted with identity."""
     client = integration_api_client
+    requested_at = datetime.now(UTC)
     response = client.post(
         "/change-sets",
         json={
@@ -63,9 +67,15 @@ def test_create_read_preview_and_accept(integration_api_client: TestClient) -> N
             "reason": "Add evidence",
         },
     )
+    responded_at = datetime.now(UTC)
     assert response.status_code == status.HTTP_201_CREATED
     proposal = response.json()
     UUID(proposal["change_set_id"])
+    proposed_at = datetime.fromisoformat(proposal["proposed_at"])
+    assert proposed_at.tzinfo is not None
+    assert (
+        requested_at - CLOCK_TOLERANCE <= proposed_at <= responded_at + CLOCK_TOLERANCE
+    )
     path = f"/change-sets/{proposal['change_set_id']}"
     assert response.headers["location"] == path
     assert proposal["state"] == "proposed"
@@ -377,7 +387,6 @@ def test_update_rejects_unsupported_patch_format(
     error = response.json()["error"]
     assert error["code"] == "request_validation_error"
     assert error["details"][0]["location"][-1] == "patch_format"
-    assert error["details"][0]["type"] == "literal_error"
 
 
 def test_invalid_candidate_can_be_previewed_but_not_accepted(

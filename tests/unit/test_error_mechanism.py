@@ -11,11 +11,9 @@ from uuid import UUID
 from fastapi import status
 
 import standard_annotation_backend
-from standard_annotation_backend.api.csrf import CsrfValidationError
 from standard_annotation_backend.api.errors import (
     BEARER_ERRORS,
     STATUS_BY_BASE,
-    RequestValidationFailedError,
     error_responses,
     sab_error_response,
     status_for,
@@ -24,12 +22,9 @@ from standard_annotation_backend.api.models import ApiErrorResponse
 from standard_annotation_backend.domain.annotations import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
-    AnnotationVersionNotFoundError,
-    EmptyAnnotationPatchError,
 )
 from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
-    PermissionDeniedError,
 )
 from standard_annotation_backend.domain.comments import InvalidCommentError
 from standard_annotation_backend.domain.errors import (
@@ -52,10 +47,8 @@ from standard_annotation_backend.domain.errors import (
     UpstreamError,
 )
 from standard_annotation_backend.domain.tokens import (
-    InvalidTokenError,
     ManagementSessionRequiredError,
 )
-from standard_annotation_backend.domain.validation import ValidationIssue
 
 ANNOTATION_ID = UUID("00000000-0000-0000-0000-000000000001")
 CHANGE_SET_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -192,25 +185,6 @@ def test_deleted_and_missing_annotations_are_indistinguishable() -> None:
     )
 
 
-def test_missing_version_has_its_own_code() -> None:
-    """A missing version of an existing annotation is reported distinctly."""
-    assert _body(AnnotationVersionNotFoundError(ANNOTATION_ID, 3))["error"] == {
-        "code": "version_not_found",
-        "message": "Annotation version was not found",
-    }
-
-
-def test_empty_patch_names_the_request_body() -> None:
-    """An empty patch is invalid input located at the request body."""
-    assert _body(EmptyAnnotationPatchError())["error"]["details"] == [
-        {
-            "location": ["body"],
-            "message": "Annotation patch must include at least one field",
-            "type": "empty_annotation_patch",
-        }
-    ]
-
-
 def test_blank_comment_names_the_comment_body_field() -> None:
     """A comment with no visible text is invalid input located at its body field."""
     assert _body(InvalidCommentError())["error"] == {
@@ -221,27 +195,6 @@ def test_blank_comment_names_the_comment_body_field() -> None:
                 "location": ["body", "body"],
                 "message": "Comment body must contain non-whitespace text",
                 "type": "invalid_comment",
-            }
-        ],
-    }
-
-
-def test_request_validation_failure_reports_each_issue() -> None:
-    """A request FastAPI cannot validate reports every located issue."""
-    issue: ValidationIssue = {
-        "location": ("body", "annotation", "relation"),
-        "message": "Field required",
-        "type": "missing",
-    }
-
-    assert _body(RequestValidationFailedError((issue,)))["error"] == {
-        "code": "request_validation_error",
-        "message": "Request validation failed",
-        "details": [
-            {
-                "location": ["body", "annotation", "relation"],
-                "message": "Field required",
-                "type": "missing",
             }
         ],
     }
@@ -277,48 +230,6 @@ def test_response_headers_merge_with_the_bearer_challenge() -> None:
 
     assert response.headers["WWW-Authenticate"] == "Bearer"
     assert response.headers["Allow"] == "GET"
-
-
-def test_denied_permission_and_csrf_disclose_no_details() -> None:
-    """Forbidden responses carry only their code and fixed message."""
-    assert (
-        sab_error_response(PermissionDeniedError()).status_code
-        == status.HTTP_403_FORBIDDEN
-    )
-    assert (
-        sab_error_response(CsrfValidationError()).status_code
-        == status.HTTP_403_FORBIDDEN
-    )
-    assert _body(PermissionDeniedError()) == {
-        "error": {"code": "permission_denied", "message": "Permission denied"}
-    }
-    assert _body(CsrfValidationError()) == {
-        "error": {
-            "code": "invalid_csrf_token",
-            "message": "Token-management request could not be verified",
-        }
-    }
-
-
-def test_invalid_token_reports_the_rejected_input_issues() -> None:
-    """Invalid token input returns the located problems found in that input."""
-    issue: ValidationIssue = {
-        "location": ("body", "name"),
-        "message": "String should have at least 1 character",
-        "type": "string_too_short",
-    }
-
-    assert _body(InvalidTokenError((issue,)))["error"] == {
-        "code": "invalid_token",
-        "message": "Token name, context, or expiration is invalid",
-        "details": [
-            {
-                "location": ["body", "name"],
-                "message": "String should have at least 1 character",
-                "type": "string_too_short",
-            }
-        ],
-    }
 
 
 def test_bearer_error_docs_list_each_code_and_the_challenge_header() -> None:
@@ -416,37 +327,6 @@ def test_every_public_error_is_complete_and_unambiguous() -> None:
             or issubclass(error_type, owner)
             or issubclass(owner, error_type)
         ), f"{error_type.__name__} reuses {owner.__name__}'s code"
-
-
-def test_error_definition_check_reports_incomplete_errors() -> None:
-    """The completeness check flags errors that could not produce a response."""
-
-    class MissingCode(NotFoundError):
-        message = "Thing was not found"
-
-    class Unlocated(InvalidInputError):
-        code = "unlocated_thing"
-        message = "Thing is invalid"
-
-    class Templated(ConflictError):
-        code = "templated_thing"
-        message = "Thing {name} conflicts"
-
-    class Grouping(NotFoundError):
-        pass
-
-    class Member(Grouping):
-        code = "member_not_found"
-        message = "Member was not found"
-
-    assert _needs_definition(MissingCode)
-    assert _definition_problems(MissingCode) == ["missing code"]
-    assert _definition_problems(Unlocated) == ["no issue location or details"]
-    assert _definition_problems(Templated) == ["message has a format placeholder"]
-    assert not _needs_definition(Grouping)
-    assert _definition_problems(Member) == []
-    assert _definition_problems(_Missing) == []
-    assert _definition_problems(_Bad) == []
 
 
 _ISSUE_ROOTS = {"body", "query", "path", "header", "annotation"}

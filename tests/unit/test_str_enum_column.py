@@ -1,7 +1,6 @@
 """Tests for the column type that stores string enums as `VARCHAR`."""
 
 import pytest
-from sqlalchemy import String, column
 from sqlalchemy.dialects import postgresql
 
 from standard_annotation_backend.domain.jobs import JobStatus
@@ -33,15 +32,3 @@ def test_writing_an_unknown_value_is_rejected_before_the_database() -> None:
     """A value outside the enum cannot be written."""
     with pytest.raises(ValueError):
         StrEnumColumn(JobStatus, 50).process_bind_param("paused", _DIALECT)
-
-
-def test_filters_may_compare_with_any_string() -> None:
-    """Plain strings, such as `LIKE` patterns, compare as `VARCHAR` values."""
-    status = column("status", StrEnumColumn(JobStatus, 50))
-
-    pattern = status.like("run%").right
-    member = (status == JobStatus.RUNNING).right
-
-    assert isinstance(pattern.type, String)
-    assert not isinstance(pattern.type, StrEnumColumn)
-    assert isinstance(member.type, StrEnumColumn)

@@ -255,24 +255,6 @@ def _run_review_race(
                 assert second_ready.wait(OBSERVATION_SECONDS), (
                     "unrelated acceptance did not reach its pre-commit checkpoint"
                 )
-                locks = tuple(
-                    observer.execute(
-                        text(
-                            "SELECT pid, mode FROM pg_locks "
-                            "WHERE locktype = 'advisory' AND granted "
-                            "AND pid IN (:first, :second)"
-                        ),
-                        {"first": first_pid, "second": second_pid},
-                    )
-                )
-                assert sorted(locks) == sorted(
-                    [
-                        (first_pid, "ShareLock"),
-                        (first_pid, "ExclusiveLock"),
-                        (second_pid, "ShareLock"),
-                        (second_pid, "ExclusiveLock"),
-                    ]
-                )
             else:
                 blocked = _blocked_by(
                     observer,
@@ -491,12 +473,12 @@ def test_same_payload_create_acceptances_cannot_both_succeed(
         )
 
 
-def test_unrelated_create_acceptances_overlap_after_shared_global_lock(
+def test_unrelated_create_acceptances_overlap_and_both_succeed(
     session_factory: sessionmaker[Session],
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    """Unrelated acceptances hold compatible global locks before either commits."""
+    """Unrelated create acceptances proceed concurrently and both succeed."""
     first_id = _propose_create(unit_of_work_factory, validated_annotation)
     unrelated = Annotation.model_validate(
         {

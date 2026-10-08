@@ -3,6 +3,7 @@
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID
 
 import httpx2
@@ -300,6 +301,13 @@ def test_source_and_parse_failures_store_only_public_error(
     assert "secret" not in job.error
     assert job.progress["failure_code"] == failure_code
     assert "secret" not in str(job.progress)
+    if failure_code == "invalid_document":
+        details = cast(dict[str, Any], job.progress["failure_details"])
+        message = details["message"]
+        assert isinstance(message, str)
+        assert message.strip()
+    else:
+        assert "failure_details" not in job.progress
 
 
 @pytest.mark.parametrize("method_name", ["stage", "activate"])

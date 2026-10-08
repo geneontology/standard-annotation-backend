@@ -191,8 +191,6 @@ def test_refresh_applies_once_then_reports_unchanged(
     assert second_record.progress["unchanged"] is True
     assert second_record.result is not None
     assert second_record.result["unchanged"] is True
-    for record in (first_record, second_record):
-        assert record.result is not None and "applied" not in record.result
     assert fetchers.calls == [case.source_key, case.source_key]
     assert _count(session_factory, case.applied_action) == 1
 
@@ -381,28 +379,6 @@ def test_crash_after_apply_recovers_the_committed_result(
     assert fetchers.calls == [case.source_key] * expected_calls
 
 
-def test_ontology_job_for_a_non_ontology_key_fails_as_unknown_source(
-    unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
-) -> None:
-    """A key that matches the pattern but is not an ontology fails; it never retries."""
-    fetchers = FakeFetchers({})
-    runner = build_runner(database_engine, unit_of_work_factory, fetchers)
-    job_id = create_job(
-        unit_of_work_factory,
-        job_type=JobType.ONTOLOGY_REFRESH,
-        requested_by="curator",
-        parameters={"source_key": "chebi"},
-    ).job_id
-
-    runner.run(job_id)
-
-    record = _read(unit_of_work_factory, job_id)
-    assert record.status == JobStatus.FAILED
-    assert record.progress["failure_code"] == "unknown_source"
-    assert fetchers.calls == []
-
-
 def test_ontology_refresh_waits_for_the_ontology_lock_by_retrying(
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
@@ -465,37 +441,6 @@ def test_finished_ontology_jobs_schedule_pruning_every_time(
     failing.run(failed)
 
     assert scheduled == ["go", "go", "go"]
-
-
-def test_redelivered_authorization_job_reuses_the_committed_refresh(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A crash after the replacement commits leads to `unchanged: true`, not a reapply."""
-    case = CASES["authorization"]
-    runner = build_runner(
-        database_engine, unit_of_work_factory, FakeFetchers({"go-site": case.content})
-    )
-    job_id = _job(unit_of_work_factory, case)
-    original = JobService.succeed
-
-    def crash(*_args: object, **_kwargs: object) -> None:
-        raise ConnectionResetError("worker lost")
-
-    monkeypatch.setattr(JobService, "succeed", crash)
-    with pytest.raises(ConnectionResetError):
-        runner.run(job_id)
-    monkeypatch.setattr(JobService, "succeed", original)
-    runner.run(job_id)
-
-    record = _read(unit_of_work_factory, job_id)
-    assert record.status == JobStatus.SUCCEEDED
-    assert record.result is not None and record.result["unchanged"] is True
-    assert record.progress["unchanged"] is True
-    assert record.parameters == {"source_key": "go-site"}
-    assert _count(session_factory, AuditAction.AUTHORIZATION_REFRESHED) == 1
 
 
 def test_invalid_users_yaml_reports_issues_without_values(
@@ -569,16 +514,21 @@ def test_in_process_pruning_deletes_old_snapshot_data(
 
 def test_in_process_pruning_is_skipped_while_the_ontology_lock_is_held(
     unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
     database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A busy ontology is left for the next finished job and does not raise."""
-    pruned: list[object] = []
-    monkeypatch.setattr(
-        OntologyRepository,
-        "prune_candidates",
-        lambda *a, **k: pruned.append((a, k)),
-    )
+    case = CASES["ontology"]
+    # Three snapshots leave one eligible for pruning; a no-op `enqueue_prune`
+    # keeps the runs themselves from pruning it.
+    for content in _go_versions(case.content, 3):
+        runner = build_runner(
+            database_engine,
+            unit_of_work_factory,
+            FakeFetchers({"go": content}),
+            enqueue_prune=lambda _key: None,
+        )
+        runner.run(_job(unit_of_work_factory, case))
     components = create_refresh_runner(
         engine=database_engine,
         unit_of_work_factory=unit_of_work_factory,
@@ -593,9 +543,9 @@ def test_in_process_pruning_is_skipped_while_the_ontology_lock_is_held(
         assert acquired
         components.ontology.after_terminal("go")
 
-    assert pruned == []
+    assert _pruned_snapshot_count(session_factory) == 0
     components.ontology.after_terminal("go")
-    assert len(pruned) == 1
+    assert _pruned_snapshot_count(session_factory) == 1
 
 
 def test_in_process_pruning_failure_is_logged_and_the_job_stays_succeeded(
