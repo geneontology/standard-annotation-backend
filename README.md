@@ -1,7 +1,8 @@
 # Standard Annotation Backend
 
-The Standard Annotation Backend (SAB) is a Python service for storing and managing Gene
-Ontology standard annotations.
+The Standard Annotation Backend (SABE, pronounced /ˈsabe/ or "SAH-beh", like the
+Spanish word *sabe*) is a Python service for storing and managing Gene Ontology standard
+annotations.
 
 ## Set up a local development environment
 
@@ -61,10 +62,10 @@ just down
 
 ## Refresh reference data
 
-SAB keeps four kinds of reference data current: authorization (go-site
+SABE keeps four kinds of reference data current: authorization (go-site
 `users.yaml`), ontologies (GO), entity catalogs (GPI files), and group annotations
 (GPAD files). Their sources are
-configured in `config/sources.yaml`. `SAB_SOURCES_FILE` can be used to point to a
+configured in `config/sources.yaml`. `SABE_SOURCES_FILE` can be used to point to a
 different file. Each entry is a `github` source (`repository`, `ref`, `path`) or an
 `https` source (`url`).
 
@@ -81,18 +82,18 @@ every configured source of that kind. Authorization has a single source, so it t
 no `SOURCE`.
 
 When `just up` is running, the scheduler refreshes each kind on a UTC cron schedule:
-`SAB_AUTHORIZATION_REFRESH_CRON`, `SAB_ONTOLOGY_REFRESH_CRON`,
-`SAB_ENTITY_REFRESH_CRON`, and `SAB_ANNOTATION_REFRESH_CRON`. With an `admin/global` bearer token, you can also start a
+`SABE_AUTHORIZATION_REFRESH_CRON`, `SABE_ONTOLOGY_REFRESH_CRON`,
+`SABE_ENTITY_REFRESH_CRON`, and `SABE_ANNOTATION_REFRESH_CRON`. With an `admin/global` bearer token, you can also start a
 refresh and follow its job through the API:
 
 ```bash
 curl -X POST \
-  -H "Authorization: Bearer ${SAB_API_TOKEN}" \
+  -H "Authorization: Bearer ${SABE_API_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"source_key":"go"}' \
   http://localhost:8000/admin/ontology-refreshes
 
-curl -H "Authorization: Bearer ${SAB_API_TOKEN}" \
+curl -H "Authorization: Bearer ${SABE_API_TOKEN}" \
   http://localhost:8000/admin/jobs/<job_id>
 ```
 
@@ -103,7 +104,7 @@ takes no body. For the others, send `{}` to refresh every configured source or
 
 GPAD annotation sources are configured in the `annotations` section of
 `config/sources.yaml`. Each refresh replaces all annotations of the source's group. To
-move a group to SAB management permanently, a global admin sends
+move a group to SABE management permanently, a global admin sends
 `POST /admin/annotation-cutovers` with the source key.
 
 ## Create and manage bearer tokens
@@ -114,8 +115,8 @@ Configure a GitHub OAuth app with this callback URL for local development:
 http://localhost:8000/auth/github/callback
 ```
 
-Set its client ID and secret in `.env` as `SAB_GITHUB_OAUTH_CLIENT_ID` and
-`SAB_GITHUB_OAUTH_CLIENT_SECRET`. After refreshing authorization and starting SAB,
+Set its client ID and secret in `.env` as `SABE_GITHUB_OAUTH_CLIENT_ID` and
+`SABE_GITHUB_OAUTH_CLIENT_SECRET`. After refreshing authorization and starting SABE,
 open <http://localhost:8000/token-management> and sign in with an authorized GitHub
 account.
 
@@ -126,10 +127,10 @@ only once, so copy it to secure storage before closing the confirmation.
 ## Use a bearer token
 
 Keep tokens out of source files, logs, URLs, and shell history. Assuming an issued token
-is already stored in `SAB_API_TOKEN`, send it in the `Authorization` header:
+is already stored in `SABE_API_TOKEN`, send it in the `Authorization` header:
 
 ```bash
-curl -H "Authorization: Bearer ${SAB_API_TOKEN}" \
+curl -H "Authorization: Bearer ${SABE_API_TOKEN}" \
   http://localhost:8000/annotations
 ```
 
@@ -149,7 +150,7 @@ Pass paths or other pytest arguments after the recipe to run a subset:
 just test tests/unit/test_permissions.py
 ```
 
-Tests reset the database configured by `SAB_TEST_DATABASE_URL`; always use a disposable
+Tests reset the database configured by `SABE_TEST_DATABASE_URL`; always use a disposable
 database whose name ends in `_test`.
 
 ## Run contributor checks
@@ -173,7 +174,7 @@ just version
 
 ## Architecture
 
-SAB separates HTTP handling, application operations, and database access into layers:
+SABE separates HTTP handling, application operations, and database access into layers:
 
 ```text
 HTTP route → service → unit of work → repository → PostgreSQL

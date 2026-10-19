@@ -131,7 +131,7 @@ def duplicate_key(annotation: Annotation) -> DuplicateKey:
 def are_duplicate_annotations(left: Annotation, right: Annotation) -> bool:
     """Compare two annotation payloads using the duplicate policy.
 
-    This function cannot inspect SAB identifiers or record status. Callers are
+    This function cannot inspect SABE identifiers or record status. Callers are
     responsible for comparing distinct, active annotation records.
 
     Args:

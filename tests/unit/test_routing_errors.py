@@ -49,7 +49,7 @@ def test_static_asset_method_errors_never_send_an_empty_allow_header() -> None:
 
 
 def test_other_http_exceptions_become_internal_errors() -> None:
-    """An HTTP exception SAB does not map returns the generic `internal_error`."""
+    """An HTTP exception SABE does not map returns the generic `internal_error`."""
     other = FastAPI()
     install_exception_handlers(other)
 

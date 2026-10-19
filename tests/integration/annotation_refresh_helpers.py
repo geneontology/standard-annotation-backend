@@ -64,14 +64,14 @@ def seed_group_import(
 ) -> UUID:
     """Record a published import for a group directly, without running a job.
 
-    A `sab_managed` mode records the import as the group's cutover.
+    A `sabe_managed` mode records the import as the group's cutover.
 
     Returns:
         The ID of the succeeded job that the import belongs to.
     """
     now = datetime.now(UTC)
     job_id = uuid4()
-    cutover = mode is AnnotationManagementMode.SAB_MANAGED
+    cutover = mode is AnnotationManagementMode.SABE_MANAGED
     with session_factory() as session:
         session.add(
             JobRecord(

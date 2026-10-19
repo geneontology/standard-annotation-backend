@@ -200,7 +200,7 @@ class AuthorizationRefreshService:
                     SyncAuthorization(
                         role=grant.role, scope=grant.scope, group_id=grant.group
                     )
-                    for grant in user.authorizations.sab
+                    for grant in user.authorizations.sabe
                 ),
             )
             for user in document.root

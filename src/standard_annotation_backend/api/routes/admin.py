@@ -28,7 +28,7 @@ from standard_annotation_backend.api.models import (
 )
 from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.annotation_management import (
-    GroupSabManagedError,
+    GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.auth import (
     RequestContext,
@@ -156,13 +156,13 @@ def refresh_entities(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,
     responses=error_responses(
-        RequestValidationFailedError, UnknownSourceError, GroupSabManagedError
+        RequestValidationFailedError, UnknownSourceError, GroupSabeManagedError
     ),
     summary="Replace groups' annotations from GPAD",
     description=(
         "Replace a group's annotations with the contents of its configured GPAD "
         "file. Every successful refresh deletes all of the group's annotations, "
-        "including edits made in SAB, and imports the file; a file that is "
+        "including edits made in SABE, and imports the file; a file that is "
         "unchanged while the group is untouched is skipped. Send {} to refresh "
         'every group that GPAD still manages, or {"source_key": "<key>"} for one. '
         f"{_SHARED_DESCRIPTION}"
@@ -185,12 +185,12 @@ def refresh_annotations(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,
     responses=error_responses(
-        RequestValidationFailedError, UnknownSourceError, GroupSabManagedError
+        RequestValidationFailedError, UnknownSourceError, GroupSabeManagedError
     ),
-    summary="Move a group to SAB management",
+    summary="Move a group to SABE management",
     description=(
         "Run the final GPAD import for one annotation source. It publishes only if "
-        "every record is imported, and then moves the source's group to SAB "
+        "every record is imported, and then moves the source's group to SABE "
         "management permanently: GPAD can never replace that group's annotations "
         "again. A queued or running cutover for the same source is returned "
         "instead of duplicated. Requires the admin role with global scope."

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from standard_annotation_backend.domain.annotation_management import (
-    GroupSabManagedError,
+    GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
@@ -84,7 +84,7 @@ class RefreshStartService:
         it, every configured source of the kind gets a refresh job. For entity
         refreshes, every source that still has an active catalog but is no
         longer configured also gets a retirement job. For annotation refreshes,
-        groups whose annotations are SAB-managed are skipped when `source_key`
+        groups whose annotations are SABE-managed are skipped when `source_key`
         is omitted.
 
         If a queued or running job of the same type already exists for a source,
@@ -106,8 +106,8 @@ class RefreshStartService:
                 checked before the source lookup, so the caller learns nothing
                 about which sources are configured.
             UnknownSourceError: If `source_key` is not configured for `kind`.
-            GroupSabManagedError: If `source_key` names an annotation source
-                whose group is SAB-managed. No job is created.
+            GroupSabeManagedError: If `source_key` names an annotation source
+                whose group is SABE-managed. No job is created.
         """
         authorize_role(context, PermissionAction.REFRESH_CREATE)
         return self._start(
@@ -117,7 +117,7 @@ class RefreshStartService:
     def start_cutover(self, *, context: AuthorizationContext, source_key: str) -> Job:
         """Create or reuse the cutover job for one annotation source and dispatch it.
 
-        A cutover moves the source's group to SAB management permanently, so it
+        A cutover moves the source's group to SABE management permanently, so it
         is started only on request, never by the schedule or for every source.
         An unfinished cutover job for the source is reused; an ordinary refresh
         job is not.
@@ -126,7 +126,7 @@ class RefreshStartService:
             PermissionDeniedError: If the caller lacks global admin, checked
                 before the source lookup.
             UnknownSourceError: If `source_key` is not an annotation source.
-            GroupSabManagedError: If the group is already SAB-managed.
+            GroupSabeManagedError: If the group is already SABE-managed.
         """
         authorize_role(context, PermissionAction.REFRESH_CREATE)
         (job,) = self._start(
@@ -215,7 +215,7 @@ class RefreshStartService:
     def _annotation_targets(
         self, uow: SqlAlchemyUnitOfWork, source_key: str | None, *, cutover: bool
     ) -> list[tuple[JobType, str]]:
-        """List annotation jobs to start, leaving out SAB-managed groups.
+        """List annotation jobs to start, leaving out SABE-managed groups.
 
         Modes are read while the start lock is held, so they match the jobs
         created in the same transaction. Publication checks the group's mode
@@ -223,15 +223,15 @@ class RefreshStartService:
         overwritten.
 
         Raises:
-            GroupSabManagedError: If `source_key` names a source whose group is
-                SAB-managed.
+            GroupSabeManagedError: If `source_key` names a source whose group is
+                SABE-managed.
         """
         job_type = JobType.ANNOTATION_CUTOVER if cutover else JobType.ANNOTATION_REFRESH
-        managed = uow.annotation_imports.sab_managed_groups()
+        managed = uow.annotation_imports.sabe_managed_groups()
         if source_key is not None:
             group = self._sources.annotation_group(source_key)
             if group in managed:
-                raise GroupSabManagedError(group)
+                raise GroupSabeManagedError(group)
             return [(job_type, source_key)]
         return [
             (job_type, key)

@@ -236,7 +236,7 @@ def test_scheduled_refresh_creates_scheduler_jobs_for_every_source(
     assert retired == []
 
 
-def test_refresh_all_annotations_skips_sab_managed_groups_and_never_cuts_over(
+def test_refresh_all_annotations_skips_sabe_managed_groups_and_never_cuts_over(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -245,7 +245,7 @@ def test_refresh_all_annotations_skips_sab_managed_groups_and_never_cuts_over(
         session_factory,
         group_key="RGD",
         source_key="rgd-gpad",
-        mode=AnnotationManagementMode.SAB_MANAGED,
+        mode=AnnotationManagementMode.SABE_MANAGED,
     )
     dispatched: list[Job] = []
 

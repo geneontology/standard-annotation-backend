@@ -1,4 +1,4 @@
-"""Convert OBO documents to SAB ontology snapshots with `fastobo`."""
+"""Convert OBO documents to SABE ontology snapshots with `fastobo`."""
 
 from __future__ import annotations
 

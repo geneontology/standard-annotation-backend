@@ -1,4 +1,4 @@
-"""Configuration loaded from SAB-prefixed environment variables."""
+"""Configuration loaded from SABE-prefixed environment variables."""
 
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -26,7 +26,7 @@ from standard_annotation_backend.validation_types import TrimmedNonBlankString
 SETTINGS_CONFIG = SettingsConfigDict(
     env_file=".env",
     env_file_encoding="utf-8",
-    env_prefix="SAB_",
+    env_prefix="SABE_",
     extra="ignore",
 )
 

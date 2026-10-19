@@ -23,7 +23,7 @@ from standard_annotation_backend.persistence.models import (
     ApiTokenRecord,
     AuditEventRecord,
     AuthorizationAssignmentRecord,
-    SabGroupRecord,
+    SabeGroupRecord,
     TokenManagementSessionRecord,
 )
 from standard_annotation_backend.persistence.repositories.auth import (
@@ -89,7 +89,7 @@ def _login(client: TestClient) -> None:
     )
     assert response.status_code == status.HTTP_303_SEE_OTHER
     assert response.headers["location"] == "/token-management"
-    client.headers["X-CSRF-Token"] = client.cookies["sab_token_management_csrf"]
+    client.headers["X-CSRF-Token"] = client.cookies["sabe_token_management_csrf"]
 
 
 @pytest.fixture
@@ -139,21 +139,21 @@ def test_callback_stores_digest_only_session_and_cookie_policy(
     )
     assert response.status_code == status.HTTP_303_SEE_OTHER
     assert response.headers["location"] == "/token-management"
-    assert "sab_token_management_csrf" in integration_api_client.cookies
-    raw = integration_api_client.cookies["sab_token_management_session"]
-    assert raw.startswith("sab_session_")
-    assert "sab_oauth_state" not in integration_api_client.cookies
+    assert "sabe_token_management_csrf" in integration_api_client.cookies
+    raw = integration_api_client.cookies["sabe_token_management_session"]
+    assert raw.startswith("sabe_session_")
+    assert "sabe_oauth_state" not in integration_api_client.cookies
     cookies = response.headers.get_list("set-cookie")
     session_cookie = next(
         cookie
         for cookie in cookies
-        if cookie.startswith("sab_token_management_session=")
+        if cookie.startswith("sabe_token_management_session=")
     )
     assert "HttpOnly" in session_cookie and "SameSite=lax" in session_cookie
     assert "Path=/" in session_cookie and "Max-Age=900" in session_cookie
     assert "Secure" not in session_cookie
     csrf_cookie = next(
-        cookie for cookie in cookies if cookie.startswith("sab_token_management_csrf=")
+        cookie for cookie in cookies if cookie.startswith("sabe_token_management_csrf=")
     )
     assert "HttpOnly" not in csrf_cookie and "SameSite=strict" in csrf_cookie
     assert "Path=/" in csrf_cookie and "Max-Age=900" in csrf_cookie
@@ -174,7 +174,7 @@ def test_state_changing_management_requests_require_matching_csrf_tokens(
     session_factory: sessionmaker[Session],
 ) -> None:
     """Creation and revocation reject absent or mismatched CSRF credentials."""
-    csrf_token = management_client.cookies["sab_token_management_csrf"]
+    csrf_token = management_client.cookies["sabe_token_management_csrf"]
     payload = {
         "name": "Notebook",
         "assignment_id": str(user_assignments["assignment_id"]),
@@ -185,7 +185,7 @@ def test_state_changing_management_requests_require_matching_csrf_tokens(
         "/tokens", json=payload, headers={"X-CSRF-Token": ""}
     )
     mismatched = management_client.post(
-        "/tokens", json=payload, headers={"X-CSRF-Token": "sab_csrf_wrong"}
+        "/tokens", json=payload, headers={"X-CSRF-Token": "sabe_csrf_wrong"}
     )
 
     for response in (without_header, mismatched):
@@ -205,16 +205,16 @@ def test_state_changing_management_requests_require_matching_csrf_tokens(
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(ApiTokenRecord)) == 0
 
-    raw_session = management_client.cookies["sab_token_management_session"]
+    raw_session = management_client.cookies["sabe_token_management_session"]
     management_client.cookies.set(
-        "sab_token_management_session", "sab_session_tampered"
+        "sabe_token_management_session", "sabe_session_tampered"
     )
     session_mismatch = management_client.post(
         "/tokens", json=payload, headers={"X-CSRF-Token": csrf_token}
     )
     assert session_mismatch.status_code == status.HTTP_403_FORBIDDEN
     assert session_mismatch.json()["error"]["code"] == "invalid_csrf_token"
-    management_client.cookies.set("sab_token_management_session", raw_session)
+    management_client.cookies.set("sabe_token_management_session", raw_session)
 
     created = management_client.post(
         "/tokens", json=payload, headers={"X-CSRF-Token": csrf_token}
@@ -223,7 +223,7 @@ def test_state_changing_management_requests_require_matching_csrf_tokens(
     token_id = created.json()["token_id"]
 
     rejected_revoke = management_client.delete(
-        f"/tokens/{token_id}", headers={"X-CSRF-Token": "sab_csrf_wrong"}
+        f"/tokens/{token_id}", headers={"X-CSRF-Token": "sabe_csrf_wrong"}
     )
     assert rejected_revoke.status_code == status.HTTP_403_FORBIDDEN
     assert management_client.get("/tokens").json()["items"][0]["revoked_at"] is None
@@ -253,7 +253,7 @@ def test_contexts_and_token_creation_are_owned_and_keep_secret_out_of_history(
     )
     result = _create(management_client, user_assignments["assignment_id"])
     raw = str(result["token"])
-    assert raw.startswith("sab_") and not raw.startswith("sab_session_")
+    assert raw.startswith("sabe_") and not raw.startswith("sabe_session_")
     token_id = UUID(str(result["token_id"]))
     with session_factory() as session:
         token = session.get(ApiTokenRecord, token_id)
@@ -301,7 +301,7 @@ def test_contexts_and_token_creation_are_owned_and_keep_secret_out_of_history(
             is None
         )
         session_digest = hashlib.sha256(
-            management_client.cookies["sab_token_management_session"].encode()
+            management_client.cookies["sabe_token_management_session"].encode()
         ).hexdigest()
         assert uow.auth.get_active_token(session_digest, now=datetime.now(UTC)) is None
 
@@ -478,7 +478,7 @@ def test_management_requires_a_current_cookie_session(
     elif session_state == "unknown":
         management_client.cookies.clear()
         management_client.cookies.set(
-            "sab_token_management_session", "sab_session_unknown"
+            "sabe_token_management_session", "sabe_session_unknown"
         )
     else:
         with session_factory() as session:
@@ -502,7 +502,7 @@ def test_unsynchronized_user_cannot_start_management_session(
     github_http_responses: list[httpx2.Response | Exception],
     session_factory: sessionmaker[Session],
 ) -> None:
-    """Verified GitHub identity requires an active synchronized SAB user."""
+    """Verified GitHub identity requires an active synchronized SABE user."""
     first = integration_api_client.get("/auth/github/login", follow_redirects=False)
     state = parse_qs(urlsplit(first.headers["location"]).query)["state"][0]
     response = integration_api_client.get(
@@ -512,7 +512,7 @@ def test_unsynchronized_user_cannot_start_management_session(
     )
     assert response.status_code == status.HTTP_403_FORBIDDEN
     assert response.json()["error"]["code"] == "github_identity_not_allowed"
-    assert "sab_oauth_state" not in integration_api_client.cookies
+    assert "sabe_oauth_state" not in integration_api_client.cookies
     with session_factory() as session:
         assert (
             session.scalar(
@@ -531,7 +531,7 @@ def test_users_yaml_login_can_start_management_without_a_numeric_id(
     """The accepted upstream schema authorizes an OAuth user's current login."""
     source = """
 - accounts: {github: curator}
-  authorizations: {sab: [{role: edit, scope: self, group: MGI}]}
+  authorizations: {sabe: [{role: edit, scope: self, group: MGI}]}
 """
     apply_users_yaml(
         unit_of_work_factory, source, github_provenance("a" * 40, "test/repo")
@@ -560,7 +560,7 @@ def test_changed_login_gets_new_identity_and_cannot_inherit_old_tokens(
     """A renamed login requires a new grant and cannot inherit the old identity."""
     source = """
 - accounts: {github: curator}
-  authorizations: {sab: [{role: edit, scope: self, group: MGI}]}
+  authorizations: {sabe: [{role: edit, scope: self, group: MGI}]}
 """
     apply_users_yaml(
         unit_of_work_factory, source, github_provenance("a" * 40, "test/repo")
@@ -589,7 +589,7 @@ def test_changed_login_gets_new_identity_and_cannot_inherit_old_tokens(
         follow_redirects=False,
     )
     assert old.status_code == status.HTTP_403_FORBIDDEN
-    assert "sab_token_management_session" not in integration_api_client.cookies
+    assert "sabe_token_management_session" not in integration_api_client.cookies
 
     profile = responses[1]
     assert isinstance(profile, httpx2.Response)
@@ -640,7 +640,7 @@ def test_listing_keeps_issued_context_when_changed_assignment_rejects_authentica
         elif changed_field == "scope":
             assignment.scope = "self"
         else:
-            group = SabGroupRecord(group_key="RGD")
+            group = SabeGroupRecord(group_key="RGD")
             session.add(group)
             session.flush()
             assignment.group_id = group.group_id
@@ -779,7 +779,9 @@ def test_bearer_header_cannot_authenticate_token_management(
         "/tokens", headers={"Authorization": f"Bearer {created['token']}"}
     )
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
-    management_client.cookies.set("sab_token_management_session", str(created["token"]))
+    management_client.cookies.set(
+        "sabe_token_management_session", str(created["token"])
+    )
     assert (
         management_client.get("/tokens/contexts").status_code
         == status.HTTP_401_UNAUTHORIZED
@@ -824,7 +826,7 @@ def test_creation_service_validates_names_without_an_http_boundary(
 ) -> None:
     """Non-HTTP callers cannot issue blank or overlong names through the service."""
     service = TokenService(unit_of_work_factory)
-    raw = management_client.cookies["sab_token_management_session"]
+    raw = management_client.cookies["sabe_token_management_session"]
     with pytest.raises(InvalidTokenError) as raised:
         service.create_token(
             raw,
@@ -935,7 +937,7 @@ def test_callback_database_failures_clear_state_and_return_safe_error(
     with session_factory() as session:
         if failure_stage == "lookup":
             session.execute(
-                text("ALTER TABLE sab_user RENAME TO task4_unavailable_sab_user")
+                text("ALTER TABLE sabe_user RENAME TO task4_unavailable_sabe_user")
             )
         else:
             session.execute(
@@ -973,8 +975,8 @@ def test_callback_database_failures_clear_state_and_return_safe_error(
         }
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["referrer-policy"] == "no-referrer"
-        assert "sab_oauth_state" not in integration_api_client.cookies
-        assert "sab_token_management_session" not in integration_api_client.cookies
+        assert "sabe_oauth_state" not in integration_api_client.cookies
+        assert "sabe_token_management_session" not in integration_api_client.cookies
         assert state not in response.text
         assert "test-oauth-code" not in response.text
         assert "digest" not in response.text
@@ -982,7 +984,7 @@ def test_callback_database_failures_clear_state_and_return_safe_error(
         with session_factory() as session:
             if failure_stage == "lookup":
                 session.execute(
-                    text("ALTER TABLE task4_unavailable_sab_user RENAME TO sab_user")
+                    text("ALTER TABLE task4_unavailable_sabe_user RENAME TO sabe_user")
                 )
             else:
                 session.execute(
@@ -1025,6 +1027,6 @@ def test_unexpected_callback_failure_also_clears_state_and_returns_safe_error(
     }
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["referrer-policy"] == "no-referrer"
-    assert "sab_oauth_state" not in integration_api_client.cookies
-    assert "sab_token_management_session" not in integration_api_client.cookies
+    assert "sabe_oauth_state" not in integration_api_client.cookies
+    assert "sabe_token_management_session" not in integration_api_client.cookies
     assert "test-client-secret" not in response.text and state not in response.text

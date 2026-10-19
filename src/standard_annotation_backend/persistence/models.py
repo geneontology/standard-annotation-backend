@@ -97,13 +97,13 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
-class SabUserRecord(Base):
+class SabeUserRecord(Base):
     """Store a synchronized user identity without OAuth credentials."""
 
-    __tablename__ = "sab_user"
+    __tablename__ = "sabe_user"
     __table_args__ = (
         Index(
-            "uq_sab_user_github_login", func.lower(text("github_login")), unique=True
+            "uq_sabe_user_github_login", func.lower(text("github_login")), unique=True
         ),
     )
 
@@ -123,10 +123,10 @@ class SabUserRecord(Base):
     )
 
 
-class SabGroupRecord(Base):
+class SabeGroupRecord(Base):
     """Associate a local group identity with its external annotation ownership key."""
 
-    __tablename__ = "sab_group"
+    __tablename__ = "sabe_group"
 
     group_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
@@ -170,20 +170,20 @@ class AuthorizationAssignmentRecord(Base):
     )
     user_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
-        ForeignKey("sab_user.user_id", ondelete="RESTRICT"),
+        ForeignKey("sabe_user.user_id", ondelete="RESTRICT"),
     )
     role: Mapped[str] = mapped_column(String(16))
     scope: Mapped[str] = mapped_column(String(16))
     group_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
-        ForeignKey("sab_group.group_id", ondelete="RESTRICT"),
+        ForeignKey("sabe_group.group_id", ondelete="RESTRICT"),
     )
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-    owner: Mapped[SabUserRecord] = relationship()
-    group: Mapped[SabGroupRecord | None] = relationship()
+    owner: Mapped[SabeUserRecord] = relationship()
+    group: Mapped[SabeGroupRecord | None] = relationship()
 
 
 class ApiTokenRecord(Base):
@@ -220,7 +220,7 @@ class ApiTokenRecord(Base):
     )
     user_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
-        ForeignKey("sab_user.user_id", ondelete="RESTRICT"),
+        ForeignKey("sabe_user.user_id", ondelete="RESTRICT"),
     )
     assignment_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True))
     selected_role: Mapped[str] = mapped_column(String(16))
@@ -234,7 +234,7 @@ class ApiTokenRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    owner: Mapped[SabUserRecord] = relationship(viewonly=True)
+    owner: Mapped[SabeUserRecord] = relationship(viewonly=True)
     assignment: Mapped[AuthorizationAssignmentRecord] = relationship(viewonly=True)
 
 
@@ -254,7 +254,8 @@ class TokenManagementSessionRecord(Base):
         server_default=func.gen_random_uuid(),
     )
     user_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), ForeignKey("sab_user.user_id", ondelete="CASCADE")
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("sabe_user.user_id", ondelete="CASCADE"),
     )
     digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -262,7 +263,7 @@ class TokenManagementSessionRecord(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    owner: Mapped[SabUserRecord] = relationship()
+    owner: Mapped[SabeUserRecord] = relationship()
 
 
 class AuthorizationRefreshRecord(Base):
@@ -968,20 +969,20 @@ class AnnotationImportRecord(Base):
 
 
 class GroupAnnotationManagementRecord(Base):
-    """Store whether GPAD or SAB is the source of truth for one group.
+    """Store whether GPAD or SABE is the source of truth for one group.
 
     A group without a row is `gpad_imported`. `group_key` matches
     `annotation.owning_group_id`, which is plain text: groups that own annotations
-    need not appear in `sab_group`.
+    need not appear in `sabe_group`.
     """
 
     __tablename__ = "group_annotation_management"
     __table_args__ = (
         CheckConstraint(
-            "mode IN ('gpad_imported', 'sab_managed')", name="mode_allowed"
+            "mode IN ('gpad_imported', 'sabe_managed')", name="mode_allowed"
         ),
         CheckConstraint(
-            "(mode = 'sab_managed') = (transitioned_at IS NOT NULL) "
+            "(mode = 'sabe_managed') = (transitioned_at IS NOT NULL) "
             "AND (transitioned_at IS NULL) = (transition_job_id IS NULL)",
             name="transition_complete",
         ),

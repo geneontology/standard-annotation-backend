@@ -4,8 +4,8 @@ Each annotation source in `config/sources.yaml` names the group that owns every
 annotation in its GPAD file. While the group is `gpad_imported`, that file is the
 source of truth: each successful refresh deletes all of the group's annotations
 and imports the file. A cutover is a final import that succeeds only if every
-record is imported. It moves the group to `sab_managed` permanently, after which
-the group's annotations are maintained in SAB and GPAD can no longer replace them.
+record is imported. It moves the group to `sabe_managed` permanently, after which
+the group's annotations are maintained in SABE and GPAD can no longer replace them.
 
 An import has two steps. Staging reads the file and stores its valid annotations
 in separate staging tables without touching the group's annotations. Publication
@@ -50,13 +50,13 @@ UNKNOWN_DB_OBJECT_ID = "unknown_db_object_id"
 class AnnotationManagementMode(StrEnum):
     """Name the source of truth for a group's annotations.
 
-    `gpad_imported` means the group's GPAD file; `sab_managed` means SAB. A group
-    without a stored mode is `gpad_imported`. The change to `sab_managed` happens
+    `gpad_imported` means the group's GPAD file; `sabe_managed` means SABE. A group
+    without a stored mode is `gpad_imported`. The change to `sabe_managed` happens
     only when a cutover publishes, and is permanent.
     """
 
     GPAD_IMPORTED = "gpad_imported"
-    SAB_MANAGED = "sab_managed"
+    SABE_MANAGED = "sabe_managed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,7 +155,7 @@ class AnnotationRefreshResult:
         group_key: Group whose annotations were replaced.
         import_job_id: Job that published the import.
         is_cutover: Whether the import was a cutover, which moved the group to
-            SAB management.
+            SABE management.
         provenance: The exact source document that was imported.
         data_rows: Number of GPAD data rows read, including rejected ones.
         annotations_published: Number of annotations the import published.
@@ -232,30 +232,30 @@ STORED_ANNOTATION_UNCHANGED_RESULT = StoredJson(
 )
 
 
-class GroupSabManagedError(ConflictError, TerminalRefreshError):
-    """Report that SAB, not GPAD, is the source of truth for a group.
+class GroupSabeManagedError(ConflictError, TerminalRefreshError):
+    """Report that SABE, not GPAD, is the source of truth for a group.
 
-    GPAD may never replace a `sab_managed` group's annotations. A refresh job
+    GPAD may never replace a `sabe_managed` group's annotations. A refresh job
     fails with `failure_code`, and a request to start one is rejected as a
     conflict. Neither message names the group, so both can be logged safely.
 
     Attributes:
-        group_key: The SAB-managed group.
+        group_key: The SABE-managed group.
     """
 
-    failure_code = RefreshFailureCode.GROUP_SAB_MANAGED
-    code = "group_sab_managed"
+    failure_code = RefreshFailureCode.GROUP_SABE_MANAGED
+    code = "group_sabe_managed"
     message = (
-        "The source's group is managed in SAB, so GPAD can no longer replace its "
+        "The source's group is managed in SABE, so GPAD can no longer replace its "
         "annotations"
     )
 
     def __init__(self, group_key: str) -> None:
         self.group_key = group_key
         # Only `TerminalRefreshError` initializes the exception. It comes after
-        # the SAB category in the bases, so its `super()` call reaches
+        # the SABE category in the bases, so its `super()` call reaches
         # `Exception` and the text the refresh runner sees is unchanged.
-        TerminalRefreshError.__init__(self, "group is SAB-managed")
+        TerminalRefreshError.__init__(self, "group is SABE-managed")
 
 
 class NoValidAnnotationsError(ValueError):

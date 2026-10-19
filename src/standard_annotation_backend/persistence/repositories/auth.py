@@ -20,8 +20,8 @@ from standard_annotation_backend.persistence.models import (
     ApiTokenRecord,
     AuthorizationAssignmentRecord,
     AuthorizationRefreshRecord,
-    SabGroupRecord,
-    SabUserRecord,
+    SabeGroupRecord,
+    SabeUserRecord,
     TokenManagementSessionRecord,
 )
 
@@ -161,11 +161,11 @@ class AuthRepository:
 
         current_users = {
             user.github_login.lower(): user
-            for user in self.session.scalars(select(SabUserRecord)).all()
+            for user in self.session.scalars(select(SabeUserRecord)).all()
         }
         groups = {
             group.group_key: group
-            for group in self.session.scalars(select(SabGroupRecord)).all()
+            for group in self.session.scalars(select(SabeGroupRecord)).all()
         }
         active = {
             (grant.user_id, grant.role, grant.scope, grant.group_id): grant
@@ -182,7 +182,7 @@ class AuthRepository:
             login = entry.github_login.lower()
             owner = current_users.get(login)
             if owner is None:
-                owner = SabUserRecord(github_login=login)
+                owner = SabeUserRecord(github_login=login)
                 self.session.add(owner)
                 self.session.flush([owner])
             seen_users.add(owner.user_id)
@@ -194,7 +194,7 @@ class AuthRepository:
                 if grant.group_id is not None:
                     group = groups.get(grant.group_id)
                     if group is None:
-                        group = SabGroupRecord(group_key=grant.group_id)
+                        group = SabeGroupRecord(group_key=grant.group_id)
                         self.session.add(group)
                         self.session.flush([group])
                         groups[grant.group_id] = group
@@ -245,7 +245,7 @@ class AuthRepository:
             .limit(1)
         )
 
-    def get_user_by_github_login(self, github_login: str) -> SabUserRecord | None:
+    def get_user_by_github_login(self, github_login: str) -> SabeUserRecord | None:
         """Find an active user using GitHub's case-insensitive login.
 
         Args:
@@ -255,9 +255,9 @@ class AuthRepository:
             Matching active user, or `None` when no match exists.
         """
         return self.session.scalar(
-            select(SabUserRecord).where(
-                func.lower(SabUserRecord.github_login) == github_login.lower(),
-                SabUserRecord.is_active,
+            select(SabeUserRecord).where(
+                func.lower(SabeUserRecord.github_login) == github_login.lower(),
+                SabeUserRecord.is_active,
             )
         )
 
@@ -282,7 +282,7 @@ class AuthRepository:
                 .where(
                     AuthorizationAssignmentRecord.user_id == user_id,
                     AuthorizationAssignmentRecord.is_active,
-                    SabUserRecord.is_active,
+                    SabeUserRecord.is_active,
                 )
                 .order_by(AuthorizationAssignmentRecord.assignment_id)
             ).all()
@@ -311,7 +311,7 @@ class AuthRepository:
                 AuthorizationAssignmentRecord.user_id == user_id,
                 AuthorizationAssignmentRecord.assignment_id == assignment_id,
                 AuthorizationAssignmentRecord.is_active,
-                SabUserRecord.is_active,
+                SabeUserRecord.is_active,
             )
         )
 
@@ -393,7 +393,7 @@ class AuthRepository:
                 ApiTokenRecord.digest == digest,
                 ApiTokenRecord.revoked_at.is_(None),
                 ApiTokenRecord.expires_at > now,
-                SabUserRecord.is_active,
+                SabeUserRecord.is_active,
                 AuthorizationAssignmentRecord.is_active,
             )
         )
@@ -518,6 +518,6 @@ class AuthRepository:
                 TokenManagementSessionRecord.digest == digest,
                 TokenManagementSessionRecord.revoked_at.is_(None),
                 TokenManagementSessionRecord.expires_at > now,
-                SabUserRecord.is_active,
+                SabeUserRecord.is_active,
             )
         )

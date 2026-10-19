@@ -35,10 +35,10 @@ def test_keyed_lock_values_are_unchanged_across_releases() -> None:
     ontology, entity source, or group lock at once. They exclude each other only
     if both derive the same key.
     """
-    assert lock_key(LockNamespace.ONTOLOGY, "go") == 2179758608860698013
-    assert lock_key(LockNamespace.JOB, UUID(int=1)) == -3237178273019958173
-    assert lock_key(LockNamespace.ENTITY_CATALOG, "mgi") == 2322029887830009188
-    assert lock_key(LockNamespace.ANNOTATION_GROUP, "mgi") == 8030413906021117537
+    assert lock_key(LockNamespace.ONTOLOGY, "go") == 6320503940984908097
+    assert lock_key(LockNamespace.JOB, UUID(int=1)) == 8604552816677004657
+    assert lock_key(LockNamespace.ENTITY_CATALOG, "mgi") == -8604783910169449485
+    assert lock_key(LockNamespace.ANNOTATION_GROUP, "mgi") == 7315766855062909923
 
 
 def test_same_value_in_different_namespaces_uses_different_keys() -> None:

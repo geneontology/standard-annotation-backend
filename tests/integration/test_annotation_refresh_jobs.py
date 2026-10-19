@@ -143,7 +143,7 @@ def test_unchanged_file_is_skipped_and_cutover_never_skips(
         "source_checksum": first_result["source_checksum"],
         "unchanged": True,
     }
-    assert cutover_result["mode"] == "sab_managed"
+    assert cutover_result["mode"] == "sabe_managed"
     assert cutover_result["unchanged"] is False
     assert jobs.find(cutover).progress["unchanged"] is False
     assert _group_annotations(session_factory) == 1
@@ -224,24 +224,24 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
         )
 
 
-def test_job_for_a_sab_managed_group_fails_with_group_sab_managed(
+def test_job_for_a_sabe_managed_group_fails_with_group_sabe_managed(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
 ) -> None:
-    """A job for a group that is already SAB-managed fails with `group_sab_managed`."""
+    """A job for a group that is already SABE-managed fails with `group_sabe_managed`."""
     seed_group_import(
         session_factory,
         group_key="MGI",
         source_key=SOURCE,
-        mode=AnnotationManagementMode.SAB_MANAGED,
+        mode=AnnotationManagementMode.SABE_MANAGED,
     )
     job_id = _job(unit_of_work_factory)
 
     runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)
 
-    assert jobs.find(job_id).progress["failure_code"] == "group_sab_managed"
+    assert jobs.find(job_id).progress["failure_code"] == "group_sabe_managed"
 
 
 def test_redelivery_after_publication_recovers_without_fetching(

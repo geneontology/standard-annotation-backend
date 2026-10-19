@@ -39,7 +39,7 @@ from standard_annotation_backend.persistence.models import (
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
     JobRecord,
-    SabGroupRecord,
+    SabeGroupRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
@@ -136,8 +136,8 @@ APPLICATION_TABLES = (
     "token_management_session",
     "authorization_assignment",
     "authorization_refresh",
-    "sab_user",
-    "sab_group",
+    "sabe_user",
+    "sabe_group",
     "change_set",
     "annotation_comment",
     "annotation_duplicate_reference",
@@ -150,27 +150,27 @@ APPLICATION_TABLES = (
 
 
 def _test_database_url() -> URL:
-    raw_url = os.getenv("SAB_TEST_DATABASE_URL")
+    raw_url = os.getenv("SABE_TEST_DATABASE_URL")
     if raw_url is None:
         pytest.skip(
-            "set SAB_TEST_DATABASE_URL to a dedicated PostgreSQL database ending "
+            "set SABE_TEST_DATABASE_URL to a dedicated PostgreSQL database ending "
             "in '_test' to run integration tests",
             allow_module_level=True,
         )
 
     database_url = make_url(raw_url)
-    if os.getenv("SAB_ENVIRONMENT") != "testing":
+    if os.getenv("SABE_ENVIRONMENT") != "testing":
         raise pytest.UsageError(
-            "integration database setup requires SAB_ENVIRONMENT=testing"
+            "integration database setup requires SABE_ENVIRONMENT=testing"
         )
     if "dbname" in database_url.query:
         raise pytest.UsageError(
-            "SAB_TEST_DATABASE_URL must not include the 'dbname' query parameter "
+            "SABE_TEST_DATABASE_URL must not include the 'dbname' query parameter "
             "because it overrides the guarded database path"
         )
     if not database_url.database or not database_url.database.endswith("_test"):
         raise pytest.UsageError(
-            "SAB_TEST_DATABASE_URL must target a database whose name ends in '_test'"
+            "SABE_TEST_DATABASE_URL must target a database whose name ends in '_test'"
         )
     return database_url
 
@@ -178,7 +178,7 @@ def _test_database_url() -> URL:
 def _create_test_database_if_missing(database_url: URL) -> None:
     database_name = database_url.database
     if database_name is None:
-        raise pytest.UsageError("SAB_TEST_DATABASE_URL must include a database name")
+        raise pytest.UsageError("SABE_TEST_DATABASE_URL must include a database name")
 
     connection_arguments = database_url.translate_connect_args(
         database="dbname", username="user"
@@ -216,7 +216,7 @@ def database_engine(alembic_config: Config) -> Iterator[Engine]:
     """Provide an engine connected to a freshly migrated test database.
 
     Yields:
-        An engine connected to the database named by `SAB_TEST_DATABASE_URL`.
+        An engine connected to the database named by `SABE_TEST_DATABASE_URL`.
     """
     database_url = _test_database_url()
     _create_test_database_if_missing(database_url)
@@ -320,11 +320,11 @@ def seed_annotation(
     with session_factory() as session:
         if (
             session.scalar(
-                select(SabGroupRecord).where(SabGroupRecord.group_key == "MGI")
+                select(SabeGroupRecord).where(SabeGroupRecord.group_key == "MGI")
             )
             is None
         ):
-            session.add(SabGroupRecord(group_key="MGI"))
+            session.add(SabeGroupRecord(group_key="MGI"))
             session.commit()
     counter = iter(range(1, 1_000_000))
 

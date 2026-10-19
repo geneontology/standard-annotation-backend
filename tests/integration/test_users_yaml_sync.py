@@ -29,8 +29,8 @@ from standard_annotation_backend.persistence.models import (
     AuthorizationAssignmentRecord,
     AuthorizationRefreshRecord,
     JobRecord,
-    SabGroupRecord,
-    SabUserRecord,
+    SabeGroupRecord,
+    SabeUserRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services import authorization_refresh_service
@@ -42,25 +42,25 @@ INITIAL = """
 - nickname: Original Name
   accounts: {github: ALICE}
   authorizations:
-    sab:
+    sabe:
       - {role: edit, scope: group, group: zfin}
       - {role: read, scope: group, group: mgi}
 - accounts: {github: bob}
   authorizations:
-    sab: [{role: read, scope: group, group: zfin}]
+    sabe: [{role: read, scope: group, group: zfin}]
 """
 REPLACEMENT = """
 - nickname: Updated Name
   accounts: {github: alice}
   groups: [unrelated-legacy-group]
   authorizations:
-    sab:
+    sabe:
       - {role: edit, scope: group, group: zfin}
       - {role: edit, scope: self, group: flybase}
       - {role: edit, scope: self, group: flybase}
 - accounts: {github: carol}
   authorizations:
-    sab: [{role: admin, scope: global}]
+    sabe: [{role: admin, scope: global}]
 - accounts: {github: reader}
 - nickname: Legacy person without GitHub
 """
@@ -72,8 +72,8 @@ def _snapshot(session_factory: sessionmaker[Session]) -> tuple[object, ...]:
         state = tuple(
             tuple(session.execute(select(record).order_by(*record.primary_key)).all())
             for record in (
-                SabUserRecord.__table__,
-                SabGroupRecord.__table__,
+                SabeUserRecord.__table__,
+                SabeGroupRecord.__table__,
                 AuthorizationAssignmentRecord.__table__,
                 AuthorizationRefreshRecord.__table__,
             )
@@ -92,9 +92,9 @@ def _snapshot(session_factory: sessionmaker[Session]) -> tuple[object, ...]:
     "source",
     [
         "[",
-        INITIAL + "- authorizations: {sab: [{role: owner, scope: global}]}\n",
+        INITIAL + "- authorizations: {sabe: [{role: owner, scope: global}]}\n",
         "!!set {}",
-        "- accounts: {github: alice}\n  authorizations: {sab: !!set {}}",
+        "- accounts: {github: alice}\n  authorizations: {sabe: !!set {}}",
     ],
 )
 def test_invalid_sync_preserves_all_last_valid_state(
@@ -197,7 +197,7 @@ def test_successful_replacement_records_counts_and_preserves_unchanged_contexts(
         }
         assert (
             "unrelated-legacy-group"
-            not in session.scalars(select(SabGroupRecord.group_key)).all()
+            not in session.scalars(select(SabeGroupRecord.group_key)).all()
         )
 
 

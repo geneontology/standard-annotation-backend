@@ -1,4 +1,4 @@
-"""Parse go-site users.yaml into validated SAB authorization entries."""
+"""Parse go-site users.yaml into validated SABE authorization entries."""
 
 from typing import Annotated, Self
 
@@ -44,8 +44,8 @@ def _require_yaml_sequence(value: object) -> list[object]:
     return value
 
 
-class SabAuthorizationEntry(BaseModel):
-    """Validate one explicit SAB role, scope, and optional ownership group.
+class SabeAuthorizationEntry(BaseModel):
+    """Validate one explicit SABE role, scope, and optional ownership group.
 
     Self and group scopes require a nonblank group. Global scope prohibits the
     group key altogether, including an explicit null value.
@@ -87,19 +87,19 @@ class UserAccounts(BaseModel):
 
 
 class UserAuthorizations(BaseModel):
-    """Read SAB grants independently of other applications' permissions."""
+    """Read SABE grants independently of other applications' permissions."""
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
-    sab: Annotated[
-        tuple[SabAuthorizationEntry, ...], BeforeValidator(_require_yaml_sequence)
+    sabe: Annotated[
+        tuple[SabeAuthorizationEntry, ...], BeforeValidator(_require_yaml_sequence)
     ] = ()
 
-    @field_validator("sab")
+    @field_validator("sabe")
     @classmethod
     def normalize_grants(
-        cls, grants: tuple[SabAuthorizationEntry, ...]
-    ) -> tuple[SabAuthorizationEntry, ...]:
+        cls, grants: tuple[SabeAuthorizationEntry, ...]
+    ) -> tuple[SabeAuthorizationEntry, ...]:
         """Deduplicate exact grants and order them deterministically."""
         return tuple(
             sorted(
@@ -109,7 +109,7 @@ class UserAuthorizations(BaseModel):
         )
 
 
-class SabUserEntry(BaseModel):
+class SabeUserEntry(BaseModel):
     """Read one go-site person without interpreting legacy group membership."""
 
     model_config = ConfigDict(extra="ignore", frozen=True)
@@ -120,17 +120,17 @@ class SabUserEntry(BaseModel):
 
     @model_validator(mode="after")
     def require_grant_identity(self) -> Self:
-        """Require a GitHub identity for any person who has a SAB grant."""
-        if self.authorizations.sab and self.accounts.github is None:
+        """Require a GitHub identity for any person who has a SABE grant."""
+        if self.authorizations.sabe and self.accounts.github is None:
             raise PydanticCustomError(
-                "github_login_required", "SAB authorizations require accounts.github"
+                "github_login_required", "SABE authorizations require accounts.github"
             )
         return self
 
 
 class UsersDocument(
     RootModel[
-        Annotated[tuple[SabUserEntry, ...], BeforeValidator(_require_yaml_sequence)]
+        Annotated[tuple[SabeUserEntry, ...], BeforeValidator(_require_yaml_sequence)]
     ]
 ):
     """Validate the complete sequence of go-site people before synchronization."""
@@ -200,7 +200,7 @@ def parse_users_yaml(yaml_text: str) -> UsersDocument:
         A validated document with normalized GitHub logins and grants.
 
     Raises:
-        InvalidUsersDocumentError: If YAML syntax, shape, or SAB entries are invalid.
+        InvalidUsersDocumentError: If YAML syntax, shape, or SABE entries are invalid.
             Issues contain stable codes and input paths, never source values.
     """
     try:

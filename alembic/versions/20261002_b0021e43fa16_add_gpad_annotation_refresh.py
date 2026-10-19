@@ -7,7 +7,7 @@ staging tables that publication copies from. Allows the `annotation_refresh` and
 Downgrading deletes every annotation imported by those jobs (with its versions,
 comments, change sets, lookup rows, and audit events), then the jobs and their
 audit events, because the earlier schema cannot store them. Annotations created
-directly in SAB (origin `direct`) are kept.
+directly in SABE (origin `direct`) are kept.
 
 Revision ID: b0021e43fa16
 Revises: 3cd150b4f1f5

@@ -30,7 +30,7 @@ from standard_annotation_backend.workers import tasks
 VALID_SOURCE = """
 - accounts: {github: curator}
   authorizations:
-    sab: [{role: edit, scope: group, group: MGI}]
+    sabe: [{role: edit, scope: group, group: MGI}]
 """
 SHA = "a" * 40
 
@@ -41,7 +41,7 @@ def worker_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
     """Point worker-created engines at the guarded disposable test database."""
-    monkeypatch.setenv("SAB_DATABASE_URL", os.environ["SAB_TEST_DATABASE_URL"])
+    monkeypatch.setenv("SABE_DATABASE_URL", os.environ["SABE_TEST_DATABASE_URL"])
     get_settings.cache_clear()
     try:
         yield

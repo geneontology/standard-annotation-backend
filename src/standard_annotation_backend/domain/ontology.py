@@ -21,7 +21,7 @@ from standard_annotation_backend.domain.stored_json import StoredJson
 
 
 class OntologyKey(StrEnum):
-    """Identify ontologies configured for loading by SAB."""
+    """Identify ontologies configured for loading by SABE."""
 
     GO = "go"
 
@@ -57,7 +57,7 @@ class OntologyDocument:
 
 @dataclass(frozen=True, slots=True)
 class OntologyTerm:
-    """Describe one term and the replacement metadata needed by SAB."""
+    """Describe one term and the replacement metadata needed by SABE."""
 
     term_id: str
     obsolete: bool

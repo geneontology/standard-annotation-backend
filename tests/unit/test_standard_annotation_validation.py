@@ -66,7 +66,7 @@ def test_schema_constraints_reject_invalid_values(field: str, value: object) -> 
     assert result.errors[0]["location"][:2] == ("annotation", field)
 
 
-def test_extra_sab_identifier_is_rejected_by_core_schema() -> None:
+def test_extra_sabe_identifier_is_rejected_by_core_schema() -> None:
     payload = valid_annotation_payload()
     payload["annotation_id"] = "018f6fa8-709b-7c13-9f75-4513f57b98c2"
 

@@ -1,1 +1,1 @@
-"""Load configured ontology documents and convert them to SAB ontology data."""
+"""Load configured ontology documents and convert them to SABE ontology data."""

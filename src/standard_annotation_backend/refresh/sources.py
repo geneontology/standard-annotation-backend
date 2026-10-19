@@ -169,7 +169,7 @@ class SourcesFile(BaseModel):
     def require_go(
         cls, value: dict[OntologyKey, GitHubSource | HttpsSource]
     ) -> dict[OntologyKey, GitHubSource | HttpsSource]:
-        """Require a GO source, because every SAB deployment refreshes GO."""
+        """Require a GO source, because every SABE deployment refreshes GO."""
         if OntologyKey.GO not in value:
             raise ValueError("must configure the GO ontology")
         return value

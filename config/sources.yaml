@@ -1,4 +1,4 @@
-# Reference data sources that SAB refreshes.
+# Reference data sources that SABE refreshes.
 #
 # Every entry is a source with a `type`:
 #
@@ -22,7 +22,7 @@
 # annotations
 #    keyed by a stable source key. Each entry names the `group` that
 #    owns its annotations; every successful refresh deletes all of that group's
-#    annotations (including edits made in SAB) and imports the file. A group may have
+#    annotations (including edits made in SABE) and imports the file. A group may have
 #    only one source. Entries may set `format: gpad`; GPAD 2.0 is the only format.
 #    Removing an entry stops its refreshes and leaves the group's annotations alone.
 
@@ -55,7 +55,7 @@ entities:
 #          (despite what their headers say). For example, they use `contributor` as an
 #          annotation property key, but the GPAD 2.0 spec requires `contributor-id`.
 #          We also would need a process to keep those files updated more regularly.
-#          For now, these current.geneontology.org are used as a stopgap to allow SAB
+#          For now, these current.geneontology.org are used as a stopgap to allow SABE
 #          to be used for testing and development.
 annotations:
   mgi:

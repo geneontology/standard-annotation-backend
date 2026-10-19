@@ -15,9 +15,9 @@ import pytest
 @pytest.mark.parametrize(
     "query",
     (
-        "dbname=sab",
-        "db%6Eame=sab",
-        "dbname=sab_test&dbname=sab",
+        "dbname=sabe",
+        "db%6Eame=sabe",
+        "dbname=sabe_test&dbname=sabe",
     ),
 )
 def test_database_guard_rejects_query_database_override_before_setup(
@@ -28,10 +28,10 @@ def test_database_guard_rejects_query_database_override_before_setup(
     # Import the real fixture guard so this test cannot drift into checking a copy.
     monkeypatch.syspath_prepend(str(Path(__file__).parents[1]))
     test_database_url = import_module("integration.conftest")._test_database_url
-    monkeypatch.setenv("SAB_ENVIRONMENT", "testing")
+    monkeypatch.setenv("SABE_ENVIRONMENT", "testing")
     monkeypatch.setenv(
-        "SAB_TEST_DATABASE_URL",
-        f"postgresql+psycopg://sab:sab@localhost:5432/sab_test?{query}",
+        "SABE_TEST_DATABASE_URL",
+        f"postgresql+psycopg://sabe:sabe@localhost:5432/sabe_test?{query}",
     )
 
     # No database fixture is used: validation must fail before setup reaches the

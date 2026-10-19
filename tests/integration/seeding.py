@@ -58,7 +58,7 @@ def insert_annotation(
         owning_group_id: Group responsible for the annotation.
         actor_id: Actor recorded on the first version.
         change_source: Workflow recorded on the first version.
-        record_origin: How the annotation is recorded as having entered SAB.
+        record_origin: How the annotation is recorded as having entered SABE.
         source_import_job_id: Import job recorded as the source, for imported rows.
         annotation_id: Identifier to use instead of generating one.
 

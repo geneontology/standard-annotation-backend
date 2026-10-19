@@ -177,7 +177,7 @@ class OntologyRefreshService:
     def after_terminal(self, source_key: str) -> None:
         """Prune old snapshot data now that this ontology's job has finished.
 
-        Celery workers enqueue `sab.ontology.prune`, which retries while the lock
+        Celery workers enqueue `sabe.ontology.prune`, which retries while the lock
         is busy. The CLI prunes in its own process and skips pruning when the
         lock is busy; the next finished job prunes instead.
         """

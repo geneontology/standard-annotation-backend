@@ -12,11 +12,11 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 RUN pip install --no-cache-dir uv==0.12.9
 
-RUN groupadd --gid 10001 sab \
-    && useradd --uid 10001 --gid sab --create-home --shell /usr/sbin/nologin sab \
-    && chown -R sab:sab /app
+RUN groupadd --gid 10001 sabe \
+    && useradd --uid 10001 --gid sabe --create-home --shell /usr/sbin/nologin sabe \
+    && chown -R sabe:sabe /app
 
-USER sab
+USER sabe
 
 FROM base AS vcs-build-base
 
@@ -27,7 +27,7 @@ RUN apt-get update \
     && git config --system --add safe.directory /source \
     && rm -rf /var/lib/apt/lists/*
 
-USER sab
+USER sabe
 
 FROM vcs-build-base AS development-dependencies
 
@@ -43,20 +43,20 @@ RUN --mount=type=bind,source=.,target=/source,readonly \
 
 FROM development-dependencies AS development
 
-COPY --chown=sab:sab pyproject.toml uv.lock README.md ./
-COPY --chown=sab:sab src ./src
-COPY --chown=sab:sab alembic.ini ./
-COPY --chown=sab:sab alembic ./alembic
-COPY --chown=sab:sab config ./config
+COPY --chown=sabe:sabe pyproject.toml uv.lock README.md ./
+COPY --chown=sabe:sabe src ./src
+COPY --chown=sabe:sabe alembic.ini ./
+COPY --chown=sabe:sabe alembic ./alembic
+COPY --chown=sabe:sabe config ./config
 
 FROM base AS runtime
 
-COPY --from=runtime-dependencies --chown=sab:sab /app/.venv /app/.venv
-COPY --chown=sab:sab pyproject.toml uv.lock README.md ./
-COPY --chown=sab:sab src ./src
-COPY --chown=sab:sab alembic.ini ./
-COPY --chown=sab:sab alembic ./alembic
-COPY --chown=sab:sab config ./config
+COPY --from=runtime-dependencies --chown=sabe:sabe /app/.venv /app/.venv
+COPY --chown=sabe:sabe pyproject.toml uv.lock README.md ./
+COPY --chown=sabe:sabe src ./src
+COPY --chown=sabe:sabe alembic.ini ./
+COPY --chown=sabe:sabe alembic ./alembic
+COPY --chown=sabe:sabe config ./config
 
 EXPOSE 8000
 

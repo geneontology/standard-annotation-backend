@@ -1,4 +1,4 @@
-"""Provide reusable request examples for SAB's OpenAPI documentation."""
+"""Provide reusable request examples for SABE's OpenAPI documentation."""
 
 from fastapi.openapi.models import Example
 
@@ -154,7 +154,7 @@ ANNOTATION_REFRESH_EXAMPLES: dict[str, Example] = {
     "all-sources": {
         "summary": (
             "Refresh every configured annotation source for groups which have not been "
-            "cut over to SAB-managed annotations"
+            "cut over to SABE-managed annotations"
         ),
         "value": {},
     },

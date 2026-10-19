@@ -1,9 +1,9 @@
-"""Provide GitHub requests shared by SAB feature adapters.
+"""Provide GitHub requests shared by SABE feature adapters.
 
 This module defines GitHub URLs, headers, timeouts, commit validation, and
 request errors. Feature adapters call it and translate `GitHubIntegrationError`
 into errors for their callers. This module must not import those adapters or
-SAB's domain, service, persistence, or API layers.
+SABE's domain, service, persistence, or API layers.
 """
 
 from dataclasses import dataclass

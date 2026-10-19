@@ -50,7 +50,7 @@ from standard_annotation_backend.persistence.repositories.auth import (
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.token_service import TokenService
 
-OAUTH_STATE_COOKIE = "sab_oauth_state"
+OAUTH_STATE_COOKIE = "sabe_oauth_state"
 OAUTH_STATE_TTL_SECONDS = 600
 
 router = APIRouter(tags=["token-management"], include_in_schema=False)
@@ -141,7 +141,7 @@ def github_login(
     github: Annotated[GitHubOAuthClient, Depends(get_github_oauth_client)],
 ) -> RedirectResponse:
     """Start GitHub sign-in for a short-lived token-management session."""
-    state, _digest = generate_secret("sab_oauth_")
+    state, _digest = generate_secret("sabe_oauth_")
     response = RedirectResponse(
         github.authorization_url(state), status_code=status.HTTP_302_FOUND
     )

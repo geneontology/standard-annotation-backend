@@ -3,7 +3,7 @@
 `annotation_refresh` jobs replace a `gpad_imported` group's annotations. They
 skip a file that matches the group's last import when the group has not changed
 since. `annotation_cutover` jobs never skip, require every record to be imported,
-and move the group to `sab_managed` permanently. One service runs both job types.
+and move the group to `sabe_managed` permanently. One service runs both job types.
 Staging and publication commit in separate transactions.
 """
 
@@ -18,7 +18,7 @@ from standard_annotation_backend.domain.annotation_management import (
     AnnotationRefreshResult,
     AnnotationRefreshUnchanged,
     CutoverRejectedError,
-    GroupSabManagedError,
+    GroupSabeManagedError,
     NoValidAnnotationsError,
     RejectionReport,
     RejectionReportBuilder,
@@ -124,7 +124,7 @@ class AnnotationRefreshService:
 
         Raises:
             AnnotationRefreshBusyError: If another job for the group holds the lock.
-            GroupSabManagedError: If the group is SAB-managed.
+            GroupSabeManagedError: If the group is SABE-managed.
             AnnotationImportConflictError: If the job is not a GPAD job.
             SourceError: If the bytes are not valid gzip or UTF-8.
             TerminalRefreshError: With `header`, `no_valid_annotations`, or
@@ -143,8 +143,8 @@ class AnnotationRefreshService:
         with self._try_lock(LockNamespace.ANNOTATION_GROUP, group_key) as acquired:
             if not acquired:
                 raise AnnotationRefreshBusyError
-            if self._group_mode(group_key) is AnnotationManagementMode.SAB_MANAGED:
-                raise GroupSabManagedError(group_key)
+            if self._group_mode(group_key) is AnnotationManagementMode.SABE_MANAGED:
+                raise GroupSabeManagedError(group_key)
             text = decode_source_text(document.content)
             report("staging")
             try:
@@ -185,7 +185,7 @@ class AnnotationRefreshService:
         """Do nothing; GPAD jobs have no follow-up work."""
 
     def _group_mode(self, group_key: str) -> AnnotationManagementMode:
-        """Return whether GPAD or SAB manages a group's annotations."""
+        """Return whether GPAD or SABE manages a group's annotations."""
         with self._unit_of_work_factory() as uow:
             return uow.annotation_imports.group_mode(group_key)
 
@@ -327,7 +327,7 @@ class AnnotationRefreshService:
         Raises:
             AnnotationImportConflictError: If the job does not exist, is not a
                 GPAD job, or has no staged import.
-            GroupSabManagedError: If the group is already SAB-managed.
+            GroupSabeManagedError: If the group is already SABE-managed.
             CutoverRejectedError: If a cutover's staged subject is no longer an
                 active entity.
         """
@@ -389,7 +389,7 @@ def _import_result(record: AnnotationImportRecord) -> AnnotationRefreshResult:
         records_rejected=record.records_rejected,
         annotations_deleted=record.annotations_deleted,
         mode=(
-            AnnotationManagementMode.SAB_MANAGED
+            AnnotationManagementMode.SABE_MANAGED
             if record.is_cutover
             else AnnotationManagementMode.GPAD_IMPORTED
         ),

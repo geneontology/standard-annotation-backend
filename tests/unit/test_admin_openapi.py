@@ -152,6 +152,6 @@ def test_cutover_requires_a_source_key_and_documents_conflict(schema: dict) -> N
     }
     assert body["required"] == ["source_key"]
     assert body["additionalProperties"] is False
-    assert "group_sab_managed" in operation["responses"]["409"]["description"]
+    assert "group_sabe_managed" in operation["responses"]["409"]["description"]
     refresh = schema["paths"]["/admin/annotation-refreshes"]["post"]
-    assert "group_sab_managed" in refresh["responses"]["409"]["description"]
+    assert "group_sabe_managed" in refresh["responses"]["409"]["description"]

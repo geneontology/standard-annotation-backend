@@ -29,7 +29,7 @@ from standard_annotation_backend.persistence.repositories.auth import (
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 
-RAW_TOKEN = "sab_token_" + "z" * 43
+RAW_TOKEN = "sabe_token_" + "z" * 43
 ROLE_SCOPES = [
     (role, scope)
     for role in ("read", "edit", "admin")
@@ -578,7 +578,7 @@ def test_accepted_creation_keeps_proposer_self_access_and_reviewer_audit(
 ) -> None:
     """Accepting a trainee's creation retains its creator and attributes review to the admin."""
     resources = _seed(unit_of_work_factory, validated_annotation, "edit", "self")
-    review_raw = "sab_token_" + "r" * 43
+    review_raw = "sabe_token_" + "r" * 43
     with unit_of_work_factory() as uow:
         reviewer = uow.auth.get_user_by_github_login("reviewer")
         assert reviewer is not None

@@ -1,13 +1,13 @@
 "use strict";
 
 /*
- * SabTokenManagement is defined separately and exported when possible so that it can be
+ * SabeTokenManagement is defined separately and exported when possible so that it can be
  * tested in isolation.
  *
  * See:
  *     * tests/javascript/token_management.test.cjs
  */
-const SabTokenManagement = (() => {
+const SabeTokenManagement = (() => {
   function addUtcCalendarMonths(date, months) {
     const result = new Date(date);
     const day = result.getUTCDate();
@@ -69,7 +69,7 @@ const SabTokenManagement = (() => {
   });
 })();
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = SabTokenManagement;
+  module.exports = SabeTokenManagement;
 }
 
 /*
@@ -79,7 +79,7 @@ if (typeof module !== "undefined" && module.exports) {
  */
 if (typeof document !== "undefined") (() => {
   const {contextLabel, expirationForChoice, tokenIdentifier, tokenStatus} =
-    SabTokenManagement;
+    SabeTokenManagement;
   const loading = document.querySelector("#loading");
   const signedOut = document.querySelector("#signed-out");
   const authenticated = document.querySelector("#authenticated");
@@ -140,7 +140,7 @@ if (typeof document !== "undefined") (() => {
       headers.set("Content-Type", "application/json");
     }
     if (options.method === "POST" || options.method === "DELETE") {
-      const csrfToken = cookieValue("sab_token_management_csrf");
+      const csrfToken = cookieValue("sabe_token_management_csrf");
       if (!csrfToken) {
         showSignedOut();
         throw new Error("Token-management security state is unavailable.");

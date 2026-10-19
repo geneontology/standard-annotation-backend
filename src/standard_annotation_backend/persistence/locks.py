@@ -38,12 +38,12 @@ class LockNamespace(Enum):
             value.
     """
 
-    JOB = b"SABJOB"
-    ONTOLOGY = b"SABONTO"
-    ENTITY_CATALOG = b"SABENT"
-    ANNOTATION_GROUP = b"SABGPAD"
-    AUTHORIZATION_REFRESH = b"SABAUTH"
-    REFRESH_START = b"SABRSTRT"
+    JOB = b"SABEJOB"
+    ONTOLOGY = b"SABEONTO"
+    ENTITY_CATALOG = b"SABEENT"
+    ANNOTATION_GROUP = b"SABEGPAD"
+    AUTHORIZATION_REFRESH = b"SABEAUTH"
+    REFRESH_START = b"SABERSTRT"
 
 
 def lock_key(namespace: LockNamespace, value: str | UUID | None = None) -> int:

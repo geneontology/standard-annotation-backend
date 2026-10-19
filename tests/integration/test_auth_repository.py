@@ -95,7 +95,7 @@ def test_auth_and_audit_share_transaction_and_rollback(
         )
     with session_factory() as session:
         for record in (
-            models.SabUserRecord,
+            models.SabeUserRecord,
             models.AuthorizationRefreshRecord,
             models.AuditEventRecord,
         ):

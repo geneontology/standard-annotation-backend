@@ -14,7 +14,7 @@ from standard_annotation_backend.domain.refresh import RefreshKindName
 
 def _settings(**overrides: object) -> Settings:
     values: dict[str, Any] = {
-        "database_url": "postgresql+psycopg://sab:sab@db:5432/sab",
+        "database_url": "postgresql+psycopg://sabe:sabe@db:5432/sabe",
         "redis_url": "redis://redis:6379/0",
         "application_secret": "test-secret",
         "environment": "testing",

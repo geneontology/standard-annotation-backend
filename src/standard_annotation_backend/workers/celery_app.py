@@ -19,7 +19,7 @@ settings = get_settings()
 def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
     """Return the Celery Beat schedule that refreshes each kind of reference data.
 
-    Each kind gets one entry that runs `sab.refresh.schedule` with the kind's name,
+    Each kind gets one entry that runs `sabe.refresh.schedule` with the kind's name,
     on the cron expression from that kind's `*_refresh_cron` setting.
     """
     crons = {
@@ -30,7 +30,7 @@ def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
     }
     return {
         f"{kind}-refresh": {
-            "task": "sab.refresh.schedule",
+            "task": "sabe.refresh.schedule",
             "schedule": crontab.from_string(cron),
             "args": (kind,),
         }
@@ -43,7 +43,7 @@ def configure_celery_logging(
     loglevel: int | str = logging.INFO,
     **_kwargs: object,
 ) -> None:
-    """Keep Celery from replacing SAB's process-wide logging pipeline."""
+    """Keep Celery from replacing SABE's process-wide logging pipeline."""
     configure_logging(get_logging_settings().log_format, loglevel)
 
 

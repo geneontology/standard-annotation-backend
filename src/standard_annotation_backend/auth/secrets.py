@@ -3,8 +3,8 @@
 import hashlib
 import secrets
 
-API_TOKEN_PREFIX = "sab_token_"
-TOKEN_MANAGEMENT_SESSION_PREFIX = "sab_session_"
+API_TOKEN_PREFIX = "sabe_token_"
+TOKEN_MANAGEMENT_SESSION_PREFIX = "sabe_session_"
 
 
 def digest_secret(raw: str) -> str:
