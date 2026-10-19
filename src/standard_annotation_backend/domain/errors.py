@@ -1,6 +1,6 @@
 """Define the application errors that clients can receive.
 
-Every public error is a `SabError` subclass with a stable `code`, a fixed,
+Every public error is a `SabeError` subclass with a stable `code`, a fixed,
 safe `message`, and optional typed details. Each concrete error also derives
 from exactly one outcome category below; the API layer maps each category to
 one HTTP status, so this module knows nothing about HTTP.
@@ -65,7 +65,7 @@ type ErrorDetails = (
 """Typed details an error may attach to its response."""
 
 
-class SabError(Exception):
+class SabeError(Exception):
     """Report a failure that clients can receive and handle by its `code`.
 
     Concrete errors set `code` and `message` as class attributes. Constructors
@@ -88,19 +88,19 @@ class SabError(Exception):
         return None
 
 
-class BadRequestError(SabError):
+class BadRequestError(SabeError):
     """The request cannot be interpreted at all."""
 
 
-class UnauthenticatedError(SabError):
+class UnauthenticatedError(SabeError):
     """No valid identity or management session accompanies the request."""
 
 
-class ForbiddenError(SabError):
+class ForbiddenError(SabeError):
     """The identity is known but a role, scope, CSRF, or identity check failed."""
 
 
-class NotFoundError(SabError):
+class NotFoundError(SabeError):
     """The resource is missing, deleted, or outside the caller's scope.
 
     These cases are indistinguishable to clients, so callers cannot learn
@@ -108,19 +108,19 @@ class NotFoundError(SabError):
     """
 
 
-class MethodNotAllowedError(SabError):
+class MethodNotAllowedError(SabeError):
     """The resource does not support the request's method."""
 
 
-class ConflictError(SabError):
+class ConflictError(SabeError):
     """The request is valid but conflicts with the current state."""
 
 
-class PreconditionFailedError(SabError):
+class PreconditionFailedError(SabeError):
     """The version named in `If-Match` is not current."""
 
 
-class InvalidInputError(SabError):
+class InvalidInputError(SabeError):
     """The input is well formed but violates a rule.
 
     Responses always carry located validation issues. By default there is one
@@ -147,17 +147,17 @@ class InvalidInputError(SabError):
         return (issue,)
 
 
-class PreconditionRequiredError(SabError):
+class PreconditionRequiredError(SabeError):
     """The request must name the version it expects, and does not."""
 
 
-class InternalServerError(SabError):
-    """The request failed because of a problem in SAB."""
+class InternalServerError(SabeError):
+    """The request failed because of a problem in SABE."""
 
 
-class UpstreamError(SabError):
+class UpstreamError(SabeError):
     """An upstream service failed."""
 
 
-class UnavailableError(SabError):
+class UnavailableError(SabeError):
     """A dependency needed to complete the request is unavailable."""

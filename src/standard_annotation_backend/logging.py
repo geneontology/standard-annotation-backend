@@ -1,15 +1,15 @@
-"""Configure structured logging shared by all SAB processes.
+"""Configure structured logging shared by all SABE processes.
 
 Application code may emit native structlog events, while Uvicorn, Celery, and
 third-party libraries generally emit standard-library `logging.LogRecord`
 objects. This module routes both forms through one
 `structlog.stdlib.ProcessorFormatter` pipeline so they receive the same core
-fields and the renderer selected by `SAB_LOG_FORMAT`. The process-wide
+fields and the renderer selected by `SABE_LOG_FORMAT`. The process-wide
 handler writes to stdout for collection by the container runtime.
 
 Uvicorn constructs `create_formatter()` through the `()` factory in
 `uvicorn_logging.json` before importing the FastAPI application. Celery's
-`setup_logging` signal calls `configure_logging()`, and other SAB process
+`setup_logging` signal calls `configure_logging()`, and other SABE process
 entry points can do the same. Loading only `LoggingSettings` from the
 formatter factory avoids requiring database and service settings during early
 server logging initialization.
@@ -73,7 +73,7 @@ def _drop_color_message(
     """Remove Uvicorn's redundant colorized message after extras are copied.
 
     Uvicorn attaches `color_message` to some records for its console
-    formatter. SAB renders the ordinary event itself, so retaining that extra
+    formatter. SABE renders the ordinary event itself, so retaining that extra
     would duplicate the message and may preserve terminal escape codes in JSON.
     The logger-name check keeps an unrelated application's `color_message`
     field intact.
@@ -250,10 +250,10 @@ def create_formatter(
     selected console or JSON renderer produces the final string.
 
     `pass_foreign_args` and `use_get_message=False` preserve raw logging
-    arguments until SAB's compatibility and Uvicorn processors inspect them.
+    arguments until SABE's compatibility and Uvicorn processors inspect them.
 
     Args:
-        log_format: Renderer to use. When omitted, load `SAB_LOG_FORMAT` through
+        log_format: Renderer to use. When omitted, load `SABE_LOG_FORMAT` through
             `LoggingSettings` for Uvicorn's formatter-factory path.
 
     Returns:
@@ -306,13 +306,13 @@ def configure_logging(
     log_format: LogFormat | str,
     log_level: int | str = logging.INFO,
 ) -> None:
-    """Install one SAB-formatted stdout handler for the current process.
+    """Install one SABE-formatted stdout handler for the current process.
 
     This is the direct setup path used by Celery's `setup_logging` signal and
-    any SAB-owned process bootstrap. Existing root handlers are replaced to
+    any SABE-owned process bootstrap. Existing root handlers are replaced to
     avoid duplicate output, and Uvicorn loggers are made to propagate through
     the root handler instead of retaining server-specific handlers. Repeated
-    calls therefore leave one active SAB handler.
+    calls therefore leave one active SABE handler.
 
     Args:
         log_format: Renderer to install for the process.

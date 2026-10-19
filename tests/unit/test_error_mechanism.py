@@ -15,7 +15,7 @@ from standard_annotation_backend.api.errors import (
     BEARER_ERRORS,
     STATUS_BY_BASE,
     error_responses,
-    sab_error_response,
+    sabe_error_response,
     status_for,
 )
 from standard_annotation_backend.api.models import ApiErrorResponse
@@ -39,7 +39,7 @@ from standard_annotation_backend.domain.errors import (
     NotFoundError,
     PreconditionFailedError,
     PreconditionRequiredError,
-    SabError,
+    SabeError,
     StaleChangeSet,
     StaleVersion,
     UnauthenticatedError,
@@ -75,8 +75,8 @@ class _Duplicate(ConflictError):
         return DuplicatePeers(peer_ids=(ANNOTATION_ID,))
 
 
-def _body(error: SabError) -> dict[str, Any]:
-    return json.loads(bytes(sab_error_response(error).body))
+def _body(error: SabeError) -> dict[str, Any]:
+    return json.loads(bytes(sabe_error_response(error).body))
 
 
 def test_each_base_maps_to_one_status() -> None:
@@ -102,7 +102,7 @@ def test_each_base_maps_to_one_status() -> None:
 
 def test_error_without_details_omits_details() -> None:
     """The envelope carries only code and message when there are no details."""
-    response = sab_error_response(_Missing())
+    response = sabe_error_response(_Missing())
 
     assert response.status_code == status.HTTP_404_NOT_FOUND
     assert _body(_Missing()) == {
@@ -180,7 +180,7 @@ def test_deleted_and_missing_annotations_are_indistinguishable() -> None:
         AnnotationNotFoundError(ANNOTATION_ID)
     )
     assert (
-        sab_error_response(AnnotationDeletedError(ANNOTATION_ID)).status_code
+        sabe_error_response(AnnotationDeletedError(ANNOTATION_ID)).status_code
         == status.HTTP_404_NOT_FOUND
     )
 
@@ -202,8 +202,8 @@ def test_blank_comment_names_the_comment_body_field() -> None:
 
 def test_only_missing_bearer_authentication_sends_a_bearer_challenge() -> None:
     """Bearer failures challenge with `WWW-Authenticate`; management sessions do not."""
-    bearer = sab_error_response(AuthenticationRequiredError())
-    session = sab_error_response(ManagementSessionRequiredError())
+    bearer = sabe_error_response(AuthenticationRequiredError())
+    session = sabe_error_response(ManagementSessionRequiredError())
 
     assert bearer.status_code == session.status_code == status.HTTP_401_UNAUTHORIZED
     assert bearer.headers["WWW-Authenticate"] == "Bearer"
@@ -224,7 +224,7 @@ def test_only_missing_bearer_authentication_sends_a_bearer_challenge() -> None:
 
 def test_response_headers_merge_with_the_bearer_challenge() -> None:
     """Extra response headers are added without dropping the bearer challenge."""
-    response = sab_error_response(
+    response = sabe_error_response(
         AuthenticationRequiredError(), headers={"Allow": "GET"}
     )
 
@@ -250,16 +250,16 @@ def test_bearer_error_docs_list_each_code_and_the_challenge_header() -> None:
 _BASES = tuple(base for base, _ in STATUS_BY_BASE)
 
 
-def _assigned(error_type: type[SabError], name: str) -> bool:
+def _assigned(error_type: type[SabeError], name: str) -> bool:
     """Return whether a class or one of its ancestors assigns `name`.
 
-    `SabError` and the outcome categories only annotate `code` and `message`,
+    `SabeError` and the outcome categories only annotate `code` and `message`,
     so an assignment can only come from a class below them.
     """
     return any(name in klass.__dict__ for klass in error_type.__mro__)
 
 
-def _needs_definition(error_type: type[SabError]) -> bool:
+def _needs_definition(error_type: type[SabeError]) -> bool:
     """Return whether a class can be raised and so must be fully defined.
 
     Grouping classes that assign no `code` and have subclasses are exempt.
@@ -267,7 +267,7 @@ def _needs_definition(error_type: type[SabError]) -> bool:
     return not error_type.__subclasses__() or _assigned(error_type, "code")
 
 
-def _definition_problems(error_type: type[SabError]) -> list[str]:
+def _definition_problems(error_type: type[SabeError]) -> list[str]:
     """Describe what keeps an error class from producing a safe response."""
     problems: list[str] = []
     for name in ("code", "message"):
@@ -288,14 +288,14 @@ def _definition_problems(error_type: type[SabError]) -> list[str]:
     return problems
 
 
-def _application_errors() -> list[type[SabError]]:
-    """Return every error class SAB defines that must be fully defined."""
+def _application_errors() -> list[type[SabeError]]:
+    """Return every error class SABE defines that must be fully defined."""
     for module in pkgutil.walk_packages(
         standard_annotation_backend.__path__, "standard_annotation_backend."
     ):
         importlib.import_module(module.name)
-    found: list[type[SabError]] = []
-    pending = list(SabError.__subclasses__())
+    found: list[type[SabeError]] = []
+    pending = list(SabeError.__subclasses__())
     while pending:
         error_type = pending.pop()
         pending.extend(error_type.__subclasses__())
@@ -319,7 +319,7 @@ def test_every_public_error_is_complete_and_unambiguous() -> None:
         if (found := _definition_problems(error_type))
     }
     assert problems == {}
-    codes: dict[str, type[SabError]] = {}
+    codes: dict[str, type[SabeError]] = {}
     for error_type in errors:
         owner = codes.setdefault(error_type.code, error_type)
         assert (

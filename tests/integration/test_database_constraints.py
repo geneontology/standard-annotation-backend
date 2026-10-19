@@ -91,11 +91,11 @@ def _auth_owner(database_engine: Engine) -> tuple[UUID, UUID, UUID]:
     user_id, group_id, assignment_id = uuid4(), uuid4(), uuid4()
     with database_engine.begin() as connection:
         connection.execute(
-            insert(models.SabUserRecord),
+            insert(models.SabeUserRecord),
             {"user_id": user_id, "github_login": "curator"},
         )
         connection.execute(
-            insert(models.SabGroupRecord), {"group_id": group_id, "group_key": "MGI"}
+            insert(models.SabeGroupRecord), {"group_id": group_id, "group_key": "MGI"}
         )
         connection.execute(
             insert(models.AuthorizationAssignmentRecord),
@@ -117,7 +117,7 @@ def test_github_login_is_unique_ignoring_case(
     """GitHub's case-insensitive identity cannot represent two user owners."""
     _auth_owner(database_engine)
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
-        connection.execute(insert(models.SabUserRecord), {"github_login": login})
+        connection.execute(insert(models.SabeUserRecord), {"github_login": login})
 
 
 @pytest.mark.parametrize("scope", ["group", "global"])
@@ -197,7 +197,7 @@ def test_token_assignment_must_belong_to_owner(database_engine: Engine) -> None:
     other = uuid4()
     with database_engine.begin() as connection:
         connection.execute(
-            insert(models.SabUserRecord),
+            insert(models.SabeUserRecord),
             {"user_id": other, "github_login": "other"},
         )
     with pytest.raises(IntegrityError), database_engine.begin() as connection:
@@ -236,8 +236,8 @@ def test_authorization_history_restricts_deletion(
             },
         )
     for table, column, identity in [
-        ("sab_user", "user_id", user_id),
-        ("sab_group", "group_id", group_id),
+        ("sabe_user", "user_id", user_id),
+        ("sabe_group", "group_id", group_id),
         ("authorization_assignment", "assignment_id", assignment_id),
     ]:
         with pytest.raises(IntegrityError), database_engine.begin() as connection:

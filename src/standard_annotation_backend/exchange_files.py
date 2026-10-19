@@ -1,7 +1,7 @@
 """Share checks between the GPI and GPAD readers.
 
 GPI and GPAD are GO exchange files: tab-separated text whose header lines start
-with `!`. Both are read with the `go_standard_annotation_schema` readers, and SAB
+with `!`. Both are read with the `go_standard_annotation_schema` readers, and SABE
 applies the same extra checks to each before storing their contents.
 """
 

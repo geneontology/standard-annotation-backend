@@ -4,7 +4,7 @@ import pytest
 
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationImportConflictError,
-    GroupSabManagedError,
+    GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.entities import (
     EntityCandidateConflictError,
@@ -72,7 +72,7 @@ def test_terminal_error_without_any_code_is_a_programming_error() -> None:
             OntologyCandidateConflictError("newer snapshot active"),
             RefreshFailureCode.CANDIDATE_CONFLICT,
         ),
-        (GroupSabManagedError("MGI"), RefreshFailureCode.GROUP_SAB_MANAGED),
+        (GroupSabeManagedError("MGI"), RefreshFailureCode.GROUP_SABE_MANAGED),
         (AnnotationImportConflictError(), RefreshFailureCode.INVALID_PARAMETERS),
     ],
 )

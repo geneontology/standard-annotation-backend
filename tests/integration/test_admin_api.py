@@ -397,18 +397,18 @@ def test_cutover_requires_a_configured_source(
 
 
 @pytest.mark.parametrize("path", ["/admin/annotation-refreshes", CUTOVER_ROUTE])
-def test_sab_managed_group_is_409_and_creates_no_job(
+def test_sabe_managed_group_is_409_and_creates_no_job(
     integration_api_client: TestClient,
     dispatched: list[Job],
     session_factory: sessionmaker[Session],
     path: str,
 ) -> None:
-    """GPAD requests for a SAB-managed group return 409 and create no job."""
+    """GPAD requests for a SABE-managed group return 409 and create no job."""
     seed_group_import(
         session_factory,
         group_key="MGI",
         source_key="mgi-gpad",
-        mode=AnnotationManagementMode.SAB_MANAGED,
+        mode=AnnotationManagementMode.SABE_MANAGED,
     )
 
     with session_factory() as session:
@@ -419,9 +419,9 @@ def test_sab_managed_group_is_409_and_creates_no_job(
     assert response.status_code == status.HTTP_409_CONFLICT
     assert response.json() == {
         "error": {
-            "code": "group_sab_managed",
+            "code": "group_sabe_managed",
             "message": (
-                "The source's group is managed in SAB, so GPAD can no longer "
+                "The source's group is managed in SABE, so GPAD can no longer "
                 "replace its annotations"
             ),
         }

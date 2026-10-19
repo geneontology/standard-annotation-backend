@@ -26,7 +26,7 @@ from standard_annotation_backend.persistence.repositories.auth import (
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 
-RAW = "sab_token_" + "a" * 43
+RAW = "sabe_token_" + "a" * 43
 MISSING_ID = "00000000-0000-0000-0000-000000000001"
 PROTECTED = [
     ("GET", "/annotations"),
@@ -166,17 +166,17 @@ def test_invalid_credential_states_have_identical_public_contract(
     mutations = {
         "expired": "UPDATE api_token SET expires_at = now() - interval '1 day'",
         "revoked": "UPDATE api_token SET revoked_at = now()",
-        "inactive_user": "UPDATE sab_user SET is_active = false",
+        "inactive_user": "UPDATE sabe_user SET is_active = false",
         "removed_assignment": "UPDATE authorization_assignment SET is_active = false",
         "changed_role": "UPDATE authorization_assignment SET role = 'admin'",
         "changed_scope": "UPDATE authorization_assignment SET scope = 'self'",
         "changed_group": "UPDATE authorization_assignment SET scope = 'global', group_id = NULL",
-        "renamed_group": "UPDATE sab_group SET group_key = 'OTHER'",
+        "renamed_group": "UPDATE sabe_group SET group_key = 'OTHER'",
     }
     if credential_state in mutations:
         with session_factory.begin() as session:
             session.execute(text(mutations[credential_state]))
-    raw = RAW if credential_state != "unknown" else "sab_token_" + "b" * 43
+    raw = RAW if credential_state != "unknown" else "sabe_token_" + "b" * 43
     response = bearer_client.get(
         "/annotations", headers={"Authorization": f"Bearer {raw}"}
     )
@@ -235,10 +235,10 @@ def test_valid_bearer_reaches_data_operation(
     [
         [("Authorization", "Basic abc")],
         [("Authorization", "Bearer")],
-        [("Authorization", "Bearer sab_token_short")],
+        [("Authorization", "Bearer sabe_token_short")],
         [("Authorization", f"Bearer {RAW}, Bearer {RAW}")],
         [("Authorization", f"Bearer {RAW}"), ("Authorization", f"Bearer {RAW}")],
-        [("Authorization", "Bearer sab_session_" + "a" * 43)],
+        [("Authorization", "Bearer sabe_session_" + "a" * 43)],
     ],
 )
 def test_malformed_headers_and_management_secrets_cannot_authenticate(

@@ -1,4 +1,4 @@
-"""Write JSON that SAB stores in the database and validate it when read back.
+"""Write JSON that SABE stores in the database and validate it when read back.
 
 Job results, refresh results, rejection reports, and change-set previews are
 stored as JSON and later rebuilt into typed values. `StoredJson` gives each such

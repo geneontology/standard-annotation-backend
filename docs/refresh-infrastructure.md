@@ -6,7 +6,7 @@ each piece. This guide connects the two. It follows a refresh from the moment
 something starts it, through the job that runs it, to the rows it writes in
 PostgreSQL.
 
-SAB refreshes four kinds of reference data:
+SABE refreshes four kinds of reference data:
 
 | Kind | Source format | Configured in `config/sources.yaml` | Source keys |
 |---|---|---|---|
@@ -17,7 +17,7 @@ SAB refreshes four kinds of reference data:
 
 The annotation kind has two job types, `annotation_refresh` and
 `annotation_cutover`, both served by `AnnotationRefreshService`. A cutover is a
-final replacement that moves the group to SAB management. It starts only from
+final replacement that moves the group to SABE management. It starts only from
 the admin API, through `RefreshStartService.start_cutover`.
 
 ## The whole picture
@@ -30,21 +30,21 @@ steps that differ. Each refresh service implements the `RefreshKind` protocol.
 ```mermaid
 flowchart LR
     subgraph Triggers
-        beat["Celery Beat<br/>SAB_*_REFRESH_CRON"]
+        beat["Celery Beat<br/>SABE_*_REFRESH_CRON"]
         api["POST /admin/*-refreshes"]
         cli["just refresh KIND [SOURCE]"]
     end
 
     yaml[("config/sources.yaml")] --> settings["Settings.sources<br/>(RefreshSources)"]
 
-    beat --> sched["sab.refresh.schedule(kind)"]
+    beat --> sched["sabe.refresh.schedule(kind)"]
     sched --> start["RefreshStartService.start"]
     api --> start
     cli --> start
     settings --> start
 
     start -->|"commit job rows"| jobs[("job, audit_event")]
-    start -->|"Celery dispatch"| run["sab.refresh.run(job_id)<br/>sab.entity_retirement.run(job_id)"]
+    start -->|"Celery dispatch"| run["sabe.refresh.run(job_id)<br/>sabe.entity_retirement.run(job_id)"]
     start -->|"CLI dispatch"| inproc["run in the CLI process"]
 
     run --> runner["RefreshRunner"]
@@ -70,7 +70,7 @@ Two rules shape everything else:
 
 ## Inputs: `config/sources.yaml`
 
-`Settings` reads the file when it is constructed (`SAB_SOURCES_FILE`, default
+`Settings` reads the file when it is constructed (`SABE_SOURCES_FILE`, default
 `config/sources.yaml`). An invalid file stops the API, worker, scheduler, and CLI
 at startup. The models live in `refresh/sources.py`:
 
@@ -95,7 +95,7 @@ document is already active.
 
 | Trigger | Entry point | `requested_by` | How jobs are dispatched |
 |---|---|---|---|
-| Schedule | Beat entries `authorization-refresh`, `ontology-refresh`, `entity-refresh`, `annotation-refresh` call `sab.refresh.schedule(kind)` in `workers/tasks.py` | `scheduler` | Celery (`tasks.dispatch_refresh_job`) |
+| Schedule | Beat entries `authorization-refresh`, `ontology-refresh`, `entity-refresh`, `annotation-refresh` call `sabe.refresh.schedule(kind)` in `workers/tasks.py` | `scheduler` | Celery (`tasks.dispatch_refresh_job`) |
 | API | `api/routes/admin.py` | the caller's actor ID | Celery (`tasks.dispatch_refresh_job`) |
 | CLI | `cli/refresh.py` (`just refresh`) | `cli` | in the CLI process, one job at a time |
 
@@ -103,8 +103,8 @@ All three triggers call `RefreshStartService.start(kind, requested_by=..., sourc
 A `source_key` refreshes one source; `None` refreshes every configured source of
 the kind. The authorization route and CLI never pass a key, because there is
 only one authorization source. For annotations, "refresh all" leaves out groups
-that are SAB-managed, and naming a SAB-managed group's source raises
-`GroupSabManagedError` (`group_sab_managed`, HTTP 409) before any job is created.
+that are SABE-managed, and naming a SABE-managed group's source raises
+`GroupSabeManagedError` (`group_sabe_managed`, HTTP 409) before any job is created.
 Cutovers use a separate entry point, `RefreshStartService.start_cutover`, which
 the `POST /admin/annotation-cutovers` route calls. The schedule and CLI never
 start cutovers.
@@ -146,13 +146,13 @@ Points worth knowing when something looks wrong:
   (`dispatch_failed`). A reused job may already be in the broker, so it is left
   as it is.
 - **Routing.** `tasks.dispatch_refresh_job` sends `entity_retirement` jobs to
-  `sab.entity_retirement.run` and every other job to `sab.refresh.run`. Celery
+  `sabe.entity_retirement.run` and every other job to `sabe.refresh.run`. Celery
   messages carry only the job ID.
 
 ## Running a job
 
 `RefreshRunner.run(job_id)` in `refresh/runner.py` is the same for every kind.
-The Celery task `sab.refresh.run` and the CLI both call it.
+The Celery task `sabe.refresh.run` and the CLI both call it.
 
 ```mermaid
 flowchart TD
@@ -224,10 +224,10 @@ of `apply`.
 |---|---|---|---|---|
 | `recover` | nothing to recover; the replacement is one transaction, and `apply` recognizes it as unchanged | stored `refresh_result` on this job's `ontology_metadata` row | stored publication result, or committed staging, which it publishes without fetching | stored publication result from this job's `annotation_import` row; unpublished staging is discarded and redone, not resumed |
 | unchanged check (inside `apply`) | most recent `authorization_refresh` row has the same type, locator, revision, and checksum | active `ontology_metadata` row has the same type, locator, revision, and checksum | active `entity_catalog_snapshot` has the same locator and checksum | ordinary refreshes only (a cutover never skips): the group is `gpad_imported`, its last published import has the same checksum and no `unknown_db_object_id` rejections, and the group has no local changes |
-| `apply` | decode UTF-8, validate `users.yaml`, replace users and grants | take the ontology lock, check unchanged again, parse OBO, stage, activate | decode gzip and UTF-8, parse GPI, stage, publish | try the group lock, refuse a SAB-managed group, decode gzip and UTF-8, parse GPAD, stage, publish (replacing the group's annotations) |
-| Tables written | `sab_user`, `sab_group`, `authorization_assignment`, `authorization_refresh` | `ontology_metadata`, `ontology_term`, `ontology_closure`; `annotation` and its versions when terms are replaced | `entity_catalog_snapshot`, `entity_staging_record`, `entity_membership`, `entity_source_record` | `annotation_staging` (and its multivalued and duplicate-reference child tables), `annotation_import`, `group_annotation_management`; on publication, the group's `annotation` rows and dependents are deleted and replaced |
+| `apply` | decode UTF-8, validate `users.yaml`, replace users and grants | take the ontology lock, check unchanged again, parse OBO, stage, activate | decode gzip and UTF-8, parse GPI, stage, publish | try the group lock, refuse a SABE-managed group, decode gzip and UTF-8, parse GPAD, stage, publish (replacing the group's annotations) |
+| Tables written | `sabe_user`, `sabe_group`, `authorization_assignment`, `authorization_refresh` | `ontology_metadata`, `ontology_term`, `ontology_closure`; `annotation` and its versions when terms are replaced | `entity_catalog_snapshot`, `entity_staging_record`, `entity_membership`, `entity_source_record` | `annotation_staging` (and its multivalued and duplicate-reference child tables), `annotation_import`, `group_annotation_management`; on publication, the group's `annotation` rows and dependents are deleted and replaced |
 | Audit action | `authorization.refreshed` | `ontology.refreshed`, plus `annotation.updated` per replaced term | `entity.refreshed` (`entity.retired` for retirement) | `annotation_refresh.published` or `annotation_cutover.published` |
-| Kind-specific failure codes | `invalid_document` | `invalid_document`, `candidate_conflict` | `header`, `row_validation`, `catalog_collision`, `candidate_conflict` | `header`, `no_valid_annotations`, `cutover_rejected`, `group_sab_managed` |
+| Kind-specific failure codes | `invalid_document` | `invalid_document`, `candidate_conflict` | `header`, `row_validation`, `catalog_collision`, `candidate_conflict` | `header`, `no_valid_annotations`, `cutover_rejected`, `group_sabe_managed` |
 | `discard_staging` (on failure) | none | none | deletes the job's staging rows | deletes the job's staging rows and unpublished `annotation_import` row |
 | `after_terminal` | nothing | prune old snapshot data | nothing | nothing |
 
@@ -243,7 +243,7 @@ Some details that matter when debugging:
   `apply` raises `OntologyRefreshBusyError`, a `RetryableRefreshError`, so the
   job stays `running` and the run is retried. Activation also takes the exclusive annotation
   system-update lock, because it may rewrite annotations. Pruning runs after
-  every finished ontology job: through `sab.ontology.prune` under Celery, or
+  every finished ontology job: through `sabe.ontology.prune` under Celery, or
   directly in the CLI process, where a busy lock or a pruning error is logged and
   skipped.
 - **Entity.** Staging and publication are separate transactions. If a worker
@@ -284,7 +284,7 @@ lock, which raises `AnnotationRefreshBusyError`).
 | A job failed | its `progress.failure_code` and `failure_details` through `GET /admin/jobs/{job_id}`; the table of classified errors above |
 | `unknown_source` | the job's `source_key` against `config/sources.yaml` as loaded by the running process (settings are cached per process) |
 | A refresh did nothing | completed progress with `"unchanged": true` (also in the job result): the source document is already active |
-| A scheduled refresh never ran | `workers/celery_app.py` Beat entries and the `SAB_*_REFRESH_CRON` settings |
+| A scheduled refresh never ran | `workers/celery_app.py` Beat entries and the `SABE_*_REFRESH_CRON` settings |
 | Adding a source to an existing kind | `config/sources.yaml` only; no code change |
 | Adding a source type | `refresh/sources.py` (model) and `refresh/fetchers.py` (fetcher) |
 | Adding a refresh kind | a refresh service implementing `RefreshKind` in `services/`, its job type and audit action in `domain/`, wiring in `workers/runtime.py`, a section in `config/sources.yaml`, a Beat entry, and an admin route |

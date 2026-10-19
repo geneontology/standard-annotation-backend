@@ -2,15 +2,15 @@
 
 Four tasks make up the refresh pipeline:
 
-- `sab.refresh.schedule(kind)` is published by Celery Beat once per refresh kind.
+- `sabe.refresh.schedule(kind)` is published by Celery Beat once per refresh kind.
   It starts a job for every configured source of that kind through
   `RefreshStartService`, which commits each job to PostgreSQL before sending it.
-  Annotation sources whose group is SAB-managed are skipped.
-- `sab.refresh.run(job_id)` runs one authorization, ontology, entity, or
+  Annotation sources whose group is SABE-managed are skipped.
+- `sabe.refresh.run(job_id)` runs one authorization, ontology, entity, or
   annotation refresh job, or one annotation cutover job.
-- `sab.entity_retirement.run(job_id)` retires the catalog of an entity source
+- `sabe.entity_retirement.run(job_id)` retires the catalog of an entity source
   that is no longer configured.
-- `sab.ontology.prune(ontology_key)` deletes old snapshot data. `RefreshRunner`
+- `sabe.ontology.prune(ontology_key)` deletes old snapshot data. `RefreshRunner`
   schedules it after each ontology job finishes.
 
 Scheduling and execution are separate tasks so that a job exists in PostgreSQL
@@ -60,7 +60,7 @@ class WorkerTaskUnavailableError(RuntimeError):
         super().__init__(_TASK_UNAVAILABLE)
 
 
-@celery_app.task(bind=True, max_retries=None, name="sab.ontology.prune")
+@celery_app.task(bind=True, max_retries=None, name="sabe.ontology.prune")
 def prune_ontology_snapshots(task: Task, ontology_key: str) -> None:
     """Delete unneeded term and closure rows for one ontology.
 
@@ -105,7 +105,7 @@ def _retry_safely(task: Task, job_id: str, failure_type: str) -> None:
         raise Reject(WorkerTaskUnavailableError(), requeue=True) from None
 
 
-@celery_app.task(bind=True, max_retries=None, name="sab.refresh.run")
+@celery_app.task(bind=True, max_retries=None, name="sabe.refresh.run")
 def run_refresh(task: Task, job_id: str) -> None:
     """Run one refresh job of any kind.
 
@@ -118,7 +118,7 @@ def run_refresh(task: Task, job_id: str) -> None:
     failure_type: str | None = None
     try:
         # An invalid ID raises `ValueError` here and is retried like any other
-        # unexpected error; SAB only ever sends IDs of committed jobs.
+        # unexpected error; SABE only ever sends IDs of committed jobs.
         durable_job_id = UUID(job_id)
         # The runtime is built per task so its database engine and HTTP client
         # are closed when the task ends.
@@ -132,7 +132,7 @@ def run_refresh(task: Task, job_id: str) -> None:
         _retry_safely(task, job_id, failure_type)
 
 
-@celery_app.task(bind=True, max_retries=None, name="sab.entity_retirement.run")
+@celery_app.task(bind=True, max_retries=None, name="sabe.entity_retirement.run")
 def run_entity_retirement(task: Task, job_id: str) -> None:
     """Retire the catalog of an entity source that is no longer configured.
 
@@ -164,7 +164,7 @@ def dispatch_refresh_job(job: Job) -> None:
     task.delay(str(job.job_id))
 
 
-@celery_app.task(bind=True, max_retries=None, name="sab.refresh.schedule")
+@celery_app.task(bind=True, max_retries=None, name="sabe.refresh.schedule")
 def schedule_refresh(task: Task, kind: str) -> None:
     """Start a scheduled refresh of every configured source of one kind.
 

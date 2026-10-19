@@ -250,7 +250,7 @@ def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pruning retries while a refresh holds the same ontology lock, then runs."""
-    monkeypatch.setenv("SAB_DATABASE_URL", os.environ["SAB_TEST_DATABASE_URL"])
+    monkeypatch.setenv("SABE_DATABASE_URL", os.environ["SABE_TEST_DATABASE_URL"])
     get_settings.cache_clear()
     calls: list[datetime] = []
 
@@ -285,7 +285,7 @@ def test_refresh_task_retries_while_the_ontology_lock_is_held_then_succeeds(
 
     The job stays running while it waits, and a later delivery finishes it.
     """
-    monkeypatch.setenv("SAB_DATABASE_URL", os.environ["SAB_TEST_DATABASE_URL"])
+    monkeypatch.setenv("SABE_DATABASE_URL", os.environ["SABE_TEST_DATABASE_URL"])
     get_settings.cache_clear()
     monkeypatch.setattr(prune_ontology_snapshots, "delay", lambda _key: None)
     # Replace only the network: resolving the ref, then fetching the OBO bytes.

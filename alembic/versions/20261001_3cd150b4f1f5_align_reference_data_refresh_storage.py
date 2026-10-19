@@ -4,7 +4,7 @@ Renames authorization synchronization, ontology loading, and entity import stora
 to the shared "refresh" vocabulary. It aligns snapshot provenance on `source_type`,
 `source_locator`, `source_revision`, `source_checksum`, and `fetched_at`.
 
-SAB has no deployments with important data at this stage (see revision
+SABE has no deployments with important data at this stage (see revision
 `113dc6848ea6`). Instead of converting stored jobs, results, and audit details
 between vocabularies, both directions delete reference data and job history. Run
 `just refresh` for each kind after migrating. Users, grants, tokens, annotations,

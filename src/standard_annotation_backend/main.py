@@ -13,7 +13,7 @@ from standard_annotation_backend.api.errors import (
     OAuthCallbackFailedError,
     UnexpectedError,
     install_exception_handlers,
-    sab_error_response,
+    sabe_error_response,
 )
 from standard_annotation_backend.api.routes.admin import router as admin_router
 from standard_annotation_backend.api.routes.annotation_comments import (
@@ -152,7 +152,7 @@ async def protect_token_management_responses(
             # Callback failures must still consume browser state. Do not render
             # or log the exception: even unexpected failures may retain OAuth
             # secrets.
-            response = sab_error_response(OAuthCallbackFailedError())
+            response = sabe_error_response(OAuthCallbackFailedError())
         else:
             logger.error(
                 "Unexpected request failure: method=%s path=%s failure_type=%s",
@@ -160,7 +160,7 @@ async def protect_token_management_responses(
                 path,
                 type(error).__name__,
             )
-            response = sab_error_response(UnexpectedError())
+            response = sabe_error_response(UnexpectedError())
     if (
         path.startswith("/auth/github/")
         or path.startswith("/assets/")
@@ -189,7 +189,7 @@ async def protect_token_management_responses(
 
 @app.get("/docs", include_in_schema=False)
 def swagger_ui(request: Request) -> HTMLResponse:
-    """Return Swagger UI with SAB's packaged favicon."""
+    """Return Swagger UI with SABE's packaged favicon."""
     root_path = request.scope.get("root_path", "").rstrip("/")
     openapi_url = app.openapi_url
     if openapi_url is None:

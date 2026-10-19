@@ -1,9 +1,9 @@
 """Run refresh and retirement jobs through one shared lifecycle.
 
-Celery's `sab.refresh.run` task and the refresh CLI both call `RefreshRunner`,
+Celery's `sabe.refresh.run` task and the refresh CLI both call `RefreshRunner`,
 so a job behaves the same whichever process runs it.
 
-Celery can deliver one task message more than once. SAB acknowledges messages
+Celery can deliver one task message more than once. SABE acknowledges messages
 only after a task finishes (`task_acks_late`), so if a worker stops mid-task the
 broker delivers the message again, possibly to another worker. Every step below
 is therefore safe to repeat: a finished job is left alone, work an earlier

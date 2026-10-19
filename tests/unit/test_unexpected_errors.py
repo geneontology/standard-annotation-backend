@@ -1,4 +1,4 @@
-"""Tests for responses to failures that SAB does not expect."""
+"""Tests for responses to failures that SABE does not expect."""
 
 import logging
 
@@ -40,13 +40,13 @@ def test_unexpected_failure_returns_internal_error_and_logs_only_its_type(
             "message": "An unexpected error occurred",
         }
     }
-    sab_records = [
+    sabe_records = [
         record
         for record in caplog.records
         if record.name.startswith("standard_annotation_backend")
     ]
-    assert any("RuntimeError" in record.getMessage() for record in sab_records)
-    assert all("query-secret" not in record.getMessage() for record in sab_records)
+    assert any("RuntimeError" in record.getMessage() for record in sabe_records)
+    assert all("query-secret" not in record.getMessage() for record in sabe_records)
     for record in caplog.records:
         assert _SECRET not in f"{record.getMessage()} {record.args!r}"
         assert record.exc_info is None

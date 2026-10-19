@@ -11,10 +11,10 @@ from fastapi import Request
 
 from standard_annotation_backend.domain.errors import ForbiddenError
 
-MANAGEMENT_CSRF_COOKIE = "sab_token_management_csrf"
+MANAGEMENT_CSRF_COOKIE = "sabe_token_management_csrf"
 MANAGEMENT_CSRF_HEADER = "X-CSRF-Token"
-MANAGEMENT_SESSION_COOKIE = "sab_token_management_session"
-_CSRF_PREFIX = "sab_csrf_"
+MANAGEMENT_SESSION_COOKIE = "sabe_token_management_session"
+_CSRF_PREFIX = "sabe_csrf_"
 
 
 class CsrfValidationError(ForbiddenError):

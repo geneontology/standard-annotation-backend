@@ -1,7 +1,7 @@
 # New Standard Annotation Backend
 
 This document proposes an architecture for a stable, initial version of the new Standard
-Annotation Backend (SAB). It is intended as a starting point for technical review and
+Annotation Backend (SABE). It is intended as a starting point for technical review and
 team discussion, not as a final implementation plan.
 
 ## Resources
@@ -11,22 +11,22 @@ team discussion, not as a final implementation plan.
 * A standard annotation is essentially one line from a GPAD file (along with the
   associated line from a GPI file). The format of these files is specified
   here: [https://github.com/geneontology/go-annotation/blob/master/specs/gpad-gpi-2-0.md](https://github.com/geneontology/go-annotation/blob/master/specs/gpad-gpi-2-0.md)
-* New SAB project
+* New SABE project
   issue: [https://github.com/geneontology/project-management/issues/130](https://github.com/geneontology/project-management/issues/130)
   (contains links to a few older brainstorming documents)
 
 ## Scope and Goals
 
-SAB is a *de novo* replacement for GO's current standard annotation storage and access
+SABE is a *de novo* replacement for GO's current standard annotation storage and access
 patterns. It is intended to be a long-term maintainable backend service that owns
 Standard Annotation records, exposes them through a stable programmatic API, supports
 reviewable change-set and direct mutation operations, and can derive GPAD/GPI-style
 outputs from its database.
 
-Once a group has been cut over, SAB is authoritative for that group's Standard
+Once a group has been cut over, SABE is authoritative for that group's Standard
 Annotation records and their lifecycle (creation, modification, deletion). Until then,
 the group's imported GPAD source remains authoritative and its refresh may discard
-SAB-side annotation records and their history as described below. SAB stores references
+SABE-side annotation records and their history as described below. SABE stores references
 to external identifiers, ontology terms, evidence terms, publications, and gene
 products, but it is explicitly not authoritative for those external resources. External
 metadata may be cached for display, search, validation, or export support, but those
@@ -53,7 +53,7 @@ Primary goals:
 
 Non-goals:
 
-* Redesigning the Standard Annotation Editor (SAE) or optimizing SAB around the current
+* Redesigning the Standard Annotation Editor (SAE) or optimizing SABE around the current
   editor/backend contract.
 * Replacing ontology services, publication systems, gene product databases, or external
   identifier authorities.
@@ -87,24 +87,24 @@ maintained technologies, using LinkML where it has direct value.
 
 ### Schema Definition and Usage
 
-SAB should use LinkML as the schema definition language for the core Standard Annotation
+SABE should use LinkML as the schema definition language for the core Standard Annotation
 data model. The LinkML schema should describe what a valid Standard Annotation is:
 required fields, optional fields, cardinality, identifier formats, controlled values,
 documentation, and schema versioning.
 
-The LinkML schema should stay focused on the domain objects. It should not model SAB
+The LinkML schema should stay focused on the domain objects. It should not model SABE
 internals such as users, jobs, audit events, change-set state, derived database values,
 or authorization. Those are application concerns.
 
 The Standard Annotation LinkML schema should be developed in the standalone [
 `geneontology/go-standard-annotation-schema`](https://github.com/geneontology/go-standard-annotation-schema)
-repository outside the SAB codebase. SAB should consume generated artifacts, including
+repository outside the SABE codebase. SABE should consume generated artifacts, including
 Pydantic models and JSON Schema definitions, from a pinned version of the PyPI package
 published by that repository. Keeping the artifacts together in one versioned package
-gives SAB a single schema dependency without making the SAB repository the authoritative
+gives SABE a single schema dependency without making the SABE repository the authoritative
 home for the schema.
 
-Generated LinkML artifacts should be used by SAB where appropriate:
+Generated LinkML artifacts should be used by SABE where appropriate:
 
 * JSON Schema or related validation artifacts for the canonical annotation payload.
 * Pydantic models for request/response definitions.
@@ -122,21 +122,21 @@ LinkML schema.
 
 A Standard Annotation record should store references to external entities as
 identifiers, usually CURIEs or provider-specific IDs. Examples include gene product IDs,
-GO terms, ECO terms, and references such as PMIDs. SAB may cache labels or lookup
+GO terms, ECO terms, and references such as PMIDs. SABE may cache labels or lookup
 metadata, but the annotation model itself should remain identifier reference-based.
 
-Existing annotations do not have stable IDs, so SAB must assign them. SAB annotation
-identifiers are backend-generated UUIDs stored as SAB metadata outside the Standard
+Existing annotations do not have stable IDs, so SABE must assign them. SABE annotation
+identifiers are backend-generated UUIDs stored as SABE metadata outside the Standard
 Annotation payload. They should not be added to the core Standard Annotation LinkML
 schema.
 
 ### Validation
 
-Structural schema validation blocks all writes and all individual import records. SAB
+Structural schema validation blocks all writes and all individual import records. SABE
 should synchronously enforce required fields, field types, cardinality, allowed
 enum-like values, and other LinkML/Pydantic constraints for direct CRUD and change-set
 acceptance. Structurally invalid imported records should be rejected and reported
-individually without failing the whole import. SAB should not store structurally invalid
+individually without failing the whole import. SABE should not store structurally invalid
 annotations; draft or quarantine storage for invalid annotations is not part of the
 initial design.
 
@@ -146,7 +146,7 @@ future subset of rules that might block synchronously, remain deferred pending d
 review. Semantic report infrastructure may proceed independently, but synchronous GORULE
 enforcement must wait for those decisions.
 
-SAB also validates the exact `db_object_id` of direct create/update candidates and
+SABE also validates the exact `db_object_id` of direct create/update candidates and
 accepted create/update change sets against the active entity
 catalog described below. This catalog check does not extend to other
 identifier-valued fields. Other referential checks could be added later without
@@ -154,7 +154,7 @@ major changes to the architecture being proposed now.
 
 ## Data Store and Versioning
 
-SAB should use PostgreSQL as its authoritative data store. The schema should be
+SABE should use PostgreSQL as its authoritative data store. The schema should be
 relational-first. JSONB should be used judiciously for full annotation snapshots and
 flexible metadata, rather than as the only representation of an annotation.
 
@@ -227,7 +227,7 @@ user
   normalized identities, including GitHub login and optional profile metadata
 
 group                                                                                                                                                      
-  normalized group identifiers referenced by SAB authorization and annotation
+  normalized group identifiers referenced by SABE authorization and annotation
   ownership metadata                                                                                          
                                                                                                                                                            
 api_token
@@ -266,15 +266,15 @@ these nine Standard Annotation schema slots:
 * `annotation_extensions`
 
 No other fields participate in duplicate comparison. In particular, dates,`assigned_by`,
-`annotation_properties`, and SAB ownership or audit metadata do not affect duplicate
+`annotation_properties`, and SABE ownership or audit metadata do not affect duplicate
 identity.
 
-SAB should canonicalize the nine participating slots after structural schema validation
+SABE should canonicalize the nine participating slots after structural schema validation
 as follows:
 
 * A missing `negation` value is equivalent to `false`.
 * A missing optional list is equivalent to an empty list.
-* Identifiers compare exactly after structural/schema validation. SAB should not
+* Identifiers compare exactly after structural/schema validation. SABE should not
   normalize CURIE aliases or treat ontology-equivalent identifiers as equal for this
   policy.
 * Repeated identical elements in a list collapse to one element, and list order is
@@ -292,7 +292,7 @@ multi-reference annotations occur. Multiple references on one annotation are alt
 identifiers for a single publication. For example, annotations with reference sets
 `{PMID:1}`, `{PMID:1, DOI:10.1000/x}`, and `{DOI:10.1000/x}` form two overlapping
 duplicate pairs, but the first and third are not duplicates of each other even though
-all three cite the same publication. SAB must not take a transitive closure of these
+all three cite the same publication. SABE must not take a transitive closure of these
 pairs, infer a global alias-equivalence relation between references, or introduce a
 conceptual-reference identity table. The schema should continue to support
 multi-reference annotations without imposing a cardinality of one. Currently, surveyed
@@ -300,7 +300,7 @@ GPAD data did not contain multi-reference values, so this non-transitivity is an
 accepted initial risk that should be reviewed if multi-reference source data becomes
 material.
 
-SAB should centralize this comparison in an application-level policy component. From
+SABE should centralize this comparison in an application-level policy component. From
 each validated annotation payload, it should compute a deterministic base signature from
 the eight canonical non-reference components and store that signature on the indexed
 current annotation record. It should also maintain indexed per-reference duplicate
@@ -310,8 +310,8 @@ non-deleted annotations. The duplicate-conflict peer set for a candidate state i
 set of annotation IDs returned by that lookup, excluding the candidate annotation's own
 ID.
 
-When creating an annotation, SAB should reject the write if the candidate has any
-duplicate-conflict peer. For an update, SAB should compute the target's peer set before
+When creating an annotation, SABE should reject the write if the candidate has any
+duplicate-conflict peer. For an update, SABE should compute the target's peer set before
 and after the proposed change, excluding the target's own annotation ID from both sets,
 and reject only when the after set contains at least one peer that was not in the before
 set. An update that changes only excluded fields, or otherwise preserves without
@@ -323,12 +323,12 @@ This policy applies globally across active, non-deleted records, independent of 
 or ownership group. Existing source data may already contain duplicate pairs, and making
 the full database duplicate-free remains a longer-term cleanup goal. The signature and
 reference lookup data must be maintained with the current annotation state under the
-transaction and locking protocol described below. After legacy duplicate cleanup, SAB
+transaction and locking protocol described below. After legacy duplicate cleanup, SABE
 could add stricter database-level protection over active per-reference lookup rows.
 
 ## API and Application Layer
 
-SAB should be implemented as a Python service using FastAPI, Pydantic, SQLAlchemy, and
+SABE should be implemented as a Python service using FastAPI, Pydantic, SQLAlchemy, and
 Alembic. FastAPI provides the HTTP application layer and OpenAPI generation. Pydantic
 models define request/response validation at the API boundary. SQLAlchemy and Alembic
 define the persistence model and migrations.
@@ -396,38 +396,38 @@ a term in the precomputed `rdfs:subClassOf` closure beneath it, such as `GO:1990
 (protein antigen binding). Closure requests should only be accepted for ontology-valued
 fields and for predicates loaded by the ontology import job described below.
 
-SAB should support two modification modes:
+SABE should support two modification modes:
 
 ```
 Direct CRUD (described above):
   Client writes directly to an annotation.
-  SAB validates, applies the global create/update duplicate semantics and
+  SABE validates, applies the global create/update duplicate semantics and
   duplicate-state locking protocol, checks expected version, writes the new
   current state, creates an immutable version, and records audit events.
 
 Change sets (described in the following section):
   Client proposes an annotation creation, update, or deletion.
-  SAB stores the proposed change, computes a preview, validates the result,
+  SABE stores the proposed change, computes a preview, validates the result,
   and allows another client/user to accept or reject it.
 ```
 
-SAB should not prefer one mode globally. Clients can choose the path that fits their
+SABE should not prefer one mode globally. Clients can choose the path that fits their
 workflow. Both modes must share the same underlying validation, pairwise duplicate and
 locking policy, versioning, soft-delete, and audit behavior.
 
 ### Annotation Comments
 
-SAB should support a narrow annotation comment resource for general commentary about an
+SABE should support a narrow annotation comment resource for general commentary about an
 annotation. Comments are application metadata, not part of the core Standard Annotation
 payload, and should not be included in the Standard Annotation LinkML schema. The
 initial design should not include topics, subtopics, or categories. Classification
-mechanisms could be added later if there is a clear need, but SAB should prefer proper
+mechanisms could be added later if there is a clear need, but SABE should prefer proper
 data modeling and application support for structured concepts before relying on comment
 topics.
 
-When a comment is created, SAB should attach it to the target annotation and record the
+When a comment is created, SABE should attach it to the target annotation and record the
 annotation version that was current at creation time. The client should not choose this
-version; SAB should derive it from the current annotation row when the comment is
+version; SABE should derive it from the current annotation row when the comment is
 written. This lets clients decide whether to show, hide, group, or flag comments that
 were made against older versions after an annotation changes.
 
@@ -483,12 +483,12 @@ Example client-submitted create payload:
 A create change set should carry the full candidate Standard Annotation payload. It does
 not require an existing `annotation_id` or `base_version`. Preview structurally
 validates the candidate annotation, determines ownership from token context or submitted
-SAB metadata as usual, applies the pairwise duplicate policy against current active,
+SABE metadata as usual, applies the pairwise duplicate policy against current active,
 non-deleted records, and shows the annotation that would be created or the duplicate
 conflict that would prevent acceptance. Because database state may change after preview,
 acceptance must repeat the duplicate check after acquiring the required global shared
 annotation-write lock and signature lock. Accepting a non-duplicate change set creates
-the annotation, assigns the backend-generated SAB annotation ID, creates version `1`,
+the annotation, assigns the backend-generated SABE annotation ID, creates version `1`,
 and records audit events.
 
 Example client-submitted delete payload:
@@ -512,16 +512,16 @@ requested base version: mark the annotation deleted, update its duplicate lookup
 create a new annotation version, and record audit events.
 
 These client-submitted payloads are not complete persisted `change_set` records. When
-SAB stores a change set, it should add server-derived metadata such as who proposed the
+SABE stores a change set, it should add server-derived metadata such as who proposed the
 change and when it was proposed. The proposer should be derived from the request token,
 and the proposal timestamp should be assigned using the current server time.
 
-SAB may reject JSON Patch operations whose meaning is unclear for the Standard
+SABE may reject JSON Patch operations whose meaning is unclear for the Standard
 Annotation data model. In particular, some multivalued fields, such as references or
 with/from values, are conceptually unordered even if they are represented as JSON
 arrays. A positional patch such as "remove the first reference" is harder to review and
 can misrepresent the client's intent, which is usually "remove this specific reference."
-As an intentionally conservative starting point, SAB should reject positional array
+As an intentionally conservative starting point, SABE should reject positional array
 operations for fields it treats as unordered. Clients that need to modify one of these
 fields can use whole-field replacement, providing the complete desired value for the
 field in a deterministic order. Previewing an update change set should validate the
@@ -534,15 +534,15 @@ adds a peer that was absent before.
 ### Concurrency
 
 If an update or delete change set targets a version of an annotation that is no longer
-the current version, the change set becomes stale; SAB should not apply it to the newer,
+the current version, the change set becomes stale; SABE should not apply it to the newer,
 current version.
 
 Direct CRUD writes should also use optimistic concurrency. A client should identify the
-version it intends to modify, and SAB should reject stale writes rather than silently
+version it intends to modify, and SABE should reject stale writes rather than silently
 overwriting a newer annotation version.
 
 Duplicate checking is vulnerable to a concurrency race: two independent transactions can
-both find no conflicting annotation and then both write one. SAB must perform writes
+both find no conflicting annotation and then both write one. SABE must perform writes
 that involve the same duplicate base signature serially so only one transaction can
 check and write that state at a time, while allowing unrelated annotation writes to
 proceed concurrently.
@@ -568,14 +568,14 @@ are released when the transaction ends.
 ### API Authentication
 
 The primary initial authentication use case is programmatic API access. API clients
-should authenticate with SAB-issued bearer tokens:
+should authenticate with SABE-issued bearer tokens:
 
 ```
-Authorization: Bearer <sab_api_token>
+Authorization: Bearer <sabe_api_token>
 ```
 
-Developers should obtain an SAB API token before configuring their client application. A
-token should map to a user, and SAB should use that mapping for authorization and audit.
+Developers should obtain an SABE API token before configuring their client application. A
+token should map to a user, and SABE should use that mapping for authorization and audit.
 
 All read and write API access should require an authenticated token. Every action must
 resolve to an authenticated identity (a user or trusted internal worker acting on behalf
@@ -583,32 +583,32 @@ of a recorded job requester) for audit purposes.
 
 GitHub OAuth should remain the primary authentication mechanism for users, but in the
 initial architecture its most important purpose is token issuance and administration. A
-developer or administrator logs into a small SAB-owned token management interface with
+developer or administrator logs into a small SABE-owned token management interface with
 GitHub, creates a named token, and copies the generated token value from the creation
 confirmation screen. The OpenAPI-generated interactive documentation can help developers
 test authenticated API calls once they already have a token, but it should not be the
 primary token management interface. Token creation and revocation should have a small
-purpose-built SAB interface or protected administrative API.
+purpose-built SABE interface or protected administrative API.
 
 ### Authorization Model
 
 Authorization should use two axes: role and scope. The role describes what kind of
 action is allowed. The scope describes which annotations that role applies to. Some
-scopes are tied to a group. In SAB, a group is the owner of a set of annotations for
-authorization purposes; group identifiers are stored as SAB metadata, not as fields in
+scopes are tied to a group. In SABE, a group is the owner of a set of annotations for
+authorization purposes; group identifiers are stored as SABE metadata, not as fields in
 the Standard Annotation payload itself.
 
-The user, group, and authorization tables can be populated from SAB-specific entries
+The user, group, and authorization tables can be populated from SABE-specific entries
 that can be added to the existing GO `users.yaml` file
 in [GitHub](https://github.com/geneontology/go-site/blob/master/metadata/users.yaml).
 Each authorization refresh records its source provenance (type, locator, resolved
 revision, checksum, and fetch time). Service-account authorization is deferred until a
 concrete machine client requires it.
 
-The existing `users.yaml` format should evolve. SAB should not remain permanently
+The existing `users.yaml` format should evolve. SABE should not remain permanently
 coupled to Noctua-specific fields like `authorizations.noctua.go.allow-edit`. Instead,
-the file should add SAB-specific authorization entries so that Noctua authorization and
-SAB authorization are separate concerns while still using the same reviewed metadata
+the file should add SABE-specific authorization entries so that Noctua authorization and
+SABE authorization are separate concerns while still using the same reviewed metadata
 file.
 
 Initial roles are:
@@ -634,7 +634,7 @@ Initial scopes are:
 self
   Applies only to annotations created by the user. This supports trainee users
   who should not modify all annotations owned by their group. A self-scoped
-  authorization entry must name a group so SAB can assign ownership when the
+  authorization entry must name a group so SABE can assign ownership when the
   user creates annotations.
 
 group
@@ -654,7 +654,7 @@ Example `users.yaml` entries:
 - accounts:
     github: curatorA
   authorizations:
-    sab:
+    sabe:
       - group: 'http://informatics.jax.org'
         role: edit
         scope: group
@@ -665,7 +665,7 @@ Example `users.yaml` entries:
 - accounts:
     github: curatorB
   authorizations:
-    sab:
+    sabe:
       - group: 'http://informatics.jax.org'
         role: edit
         scope: group
@@ -679,17 +679,17 @@ Example `users.yaml` entries:
 - accounts:
     github: adminA
   authorizations:
-    sab:
+    sabe:
       - role: admin
         scope: global
-  nickname: 'Example SAB Superadmin'
+  nickname: 'Example SABE Superadmin'
   organization: GO Central
   xref: 'GOC:admina'
 
 - accounts:
     github: curatorC
   authorizations:
-    sab:
+    sabe:
       - role: edit
         scope: global
       - group: 'http://informatics.jax.org'
@@ -702,7 +702,7 @@ Example `users.yaml` entries:
 - accounts:
     github: traineeA
   authorizations:
-    sab:
+    sabe:
       - group: 'http://www.ebi.ac.uk/GOA'
         role: edit
         scope: self
@@ -712,17 +712,17 @@ Example `users.yaml` entries:
 ```
 
 The `go-site` quality-control checks for `users.yaml` should be extended to validate the
-SAB authorization shape. The SAB-specific checks should ensure that `role` is one of
+SABE authorization shape. The SABE-specific checks should ensure that `role` is one of
 `read`, `edit`, or `admin`; `scope` is one of `self`, `group`, or `global`; `group` is
 required when `scope` is `self` or `group`; and `group` is omitted when `scope` is
-`global`. When present, `group` should have the expected group identifier shape. SAB
-should not require `authorizations.sab[].group` to match the legacy top-level `groups`
-field. SAB should treat `authorizations.sab[]` as the source of truth for SAB
+`global`. When present, `group` should have the expected group identifier shape. SABE
+should not require `authorizations.sabe[].group` to match the legacy top-level `groups`
+field. SABE should treat `authorizations.sabe[]` as the source of truth for SABE
 authorization.
 
 ### Bearer Token Context
 
-SAB should generate high-entropy opaque tokens, display the raw token value only once at
+SABE should generate high-entropy opaque tokens, display the raw token value only once at
 creation time, and store only a hash of the token. After creation, the raw token cannot
 be recovered; it can only be revoked and replaced. Every token should have a required
 expiration timestamp. The token management interface should offer expiration options of
@@ -733,8 +733,8 @@ the allowed range. Token metadata should include owner, optional restricted grou
 type, created time, last-used time, expiration timestamp, revocation status, selected
 authorization role/scope context, and audit metadata.
 
-Each bearer token should be bound to an owner and to one selected SAB authorization
-entry. Token creation options should map directly to `authorizations.sab` entries. A
+Each bearer token should be bound to an owner and to one selected SABE authorization
+entry. Token creation options should map directly to `authorizations.sabe` entries. A
 `self` or `group` entry produces a group-restricted token option using the group named
 in that entry. A `global` entry produces an unrestricted token option.
 
@@ -743,32 +743,32 @@ token's privileges and to determine the default ownership for new annotations. A
 group-restricted token cannot read or write annotations outside its restricted group,
 and the restricted group also provides a default value for annotation ownership.
 
-When SAB creates an annotation using a group-restricted token, the annotation's
+When SABE creates an annotation using a group-restricted token, the annotation's
 `owning_group_id` should be derived from the token context. If the client submits
 `owning_group_id` with a group-restricted token, it must match the token's restricted
-group. When SAB creates an annotation using an unrestricted token, the client must
-explicitly submit `owning_group_id` as SAB metadata outside the Standard Annotation
-payload, and SAB should allow this only when the token was created from an `edit/global`
-or `admin/global` authorization entry. SAB should also record the user or service
+group. When SABE creates an annotation using an unrestricted token, the client must
+explicitly submit `owning_group_id` as SABE metadata outside the Standard Annotation
+payload, and SABE should allow this only when the token was created from an `edit/global`
+or `admin/global` authorization entry. SABE should also record the user or service
 account that created the annotation.
 
 ### Runtime Authorization
 
 Runtime authorization decisions should use local database tables containing normalized
-users, groups, role/scope assignments, and token metadata. On each request, SAB should
+users, groups, role/scope assignments, and token metadata. On each request, SABE should
 resolve the bearer token, load the token owner and optional restricted group, and then
 evaluate two things: the token's selected authorization context and the user's current
-SAB authorization grants. The token defines the maximum role/scope/group context for the
+SABE authorization grants. The token defines the maximum role/scope/group context for the
 request. The current authorization grants confirm that the user is still allowed to use
 that context. If the matching authorization entry has been removed from local database
-tables, SAB should reject the request even if the token has not been revoked yet.
+tables, SABE should reject the request even if the token has not been revoked yet.
 
 If a group restriction is present on the token, the target annotation must belong to
 that group, and newly created annotations must use that group as their owning group. An
 unrestricted token imposes no additional group limit, so a token created from an
 `edit/global` or `admin/global` entry can use that grant across groups.
 
-For example, the `curatorB` example above has two SAB authorization entries. The token
+For example, the `curatorB` example above has two SABE authorization entries. The token
 management interface would offer two token options: an `edit/group` token for
 `http://informatics.jax.org` and an `admin/group` token for `http://geneontology.org`. A
 token created from the MGI edit entry can edit MGI-owned annotations and create
@@ -804,7 +804,7 @@ audit_event
 ## Import, Export, and Jobs
 
 Imports, exports, reference data refreshes, and QC reports can be long-running,
-file-oriented, or scheduled operations, so SAB should run them as asynchronous jobs
+file-oriented, or scheduled operations, so SABE should run them as asynchronous jobs
 rather than ordinary request/response work. API requests should create durable job
 records and return `202 Accepted`; Celery workers should execute the jobs, Redis should
 serve as the broker, PostgreSQL should store durable job state, and S3-compatible object
@@ -828,7 +828,7 @@ POST /admin/annotation-refreshes
 
 POST /admin/annotation-cutovers
   Global-admin request that replaces one source's group annotations a final time
-  and makes the group permanently SAB-managed. Requires `source_key`.
+  and makes the group permanently SABE-managed. Requires `source_key`.
 
 POST /reports/annotation-qc
   Creates an annotation QC / semantic validation report job and returns
@@ -845,7 +845,7 @@ corrupting annotation state.
 
 ### Reference Data Refreshes
 
-SAB keeps authorization, ontologies, entity catalogs, and group annotations
+SABE keeps authorization, ontologies, entity catalogs, and group annotations
 current from the sources in `config/sources.yaml`. Every kind follows the same
 pattern. A refresh job fetches one source, records its provenance (type, locator,
 resolved revision, checksum, and fetch time), skips the source if that exact
@@ -860,7 +860,7 @@ refresh tries again. Jobs start from a schedule, a global-admin API request, or 
 of creating another. The [refresh infrastructure guide](docs/refresh-infrastructure.md)
 shows how these pieces fit together in the code.
 
-**Authorization.** The go-site `users.yaml` replaces SAB's users and grants as
+**Authorization.** The go-site `users.yaml` replaces SABE's users and grants as
 described under Authorization Model.
 
 **Ontologies.** A refresh stages a complete snapshot with closure rows for the
@@ -868,7 +868,7 @@ approved predicates (`rdfs:subClassOf` and `BFO:0000050`), activates it, and
 updates annotations whose terms have a single `replaced_by` value through the
 normal versioned mutation path. A closure row records the subject term, predicate,
 object term, and depth, where the subject is the more specific term and the object
-is the broader queried term. Cases SAB cannot resolve automatically (a term
+is the broader queried term. Cases SABE cannot resolve automatically (a term
 obsoleted without replacement, a removed term, or multiple `consider`
 alternatives) are reported through QC reporting. Complete term and closure data is
 kept only for the active snapshot, its newest successful predecessor, and
@@ -876,7 +876,7 @@ candidates of unfinished jobs. Older snapshots keep their metadata, results, and
 audit events. A snapshot whose bulk data was pruned cannot become active or be used
 by operations that need terms or closure. Pruning and activation take the same
 per-ontology advisory lock, so cleanup cannot race with a refresh of that ontology.
-Pruning runs after each ontology job finishes (`sab.ontology.prune`); a failure to
+Pruning runs after each ontology job finishes (`sabe.ontology.prune`); a failure to
 schedule or run it leaves the job's status and result unchanged, and pruning is
 retried.
 
@@ -895,9 +895,9 @@ entity sources.
 file names a GPAD 2.0 file and the group (`owning_group_id`) whose annotations it
 supplies. A group is `gpad_imported` by default, and its file is the source of
 truth: every refresh replaces the group's complete annotation set. A cutover is
-the same replacement followed by a permanent move to `sab_managed`. The move is
-one-way and happens only when a cutover publishes. After it, SAB rejects refreshes
-and cutovers for that group with `group_sab_managed`, and the schedule skips it.
+the same replacement followed by a permanent move to `sabe_managed`. The move is
+one-way and happens only when a cutover publishes. After it, SABE rejects refreshes
+and cutovers for that group with `group_sabe_managed`, and the schedule skips it.
 Cutovers start only from the global-admin API, never from the schedule or CLI.
 
 Staging happens outside the global annotation-write lock. A row the reader cannot
@@ -939,15 +939,15 @@ mode are unchanged.
 
 ### Annotation Import and Export
 
-SAB's PostgreSQL database is the long-term source of truth for Standard Annotations.
-Until a group is cut over, that group's GPAD file is the source of truth and SAB
+SABE's PostgreSQL database is the long-term source of truth for Standard Annotations.
+Until a group is cut over, that group's GPAD file is the source of truth and SABE
 replaces the group's annotations from it, as described under Annotation refreshes above.
 GPAD/GPI export is planned but not yet implemented.
 
 Each GPAD source is configured with its owning group. A refresh replaces all of that
-group's annotations rather than merging, which is acceptable because SAB-side changes to
+group's annotations rather than merging, which is acceptable because SABE-side changes to
 a `gpad_imported` group are not authoritative. A cutover performs one final, clean
-replacement and then permanently transfers authority for that group to SAB. Groups cut
+replacement and then permanently transfers authority for that group to SABE. Groups cut
 over independently, with no single global cutover date.
 
 Staging validates each annotation's `db_object_id` against the active entity catalog. An
@@ -963,7 +963,7 @@ prevents overlapping jobs from publishing a group's files out of order without b
 normal annotation reads or writes.
 
 A job parses the source file, structurally validates each record against the Standard
-Annotation model, assigns backend-generated SAB UUIDs outside the Standard Annotation
+Annotation model, assigns backend-generated SABE UUIDs outside the Standard Annotation
 payload, and loads the valid canonical records and their duplicate-signature/reference
 lookup data into staging tables keyed by the job ID, along with each annotation's
 initial immutable version data and source provenance. Structurally invalid records are
@@ -977,7 +977,7 @@ annotation-specific audit events. It then inserts the staged annotations, their 
 immutable versions and duplicate lookup data, records the job's provenance, and commits.
 The job record, job-level audit events, and import report remain as the durable record
 that the replacement occurred. This destructive replacement is an explicit exception to
-normal annotation soft deletion and history retention because SAB is not yet
+normal annotation soft deletion and history retention because SABE is not yet
 authoritative for the group.
 
 Publication does not acquire per-signature locks. PostgreSQL readers continue to see the
@@ -996,8 +996,8 @@ duplicate pairs may already exist in current source files. This import exception
 not apply to direct creates, direct updates, or accepted create/update change sets,
 which use the global pairwise duplicate policy.
 
-Export should derive GPAD/GPI files from current active SAB records. When an export job
-starts, SAB should determine the latest version number for each annotation included in
+Export should derive GPAD/GPI files from current active SABE records. When an export job
+starts, SABE should determine the latest version number for each annotation included in
 the export and then generate the output from those immutable rows in
 `annotation_version`. This gives the job a stable view of the data even if annotations
 are edited while the export is running. Export jobs should record enough metadata to
@@ -1026,7 +1026,7 @@ artifacts.
 
 ## Deployment and Operations
 
-SAB should be containerized and designed to fit GO's existing AWS-oriented deployment
+SABE should be containerized and designed to fit GO's existing AWS-oriented deployment
 practices without requiring complex DevOps practices.
 
 The service stack should have a small number of moving parts:
@@ -1061,7 +1061,7 @@ requirements clearly justify them.
 
 PostgreSQL managed via AWS RDS is recommended here because of its built-in managed
 backup, point-in-time recovery, and monitoring features. We could potentially build this
-functionality into a self-managed container. However, since SAB will eventually hold
+functionality into a self-managed container. However, since SABE will eventually hold
 source-of-truth data the risk of a backup failure is very high, and using a managed
 solution is a good tradeoff.
 
@@ -1069,7 +1069,7 @@ Redis, on the other hand, is only the message broker for Celery tasks. It should
 treated as replaceable coordination infrastructure, not as the durable record of job
 state.
 
-SAB should have at least two persistent deployed environments: `dev` and `prod`. The
+SABE should have at least two persistent deployed environments: `dev` and `prod`. The
 `dev` environment should mirror the production system and use separate databases, Redis
 instances, S3 buckets, OAuth credentials, secrets, and configuration. It should be used
 to preview merged code before production deployment. It should not share mutable
@@ -1092,13 +1092,13 @@ production.
 
 ### Operational Logging
 
-`SAB_LOG_FORMAT=console|json` selects log presentation independently of the named
+`SABE_LOG_FORMAT=console|json` selects log presentation independently of the named
 deployment environment. Local development uses console output, while production-like
 deployments use JSON. Structlog's `ProcessorFormatter` provides the single schema and
 rendering pipeline for both application and standard-library records. Uvicorn access
 logs use the `http_request` event with nested `http` and `client` fields and do not
 retain the formatted access-log sentence. Celery's setup signal prevents its default
-handlers from replacing SAB's logging pipeline.
+handlers from replacing SABE's logging pipeline.
 
 All records go to stdout for collection by the container runtime. Correlation IDs,
 request duration, distributed tracing, proxy interpretation, and custom access
@@ -1122,8 +1122,8 @@ developers can run locally and operate in AWS with limited specialized DevOps bu
 
 | Decision area                                        | Status                                                                                                   | Owner or input needed                                                                                                                      | Implementation impact                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 |------------------------------------------------------|----------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| SAB annotation identifiers                           | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | The backend generates UUIDs as SAB metadata outside the Standard Annotation payload; UUID helpers and persistence may proceed.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Per-group GPAD replacement and cutover               | Settled for the initial implementation                                                                   | Each group's cutover is a global-admin decision; no further input is needed for the mechanism.                                             | Configured GPAD sources replace a `gpad_imported` group's annotations through staging tables keyed by job ID. A per-group try-lock serializes jobs for one group. One publication transaction takes the global annotation-write lock exclusively, permanently deletes the group's annotations and dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. A cutover does the same with zero rejections allowed and makes the group `sab_managed` permanently. |
+| SABE annotation identifiers                           | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | The backend generates UUIDs as SABE metadata outside the Standard Annotation payload; UUID helpers and persistence may proceed.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Per-group GPAD replacement and cutover               | Settled for the initial implementation                                                                   | Each group's cutover is a global-admin decision; no further input is needed for the mechanism.                                             | Configured GPAD sources replace a `gpad_imported` group's annotations through staging tables keyed by job ID. A per-group try-lock serializes jobs for one group. One publication transaction takes the global annotation-write lock exclusively, permanently deletes the group's annotations and dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. A cutover does the same with zero rejections allowed and makes the group `sabe_managed` permanently. |
 | Duplicate handling during GPAD import                | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | Staging and publication perform no duplicate checks or rejection. Staging takes no duplicate locks; publication takes the global annotation-write lock exclusively but takes no signature locks. A separate QC process may apply the settled pairwise predicate and should report duplicate pairs rather than treating connected components as equivalence classes.                                                                                                                                                                                                         |
 | Initial Protein2GO-aligned pairwise duplicate policy | Settled for the initial implementation                                                                   | No further input is needed. The accepted non-transitivity risk should be reviewed if multi-reference source data becomes material.         | Implementation may proceed with an indexed base signature and per-reference lookup rows. Creates reject any peer; updates reject only newly introduced peers and may preserve legacy pairs; soft deletes remove conflicts. Every ordinary annotation mutation uses `READ COMMITTED`, takes the global annotation-write lock in shared mode before ordered signature locks, then freshly re-reads state and peers.                                                                                                                                                           |
 | Annotated-entity metadata for GPAD imports           | Settled for GPAD import; alternatives are deferred                                                       | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | GPAD imports validate `db_object_id` against the active entity catalog maintained by entity refreshes. An annotation whose entity is not active is rejected and reported at record level. No alternative source or reconciliation workflow is implied.                                                                                                                                                                                                                                                                                                                      |
@@ -1136,7 +1136,7 @@ developers can run locally and operate in AWS with limited specialized DevOps bu
 have been discussed as possibilities for the future. They are listed here to ensure that
 decisions made about the initial design do not preclude them.*
 
-Eventually, the full set of curated annotations in SAB should have no pairs that satisfy
+Eventually, the full set of curated annotations in SABE should have no pairs that satisfy
 the settled duplicate predicate. Reaching that state requires identifying, reviewing,
 and resolving duplicate pairs already present in imported source data. During cleanup,
 creates with any duplicate-conflict peer are rejected, while direct updates and accepted
@@ -1156,20 +1156,20 @@ current annotation version is equivalent to the result of applying the patch to 
 original target annotation then applying a patch representing the difference between the
 current and target versions.
 
-SAB could eventually store read-only inferred from electronic annotation (IEA) records
+SABE could eventually store read-only inferred from electronic annotation (IEA) records
 to make annotation QC and reporting more complete. These records should be managed
 separately from curated annotations, likely through drop-and-reload imports tied to
 source metadata and import run IDs. They should not be exposed through the normal
 annotation API, should not be editable through CRUD or change-set operations, and should
-not become authoritative SAB records. Their purpose would be to provide additional
+not become authoritative SABE records. Their purpose would be to provide additional
 context available only to reporting and QC jobs.
 
-SAB could also support frontend application clients in addition to programmatic clients.
+SABE could also support frontend application clients in addition to programmatic clients.
 That would require adding a browser-oriented authentication flow, likely GitHub OAuth
-followed by a secure, HTTP-only SAB session cookie, while keeping backend authorization
+followed by a secure, HTTP-only SABE session cookie, while keeping backend authorization
 in the same role/scope/group model used for bearer tokens. Request handling should
 resolve either a bearer token or a browser session into a shared authorization context
 containing the authenticated identity, selected role/scope/group context, and token or
 session metadata for audit. The frontend should be responsible for login UX, context
-selection, and displaying available actions, but SAB should continue to enforce all
+selection, and displaying available actions, but SABE should continue to enforce all
 read/write permissions, ownership rules, and audit recording on the backend.  

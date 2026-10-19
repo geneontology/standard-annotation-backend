@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
     CutoverRejectedError,
-    GroupSabManagedError,
+    GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
@@ -331,7 +331,7 @@ def test_rerun_after_interrupted_staging_publishes_only_the_fetched_document(
 def _apply_local_change(
     change: str, unit_of_work_factory: UnitOfWorkFactory, imported: UUID
 ) -> None:
-    """Make one kind of SAB-local change to the test group."""
+    """Make one kind of SABE-local change to the test group."""
     if change == "change_set":
         _create_proposal(unit_of_work_factory)
         return
@@ -419,7 +419,7 @@ def test_ontology_term_replacement_does_not_force_a_reimport(
     session_factory: sessionmaker[Session],
     seed_active_subjects: Callable[..., None],
 ) -> None:
-    """SAB's automatic term replacements leave an identical file skippable."""
+    """SABE's automatic term replacements leave an identical file skippable."""
     seed_active_subjects("UniProtKB:P12345")
     run(GOOD)
     [imported] = annotations_of(session_factory)
@@ -701,13 +701,13 @@ def test_identical_rows_in_one_file_are_all_published(
     assert len(annotations_of(session_factory)) == 3
 
 
-def test_cutover_moves_the_group_to_sab_management_permanently(
+def test_cutover_moves_the_group_to_sabe_management_permanently(
     run: RunJob,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     seed_active_subjects: Callable[..., None],
 ) -> None:
-    """A clean cutover publishes the file and makes the group SAB-managed.
+    """A clean cutover publishes the file and makes the group SABE-managed.
 
     Afterward, neither a refresh nor another cutover can be requested for the
     group, and refreshing all sources leaves it out.
@@ -718,7 +718,7 @@ def test_cutover_moves_the_group_to_sab_management_permanently(
 
     assert job.status is JobStatus.SUCCEEDED
     assert job.result is not None
-    assert (job.result["mode"], job.result["is_cutover"]) == ("sab_managed", True)
+    assert (job.result["mode"], job.result["is_cutover"]) == ("sabe_managed", True)
     with session_factory() as session:
         versions = session.execute(
             select(
@@ -729,13 +729,13 @@ def test_cutover_moves_the_group_to_sab_management_permanently(
         ("curator", "annotation_cutover")
     ]
     starts = RefreshStartService(unit_of_work_factory, TEST_SOURCES, lambda _job: None)
-    with pytest.raises(GroupSabManagedError):
+    with pytest.raises(GroupSabeManagedError):
         starts.start(
             RefreshKindName.ANNOTATION,
             context=system_context("admin"),
             source_key=SOURCE,
         )
-    with pytest.raises(GroupSabManagedError):
+    with pytest.raises(GroupSabeManagedError):
         starts.start_cutover(context=system_context("admin"), source_key=SOURCE)
     refresh_all = starts.start(
         RefreshKindName.ANNOTATION, context=system_context("scheduler"), source_key=None

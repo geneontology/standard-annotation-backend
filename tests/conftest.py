@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for the SAB test suite."""
+"""Shared pytest fixtures for the SABE test suite."""
 
 from collections.abc import Iterator
 from urllib.parse import parse_qs
@@ -15,19 +15,21 @@ from standard_annotation_backend.main import app
 @pytest.fixture
 def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Provide complete test configuration, clearing cached settings between tests."""
-    monkeypatch.setenv("SAB_DATABASE_URL", "postgresql+psycopg://sab:sab@db:5432/sab")
-    monkeypatch.setenv("SAB_REDIS_URL", "redis://redis:6379/0")
-    monkeypatch.setenv("SAB_APPLICATION_SECRET", "test-application-secret")
-    monkeypatch.setenv("SAB_ENVIRONMENT", "testing")
-    monkeypatch.setenv("SAB_LOG_FORMAT", "console")
-    monkeypatch.setenv("SAB_AUTHORIZATION_REFRESH_CRON", "0 0 * * *")
-    monkeypatch.setenv("SAB_ONTOLOGY_REFRESH_CRON", "0 2 * * 1,3,5")
-    monkeypatch.setenv("SAB_ENTITY_REFRESH_CRON", "0 3 * * *")
-    monkeypatch.setenv("SAB_ANNOTATION_REFRESH_CRON", "0 4 * * *")
-    monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_ID", "test-client-id")
-    monkeypatch.setenv("SAB_GITHUB_OAUTH_CLIENT_SECRET", "test-client-secret")
     monkeypatch.setenv(
-        "SAB_GITHUB_OAUTH_CALLBACK_URL", "http://testserver/auth/github/callback"
+        "SABE_DATABASE_URL", "postgresql+psycopg://sabe:sabe@db:5432/sabe"
+    )
+    monkeypatch.setenv("SABE_REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setenv("SABE_APPLICATION_SECRET", "test-application-secret")
+    monkeypatch.setenv("SABE_ENVIRONMENT", "testing")
+    monkeypatch.setenv("SABE_LOG_FORMAT", "console")
+    monkeypatch.setenv("SABE_AUTHORIZATION_REFRESH_CRON", "0 0 * * *")
+    monkeypatch.setenv("SABE_ONTOLOGY_REFRESH_CRON", "0 2 * * 1,3,5")
+    monkeypatch.setenv("SABE_ENTITY_REFRESH_CRON", "0 3 * * *")
+    monkeypatch.setenv("SABE_ANNOTATION_REFRESH_CRON", "0 4 * * *")
+    monkeypatch.setenv("SABE_GITHUB_OAUTH_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("SABE_GITHUB_OAUTH_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv(
+        "SABE_GITHUB_OAUTH_CALLBACK_URL", "http://testserver/auth/github/callback"
     )
     get_settings.cache_clear()
     try:

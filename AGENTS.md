@@ -4,7 +4,7 @@ These instructions apply throughout the repository.
 
 ## Project overview
 
-The Standard Annotation Backend (SAB) stores and manages Gene Ontology Standard
+The Standard Annotation Backend (SABE) stores and manages Gene Ontology Standard
 Annotations. It is a Python 3.13 application built with FastAPI, Pydantic, SQLAlchemy,
 PostgreSQL, Alembic, Celery, and Redis.
 
@@ -120,10 +120,10 @@ understands Python but may not know the surrounding codebase.
 Keep API messages and other developer-facing text clear and stable. Tests should assert
 stable structure and meaning without unnecessarily depending on third-party wording.
 
-Keep `README.md` focused primarily on setting up and using SAB as a developer. Document
+Keep `README.md` focused primarily on setting up and using SABE as a developer. Document
 supported commands and day-to-day workflows, but do not duplicate implementation rules,
 data-model details, API error contracts, security rationale, or edge-case behavior there.
-Limit discussion of how SAB works to a brief `Architecture` section that links to
+Limit discussion of how SABE works to a brief `Architecture` section that links to
 `ARCHITECTURE.md`. Put detailed code behavior and guarantees in docstrings beside the
 relevant implementation. Avoid describing missing capabilities, rejected alternatives,
 temporary omissions, future milestones, or release operations in the README.
@@ -145,7 +145,7 @@ Add focused regression coverage for every behavior change.
 - Update OpenAPI contract tests when routes, parameters, response headers, models, or
   documented errors change.
 
-Integration tests may reset their configured database. `SAB_ENVIRONMENT` must be
+Integration tests may reset their configured database. `SABE_ENVIRONMENT` must be
 `testing`, the database name must end in `_test`, and the URL must not override the
 database name with a `dbname` query parameter. Always use a disposable test database.
 

@@ -35,7 +35,7 @@ from standard_annotation_backend.domain.errors import (
     NotFoundError,
     PreconditionFailedError,
     PreconditionRequiredError,
-    SabError,
+    SabeError,
     StaleChangeSet,
     StaleVersion,
     UnauthenticatedError,
@@ -65,7 +65,7 @@ class MethodNotAllowedRouteError(MethodNotAllowedError):
 
 
 class UnexpectedError(InternalServerError):
-    """Report a failure that SAB does not expect.
+    """Report a failure that SABE does not expect.
 
     The response names no cause, because unexpected exceptions can carry
     secrets or internal details in their messages.
@@ -86,7 +86,7 @@ class OAuthCallbackFailedError(InternalServerError):
     message = "GitHub authentication could not be completed"
 
 
-BEARER_ERRORS: tuple[type[SabError], ...] = (
+BEARER_ERRORS: tuple[type[SabeError], ...] = (
     AuthenticationRequiredError,
     PermissionDeniedError,
     CredentialPersistenceError,
@@ -125,7 +125,7 @@ def _validation_details(
     return [ApiValidationIssue.model_validate(error) for error in errors]
 
 
-STATUS_BY_BASE: tuple[tuple[type[SabError], int], ...] = (
+STATUS_BY_BASE: tuple[tuple[type[SabeError], int], ...] = (
     (BadRequestError, status.HTTP_400_BAD_REQUEST),
     (UnauthenticatedError, status.HTTP_401_UNAUTHORIZED),
     (ForbiddenError, status.HTTP_403_FORBIDDEN),
@@ -164,7 +164,7 @@ class RequestValidationFailedError(InvalidInputError):
 
     FastAPI checks the body, path, query, and header values against each route's
     declared types and raises its own `RequestValidationError` when they do not
-    match. This error carries the same problems in SAB's error form, so those
+    match. This error carries the same problems in SABE's error form, so those
     failures share the standard response and can be listed in route
     documentation. It lives in the API layer because only FastAPI produces it.
 
@@ -184,7 +184,7 @@ class RequestValidationFailedError(InvalidInputError):
         return self.errors
 
 
-def status_for(error_type: type[SabError]) -> int:
+def status_for(error_type: type[SabeError]) -> int:
     """Return the HTTP status for an error class.
 
     Raises:
@@ -196,7 +196,7 @@ def status_for(error_type: type[SabError]) -> int:
     raise TypeError(f"{error_type.__name__} has no outcome category")
 
 
-def _headers_for(error_type: type[SabError]) -> Mapping[str, str] | None:
+def _headers_for(error_type: type[SabeError]) -> Mapping[str, str] | None:
     """Return HTTP-only headers for an error, such as the bearer challenge."""
     if issubclass(error_type, AuthenticationRequiredError):
         return _BEARER_CHALLENGE
@@ -227,8 +227,8 @@ def _api_details(details: ErrorDetails | None) -> ApiErrorDetails | None:
             return _validation_details(details)
 
 
-def sab_error_response(
-    error: SabError, headers: Mapping[str, str] | None = None
+def sabe_error_response(
+    error: SabeError, headers: Mapping[str, str] | None = None
 ) -> JSONResponse:
     """Build the error envelope for an application error.
 
@@ -252,7 +252,7 @@ def sab_error_response(
     )
 
 
-def error_responses(*error_types: type[SabError]) -> dict[int | str, dict[str, Any]]:
+def error_responses(*error_types: type[SabeError]) -> dict[int | str, dict[str, Any]]:
     """Describe the error responses a route can return, for OpenAPI.
 
     Errors are grouped by status. Each description lists the codes that status
@@ -295,7 +295,7 @@ def _allowed_methods(request: Request) -> str:
     """Return the `Allow` header value for the request's path.
 
     Starlette reports only the methods of the first route that matched the
-    path, but SAB often serves one path with several routes, such as `GET` and
+    path, but SABE often serves one path with several routes, such as `GET` and
     `POST` on `/annotations`. Each route is asked whether it would fully match
     the same path with each standard method, which also works through the
     wrappers FastAPI uses for included routers.
@@ -329,9 +329,9 @@ def install_exception_handlers(app: FastAPI) -> None:
         app: FastAPI application that should use the handlers.
     """
 
-    @app.exception_handler(SabError)
-    def handle_sab_error(_request: Request, error: SabError) -> JSONResponse:
-        return sab_error_response(error)
+    @app.exception_handler(SabeError)
+    def handle_sabe_error(_request: Request, error: SabeError) -> JSONResponse:
+        return sabe_error_response(error)
 
     @app.exception_handler(RequestValidationError)
     def handle_request_validation_error(
@@ -346,17 +346,17 @@ def install_exception_handlers(app: FastAPI) -> None:
             )
             for detail in error.errors()
         )
-        return sab_error_response(RequestValidationFailedError(issues))
+        return sabe_error_response(RequestValidationFailedError(issues))
 
     @app.exception_handler(HTTPException)
     def handle_http_exception(request: Request, error: HTTPException) -> JSONResponse:
         # Starlette raises these for paths and methods that match no route.
-        # SAB itself raises none, so any other status is unexpected.
+        # SABE itself raises none, so any other status is unexpected.
         if error.status_code == status.HTTP_404_NOT_FOUND:
-            return sab_error_response(RouteNotFoundError())
+            return sabe_error_response(RouteNotFoundError())
         if error.status_code == status.HTTP_405_METHOD_NOT_ALLOWED:
             allowed = _allowed_methods(request)
-            return sab_error_response(
+            return sabe_error_response(
                 MethodNotAllowedRouteError(),
                 {"Allow": allowed} if allowed else error.headers,
             )
@@ -366,4 +366,4 @@ def install_exception_handlers(app: FastAPI) -> None:
             request.url.path,
             error.status_code,
         )
-        return sab_error_response(UnexpectedError())
+        return sabe_error_response(UnexpectedError())

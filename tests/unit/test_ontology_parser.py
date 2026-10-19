@@ -1,4 +1,4 @@
-"""Verify conversion from OBO syntax to SAB ontology data."""
+"""Verify conversion from OBO syntax to SABE ontology data."""
 
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -167,7 +167,7 @@ consider: GO:9999999
 
 
 def test_parse_obo_translates_third_party_syntax_failures() -> None:
-    """Invalid OBO syntax becomes SAB's stable parser exception."""
+    """Invalid OBO syntax becomes SABE's stable parser exception."""
     content = b"format-version: 1.4\n\n[Term]\nid GO:0000001\n"
 
     with pytest.raises(OntologyParseError, match="valid OBO"):

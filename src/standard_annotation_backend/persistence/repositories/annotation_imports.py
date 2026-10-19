@@ -18,7 +18,7 @@ from standard_annotation_backend.domain.annotation_management import (
     AnnotationImportConflictError,
     AnnotationManagementMode,
     CutoverRejectedError,
-    GroupSabManagedError,
+    GroupSabeManagedError,
     RejectionReport,
     RejectionReportBuilder,
     unknown_subject_rejection,
@@ -91,13 +91,13 @@ class AnnotationImportRepository:
         )
         return AnnotationManagementMode(mode or AnnotationManagementMode.GPAD_IMPORTED)
 
-    def sab_managed_groups(self) -> frozenset[str]:
-        """Return every group whose annotations are managed by SAB."""
+    def sabe_managed_groups(self) -> frozenset[str]:
+        """Return every group whose annotations are managed by SABE."""
         return frozenset(
             self.session.scalars(
                 select(GroupAnnotationManagementRecord.group_key).where(
                     GroupAnnotationManagementRecord.mode
-                    == AnnotationManagementMode.SAB_MANAGED.value
+                    == AnnotationManagementMode.SABE_MANAGED.value
                 )
             )
         )
@@ -136,10 +136,10 @@ class AnnotationImportRepository:
     ) -> None:
         """Store validated annotations for a job until it publishes.
 
-        Each annotation gets a new SAB identifier now, which it keeps when
+        Each annotation gets a new SABE identifier now, which it keeps when
         published. Its lookup rows, used to filter by multivalued fields and to
         find duplicates, are staged too, computed the same way as for annotations
-        created directly in SAB.
+        created directly in SABE.
         """
         staged: list[dict[str, object]] = []
         multivalued: list[dict[str, object]] = []
@@ -219,7 +219,7 @@ class AnnotationImportRepository:
         """Report whether the group has changed since `import_job_id` published.
 
         A local change is an annotation that the import did not publish, an edit
-        or soft delete, a comment, or a change set in any state. SAB's automatic
+        or soft delete, a comment, or a change set in any state. SABE's automatic
         ontology term replacements are not local changes. This checks current
         rows rather than timestamps, because a write's `created_at` is its
         transaction's start time, which can precede a publication it commits after.
@@ -229,7 +229,7 @@ class AnnotationImportRepository:
         )
         # Each query selects rows that show a local change; one match is enough.
         local_change_queries = (
-            # Annotations the import did not publish: created in SAB directly or
+            # Annotations the import did not publish: created in SABE directly or
             # through an accepted change set, or left from an earlier import.
             group_annotations.where(
                 or_(
@@ -240,7 +240,7 @@ class AnnotationImportRepository:
                 )
             ),
             # Edits and soft deletes: imported annotations start at version 1,
-            # so a later version means a change, unless SAB made it itself
+            # so a later version means a change, unless SABE made it itself
             # (such as an ontology term replacement).
             select(AnnotationVersionRecord.annotation_id).where(
                 AnnotationVersionRecord.annotation_id.in_(group_annotations),
@@ -283,10 +283,10 @@ class AnnotationImportRepository:
         For this group only, deletes the annotations with their versions,
         comments, and lookup rows, the change sets, and the audit events of both.
         Then inserts the staged annotations as version 1 and marks the import
-        published. A cutover also moves the group to `sab_managed`.
+        published. A cutover also moves the group to `sabe_managed`.
 
         Takes the global annotation-write lock in exclusive mode, so every
-        annotation write in SAB waits until the caller's transaction ends.
+        annotation write in SABE waits until the caller's transaction ends.
         Because the replacement happens in one transaction, readers see either
         the group's old annotations or the new ones, never a mix.
 
@@ -297,7 +297,7 @@ class AnnotationImportRepository:
         Raises:
             AnnotationImportConflictError: If the job does not exist, is not a
                 GPAD job, or has no staged import.
-            GroupSabManagedError: If the group is already SAB-managed.
+            GroupSabeManagedError: If the group is already SABE-managed.
             CutoverRejectedError: If a cutover's staged subject is no longer an
                 active entity.
         """
@@ -311,8 +311,8 @@ class AnnotationImportRepository:
             return record
         acquire_global_annotation_write_lock(self.session, exclusive=True)
         state = self._lock_group(record.group_key)
-        if state.mode == AnnotationManagementMode.SAB_MANAGED.value:
-            raise GroupSabManagedError(record.group_key)
+        if state.mode == AnnotationManagementMode.SABE_MANAGED.value:
+            raise GroupSabeManagedError(record.group_key)
         if record.is_cutover:
             self._require_staged_subjects(job_id)
         deleted = self._delete_group_data(record.group_key)
@@ -327,7 +327,7 @@ class AnnotationImportRepository:
         record.annotations_deleted = deleted
         state.last_import_job_id = job_id
         if record.is_cutover:
-            state.mode = AnnotationManagementMode.SAB_MANAGED.value
+            state.mode = AnnotationManagementMode.SABE_MANAGED.value
             state.transitioned_at = now
             state.transition_job_id = job_id
         self.session.execute(

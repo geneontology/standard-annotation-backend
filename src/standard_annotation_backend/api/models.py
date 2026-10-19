@@ -1,4 +1,4 @@
-"""Define typed request and response models for SAB's HTTP APIs.
+"""Define typed request and response models for SABE's HTTP APIs.
 
 Each resource that represents a service result converts it through `from_service`.
 Conversion reads only the attributes the resource declares, so fields added to a
@@ -366,7 +366,7 @@ class RefreshRequest(BaseModel):
 
 
 class AnnotationCutoverRequest(BaseModel):
-    """Request the final GPAD import that moves one group to SAB management."""
+    """Request the final GPAD import that moves one group to SABE management."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -375,7 +375,7 @@ class AnnotationCutoverRequest(BaseModel):
         Field(
             description=(
                 "Key of an annotation source configured in config/sources.yaml. Its "
-                "group moves to SAB management permanently if the import succeeds."
+                "group moves to SABE management permanently if the import succeeds."
             ),
             examples=["mgi"],
         ),

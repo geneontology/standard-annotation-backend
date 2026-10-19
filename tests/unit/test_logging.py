@@ -1,4 +1,4 @@
-"""Focused tests for SAB-owned logging behavior."""
+"""Focused tests for SABE-owned logging behavior."""
 
 import json
 import logging
@@ -27,7 +27,7 @@ def test_exception_logs_do_not_display_credential_locals(log_format: LogFormat) 
         fail_with_credential_in_scope(raw_credential)
     except RuntimeError:
         record = logging.LogRecord(
-            "sab.test",
+            "sabe.test",
             logging.ERROR,
             __file__,
             1,
@@ -102,7 +102,7 @@ class DefaultingMapping(Mapping[str, object]):
 
 
 configure_logging(LogFormat.JSON)
-structlog.stdlib.get_logger("sab.test").info(
+structlog.stdlib.get_logger("sabe.test").info(
     "annotation_created", annotation_id="example-annotation"
 )
 logging.getLogger("dependency.test").warning(
@@ -130,7 +130,7 @@ logging.getLogger("dependency.test").info(
     assert len(records) == 4
     assert records[0]["event"] == "annotation_created"
     assert records[0]["annotation_id"] == "example-annotation"
-    assert records[0]["logger"] == "sab.test"
+    assert records[0]["logger"] == "sabe.test"
     assert records[0]["level"] == "info"
     assert "timestamp" in records[0]
     assert records[1]["event"] == "retry 2"
@@ -148,7 +148,7 @@ logging.getLogger("dependency.test").info(
 
 
 def test_uvicorn_access_record_becomes_structured_http_event_or_falls_back() -> None:
-    """SAB enriches the known Uvicorn contract without making logging fragile."""
+    """SABE enriches the known Uvicorn contract without making logging fragile."""
     record = logging.LogRecord(
         "uvicorn.access",
         logging.INFO,

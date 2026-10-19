@@ -1,6 +1,6 @@
 """Define the vocabulary shared by every reference data refresh.
 
-SAB keeps reference data current from external sources: authorization from
+SABE keeps reference data current from external sources: authorization from
 go-site `users.yaml`, ontologies from OBO files, entities from GPI files, and
 annotations from group GPAD files. Refreshing one source means fetching it and
 applying it. These values are shared by every kind and need neither HTTP nor a
@@ -27,7 +27,7 @@ AUTHORIZATION_SOURCE_KEY = "go-site"
 
 
 class RefreshKindName(StrEnum):
-    """Name each kind of reference data that SAB refreshes."""
+    """Name each kind of reference data that SABE refreshes."""
 
     AUTHORIZATION = "authorization"
     ONTOLOGY = "ontology"
@@ -58,7 +58,7 @@ class RefreshFailureCode(StrEnum):
     CATALOG_COLLISION = "catalog_collision"
     NO_VALID_ANNOTATIONS = "no_valid_annotations"
     CUTOVER_REJECTED = "cutover_rejected"
-    GROUP_SAB_MANAGED = "group_sab_managed"
+    GROUP_SABE_MANAGED = "group_sabe_managed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +169,7 @@ class UnknownSourceError(InvalidInputError, TerminalRefreshError):
         self.kind = kind
         self.source_key = source_key
         # Only `TerminalRefreshError` initializes the exception. It comes after
-        # the SAB category in the bases, so its `super()` call reaches
+        # the SABE category in the bases, so its `super()` call reaches
         # `Exception` and the text the refresh runner sees is unchanged.
         TerminalRefreshError.__init__(self, "source is not configured")
 

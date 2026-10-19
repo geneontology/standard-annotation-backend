@@ -21,7 +21,7 @@ from test_entity_refresh_concurrency import TIMEOUT, wait_for_lock
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
     CutoverRejectedError,
-    GroupSabManagedError,
+    GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.jobs import JobType
@@ -147,7 +147,7 @@ def publish(
 def group_mode(
     unit_of_work_factory: UnitOfWorkFactory, group_key: str = GROUP
 ) -> AnnotationManagementMode:
-    """Return whether GPAD or SAB currently manages `group_key`."""
+    """Return whether GPAD or SABE currently manages `group_key`."""
     with unit_of_work_factory() as uow:
         return uow.annotation_imports.group_mode(group_key)
 
@@ -241,7 +241,7 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
     assert group_rows(session_factory, "RGD") == [("direct", ["PMID:42"])]
 
 
-def test_refresh_waiting_on_a_cutover_cannot_overwrite_the_sab_managed_group(
+def test_refresh_waiting_on_a_cutover_cannot_overwrite_the_sabe_managed_group(
     database_engine: Engine,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
@@ -250,8 +250,8 @@ def test_refresh_waiting_on_a_cutover_cannot_overwrite_the_sab_managed_group(
     """An ordinary refresh staged before a cutover fails once the cutover commits.
 
     The refresh publication waits while the cutover publishes. After the cutover
-    commits, the refresh rejects the now SAB-managed group with
-    `GroupSabManagedError`, and the group keeps the cutover's annotations.
+    commits, the refresh rejects the now SABE-managed group with
+    `GroupSabeManagedError`, and the group keeps the cutover's annotations.
     """
     seed_active_subjects("UniProtKB:P12345")
     service = AnnotationRefreshService(
@@ -275,10 +275,10 @@ def test_refresh_waiting_on_a_cutover_cannot_overwrite_the_sab_managed_group(
         assert not second.done()
         pause.release.set()
         first.result(timeout=TIMEOUT)
-        with pytest.raises(GroupSabManagedError):
+        with pytest.raises(GroupSabeManagedError):
             second.result(timeout=TIMEOUT)
 
-    assert group_mode(unit_of_work_factory) is AnnotationManagementMode.SAB_MANAGED
+    assert group_mode(unit_of_work_factory) is AnnotationManagementMode.SABE_MANAGED
     with unit_of_work_factory() as uow:
         assert uow.annotation_imports.published_import(refresh.job_id) is None
     assert group_rows(session_factory) == [("import", ["PMID:2"])]

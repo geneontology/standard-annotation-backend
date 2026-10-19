@@ -1,4 +1,4 @@
-"""Serve the SAB-owned browser interface for bearer-token management."""
+"""Serve the SABE-owned browser interface for bearer-token management."""
 
 from importlib.resources import files
 

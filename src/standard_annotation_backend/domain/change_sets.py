@@ -213,7 +213,7 @@ def _json_values_equal(left: object, right: object) -> bool:
 
 
 def _validate_patch(patch: object) -> None:
-    """Validate patch structure and SAB's annotation path policy."""
+    """Validate patch structure and SABE's annotation path policy."""
     if not isinstance(patch, list) or not patch:
         raise InvalidChangeSetPatchError(
             ChangeSetPatchIssue(location=(), type="patch_must_be_nonempty_list")

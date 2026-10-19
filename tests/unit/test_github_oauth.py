@@ -110,7 +110,7 @@ def test_login_sets_distinct_short_lived_http_only_state(client: TestClient) -> 
     first = client.get("/auth/github/login", follow_redirects=False)
     assert first.status_code == status.HTTP_302_FOUND
     state = parse_qs(urlsplit(first.headers["location"]).query)["state"][0]
-    assert client.cookies["sab_oauth_state"] == state
+    assert client.cookies["sabe_oauth_state"] == state
     cookie = first.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie
     assert "Path=/" in cookie and "Max-Age=600" in cookie
@@ -131,8 +131,8 @@ def test_callback_rejects_state_mismatch_and_clears_cookie(
     response = client.get("/auth/github/callback", params=params)
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert response.json()["error"]["code"] == "invalid_oauth_state"
-    assert "sab_oauth_state" not in client.cookies
-    assert "sab_token_management_session" not in client.cookies
+    assert "sabe_oauth_state" not in client.cookies
+    assert "sabe_token_management_session" not in client.cookies
 
 
 def test_unconfigured_oauth_login_keeps_health_available(client: TestClient) -> None:
@@ -166,11 +166,11 @@ def test_incomplete_oauth_callback_clears_valid_state(
 ) -> None:
     """Denied or incomplete sign-in ends the state flow without issuing a session."""
     client.get("/auth/github/login", follow_redirects=False)
-    query = {**query, "state": client.cookies["sab_oauth_state"]}
+    query = {**query, "state": client.cookies["sabe_oauth_state"]}
     response = client.get("/auth/github/callback", params=query, follow_redirects=False)
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert response.json()["error"]["code"] == "invalid_oauth_callback"
-    assert "sab_oauth_state" not in client.cookies
+    assert "sabe_oauth_state" not in client.cookies
 
 
 def test_github_failure_clears_callback_state_and_uses_public_error(
@@ -179,7 +179,7 @@ def test_github_failure_clears_callback_state_and_uses_public_error(
 ) -> None:
     """An upstream outage has a safe typed response and consumes the browser state."""
     client.get("/auth/github/login", follow_redirects=False)
-    state = client.cookies["sab_oauth_state"]
+    state = client.cookies["sabe_oauth_state"]
     github_http_responses[:] = [
         httpx2.TimeoutException("test-oauth-code test-client-secret")
     ]
@@ -190,4 +190,4 @@ def test_github_failure_clears_callback_state_and_uses_public_error(
     assert response.json()["error"]["code"] == "github_oauth_unavailable"
     assert "test-oauth-code" not in response.text
     assert "test-client-secret" not in response.text
-    assert "sab_oauth_state" not in client.cookies
+    assert "sabe_oauth_state" not in client.cookies

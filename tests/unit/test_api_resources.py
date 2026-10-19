@@ -205,9 +205,9 @@ def test_token_resource_carries_token_metadata() -> None:
 
 def test_token_created_response_adds_secret_to_token_metadata() -> None:
     """The creation response contains the raw token and every metadata field."""
-    created = CreatedToken("sab_secret", _metadata())
+    created = CreatedToken("sabe_secret", _metadata())
 
     assert TokenCreatedResponse.from_service(created).model_dump(mode="json") == {
-        "token": "sab_secret",
+        "token": "sabe_secret",
         **_TOKEN_FIELDS,
     }

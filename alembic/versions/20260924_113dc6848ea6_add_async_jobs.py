@@ -20,7 +20,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Add job-state constraints and unique authorization-source revisions."""
-    # SAB has no retained deployments or historical data at this project stage, so
+    # SABE has no retained deployments or historical data at this project stage, so
     # the source-revision constraint can be added directly without reconciling rows.
     op.create_unique_constraint(
         "source_revision_unique",

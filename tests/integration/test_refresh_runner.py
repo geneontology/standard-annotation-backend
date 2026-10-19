@@ -61,12 +61,12 @@ FIXTURES = Path(__file__).parents[1] / "fixtures"
 USERS_YAML = b"""
 - accounts: {github: curator}
   authorizations:
-    sab: [{role: edit, scope: group, group: MGI}]
+    sabe: [{role: edit, scope: group, group: MGI}]
 """
 INVALID_USERS_YAML = b"""
 - accounts: {github: curator}
   authorizations:
-    sab: [{role: owner, scope: group, group: MGI}]
+    sabe: [{role: owner, scope: group, group: MGI}]
 """
 
 

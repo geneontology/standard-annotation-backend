@@ -134,7 +134,7 @@ def _job(job_id: UUID, job_type: JobType) -> Job:
 def test_dispatcher_routes_retirement_and_refresh_jobs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Retirement jobs go to the retirement task; every other job to `sab.refresh.run`."""
+    """Retirement jobs go to the retirement task; every other job to `sabe.refresh.run`."""
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(
         tasks.run_refresh, "delay", lambda job_id: sent.append(("refresh", job_id))

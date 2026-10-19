@@ -18,7 +18,7 @@ from pydantic_settings import SettingsError
 from sqlalchemy.exc import SQLAlchemyError
 
 from standard_annotation_backend.domain.annotation_management import (
-    GroupSabManagedError,
+    GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
@@ -87,7 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="refresh",
-        description="Refresh SAB reference data from config/sources.yaml.",
+        description="Refresh SABE reference data from config/sources.yaml.",
     )
     parser.add_argument("kind", choices=[kind.value for kind in RefreshKindName])
     parser.add_argument(
@@ -111,15 +111,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except UnknownSourceError:
         print(f"No {kind.value} source is configured with that key", file=sys.stderr)
         return 1
-    except GroupSabManagedError:
+    except GroupSabeManagedError:
         print(
-            "That annotation source's group is SAB-managed; GPAD can no longer "
+            "That annotation source's group is SABE-managed; GPAD can no longer "
             "replace its annotations",
             file=sys.stderr,
         )
         return 1
     except (ValidationError, SettingsError):
-        print("SAB configuration is invalid", file=sys.stderr)
+        print("SABE configuration is invalid", file=sys.stderr)
         return 1
     except SQLAlchemyError:
         print("Refresh could not record its jobs in PostgreSQL", file=sys.stderr)
@@ -128,9 +128,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # That is not a failure, but say why instead of printing nothing.
         if sources_configured:
             # Only annotation refreshes can start nothing while sources exist:
-            # every source's group is SAB-managed.
+            # every source's group is SABE-managed.
             print(
-                f"No {kind.value} sources need refreshing; their groups are SAB-managed"
+                f"No {kind.value} sources need refreshing; their groups are SABE-managed"
             )
         else:
             # Nothing is configured for this kind (and, for entities, nothing needs

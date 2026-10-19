@@ -2,19 +2,19 @@
   "version": 1,
   "disable_existing_loggers": false,
   "formatters": {
-    "sab": {
+    "sabe": {
       "()": "standard_annotation_backend.logging.create_formatter"
     }
   },
   "handlers": {
-    "sab": {
+    "sabe": {
       "class": "logging.StreamHandler",
-      "formatter": "sab",
+      "formatter": "sabe",
       "stream": "ext://sys.stdout"
     }
   },
   "root": {
-    "handlers": ["sab"],
+    "handlers": ["sabe"],
     "level": "INFO"
   },
   "loggers": {
