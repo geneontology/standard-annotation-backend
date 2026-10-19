@@ -82,6 +82,10 @@ app = FastAPI(
             "Annotations, and read their version history.",
         },
         {
+            "name": "annotations versions",
+            "description": "Read annotation version history.",
+        },
+        {
             "name": "annotation comments",
             "description": "Discuss annotations without changing them.",
         },

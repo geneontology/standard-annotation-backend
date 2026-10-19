@@ -29,7 +29,7 @@ from standard_annotation_backend.services.annotation_service import AnnotationSe
 
 router = APIRouter(
     prefix="/annotations",
-    tags=["annotations"],
+    tags=["annotations versions"],
     dependencies=[Depends(get_authenticated_context)],
     responses=error_responses(*BEARER_ERRORS, RequestValidationFailedError),
 )
