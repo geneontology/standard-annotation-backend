@@ -26,7 +26,6 @@ from standard_annotation_backend.domain.ontology import (
     OntologyDefinition,
     OntologyDocument,
     OntologyFinding,
-    OntologyKey,
     OntologyParseError,
     OntologyRefreshResult,
     OntologySnapshot,
@@ -34,6 +33,7 @@ from standard_annotation_backend.domain.ontology import (
     OntologyVersion,
     StoredOntologyRefresh,
     compute_closure,
+    missing_required_subsets,
     ontology_refresh_warnings,
     propose_term_replacements,
 )
@@ -47,7 +47,6 @@ from standard_annotation_backend.domain.refresh import (
     TerminalRefreshError,
     job_source_key,
 )
-from standard_annotation_backend.ontology.definitions import ontology_definition
 from standard_annotation_backend.ontology.obo_parser import parse_obo
 from standard_annotation_backend.persistence.locks import (
     AdvisoryTryLock,
@@ -61,6 +60,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
+from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
 
@@ -74,13 +74,13 @@ class OntologyRefreshBusyError(RetryableRefreshError):
 class OntologyRefreshService:
     """Refresh and prune every supported ontology.
 
-    Implements `RefreshKind`. One service serves every ontology key; the job's
-    source key selects the ontology's identifier prefixes and closure
-    predicates.
+    Implements `RefreshKind`. One service serves every configured ontology; the
+    job's source key selects the ontology's definition in `config/sources.yaml`.
 
     Args:
         unit_of_work_factory: Opens the transactions for staging, activation,
             and pruning.
+        sources: Configured sources, which say how to read each ontology.
         try_lock: Takes the per-ontology lock.
         enqueue_prune: Schedules pruning after a job finishes. `None` prunes in
             this process instead.
@@ -89,10 +89,12 @@ class OntologyRefreshService:
     def __init__(
         self,
         unit_of_work_factory: UnitOfWorkFactory,
+        sources: RefreshSources,
         try_lock: AdvisoryTryLock,
         enqueue_prune: Callable[[str], None] | None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
+        self._sources = sources
         self._try_lock = try_lock
         self._enqueue_prune = enqueue_prune
 
@@ -109,14 +111,13 @@ class OntologyRefreshService:
     def recover(self, job: Job) -> RefreshOutcome | None:
         """Return the stored result if this job already activated its snapshot.
 
-        A key that is not a supported ontology has nothing to recover; the runner
+        A key that is not a configured ontology has nothing to recover; the runner
         then reports it as an unknown source.
 
         Raises:
             StoredDataError: If the stored result is malformed; the run is retried.
         """
-        key = _ontology_key(job_source_key(job.parameters))
-        if key is None:
+        if not self._is_configured(job_source_key(job.parameters)):
             return None
         # Activation commits the snapshot and its result together, so a stored
         # result means an earlier attempt stopped only before marking the job
@@ -129,31 +130,32 @@ class OntologyRefreshService:
     ) -> RefreshOutcome:
         """Parse, stage, and activate a new snapshot under the ontology's lock.
 
-        A document that is already the active snapshot is not applied. It is
-        checked before taking the lock, so it never waits on another job, and
-        again once the lock is held.
+        A document that is already the active snapshot, read with the same
+        prefixes and closure predicates, is not applied. It is checked before
+        taking the lock, so it never waits on another job, and again once the lock
+        is held.
 
         Raises:
             OntologyRefreshBusyError: If another process holds the lock. This is
                 not a terminal failure, so the run is retried later.
-            TerminalRefreshError: With `invalid_document` if the OBO is invalid.
+            TerminalRefreshError: With `invalid_document` if the OBO is invalid or
+                does not declare every subset in the entry's `required_subsets`.
             OntologyCandidateConflictError: If the job already staged a different
                 source, or a snapshot staged after this job's is already active.
         """
-        key = OntologyKey(document.source_key)
-        definition = ontology_definition(key)
-        ontology_document = _ontology_document(key, document)
-        if self._matches_active(ontology_document):
+        definition = self._sources.ontology_definition(document.source_key)
+        ontology_document = _ontology_document(definition.key, document)
+        if self._matches_active(ontology_document, definition):
             return _unchanged(ontology_document)
         # Stage and activate under the per-ontology lock, so two jobs cannot
         # activate snapshots out of order and pruning cannot delete a candidate.
-        with self._try_lock(LockNamespace.ONTOLOGY, key.value) as acquired:
+        with self._try_lock(LockNamespace.ONTOLOGY, definition.key) as acquired:
             if not acquired:
                 # The job stays running; Celery retries the whole task later.
                 raise OntologyRefreshBusyError
             # Another job may have activated this same document while this one
             # was fetching, so check again now that the lock is held.
-            if self._matches_active(ontology_document):
+            if self._matches_active(ontology_document, definition):
                 return _unchanged(ontology_document)
             try:
                 snapshot = parse_obo(ontology_document, definition)
@@ -163,6 +165,15 @@ class OntologyRefreshService:
                     failure_code=RefreshFailureCode.INVALID_DOCUMENT,
                     failure_details={"message": str(error)},
                 ) from None
+            missing = missing_required_subsets(snapshot, definition)
+            if missing:
+                raise TerminalRefreshError(
+                    failure_code=RefreshFailureCode.INVALID_DOCUMENT,
+                    failure_details={
+                        "message": "ontology source does not declare the subsets "
+                        + ", ".join(missing)
+                    },
+                )
             self._stage(
                 job_id=job.job_id, document=ontology_document, snapshot=snapshot
             )
@@ -181,7 +192,7 @@ class OntologyRefreshService:
         is busy. The CLI prunes in its own process and skips pruning when the
         lock is busy; the next finished job prunes instead.
         """
-        if _ontology_key(source_key) is None:
+        if not self._is_configured(source_key):
             return
         if self._enqueue_prune is not None:
             self._enqueue_prune(source_key)
@@ -210,21 +221,26 @@ class OntologyRefreshService:
 
         Returns:
             `False` if another process holds the ontology's lock, otherwise `True`.
-            An unsupported key has nothing to prune and also returns `True`.
+            An unconfigured key has nothing to prune and also returns `True`.
         """
-        key = _ontology_key(source_key)
-        if key is None:
+        if not self._is_configured(source_key):
             return True
-        with self._try_lock(LockNamespace.ONTOLOGY, key.value) as acquired:
+        with self._try_lock(LockNamespace.ONTOLOGY, source_key) as acquired:
             if not acquired:
                 return False
-            self._prune(key, pruned_at=datetime.now(UTC))
+            self._prune(source_key, pruned_at=datetime.now(UTC))
         return True
 
-    def _matches_active(self, document: OntologyDocument) -> bool:
-        """Return whether the document's source details match the active snapshot."""
+    def _is_configured(self, key: str) -> bool:
+        """Return whether `key` is an ontology in the sources file."""
+        return key in self._sources.keys(RefreshKindName.ONTOLOGY)
+
+    def _matches_active(
+        self, document: OntologyDocument, definition: OntologyDefinition
+    ) -> bool:
+        """Return whether the active snapshot came from this document and definition."""
         with self._unit_of_work_factory() as unit_of_work:
-            return unit_of_work.ontologies.matches_active_source(document)
+            return unit_of_work.ontologies.matches_active_source(document, definition)
 
     def _completed(self, job_id: UUID) -> StoredOntologyRefresh | None:
         """Return the stored result if this job completed ontology activation.
@@ -243,7 +259,7 @@ class OntologyRefreshService:
                 raise RuntimeError("active ontology snapshot has no durable result")
             return None
 
-    def _prune(self, key: OntologyKey, *, pruned_at: datetime) -> tuple[UUID, ...]:
+    def _prune(self, key: str, *, pruned_at: datetime) -> tuple[UUID, ...]:
         """Delete eligible snapshot term and closure rows and commit the transaction.
 
         Args:
@@ -313,7 +329,9 @@ class OntologyRefreshService:
                 term_count=len(candidate_terms),
                 closure_count=candidate_closure_count,
             )
-            warnings = ontology_refresh_warnings(candidate_terms)
+            warnings = ontology_refresh_warnings(
+                candidate_terms, definition.identifier_prefixes
+            )
             if candidate.active:
                 return OntologyRefreshResult(
                     version,
@@ -460,7 +478,7 @@ def _snapshot(
 ) -> OntologySnapshot:
     """Build the ontology snapshot needed to evaluate annotation replacements."""
     document = OntologyDocument(
-        ontology_key=OntologyKey(record.ontology_key),
+        ontology_key=record.ontology_key,
         content=b"",
         source_type=record.source_type,
         source_locator=record.source_locator,
@@ -485,6 +503,7 @@ def _terms(records: list[OntologyTermRecord]) -> dict[str, OntologyTerm]:
             record.obsolete,
             tuple(record.replaced_by),
             tuple(record.consider),
+            subsets=tuple(record.subsets),
         )
         for record in records
     }
@@ -499,7 +518,7 @@ def _ontology_version(
     """Build an ontology-version result from stored metadata and row counts."""
     return OntologyVersion(
         version_id=record.version_id,
-        ontology_key=OntologyKey(record.ontology_key),
+        ontology_key=record.ontology_key,
         source_type=record.source_type,
         source_locator=record.source_locator,
         source_revision=record.source_revision,
@@ -539,7 +558,7 @@ def _duplicate_findings(
     annotation_id: UUID,
     proposal: AnnotationReplacementProposal,
     peer_ids: tuple[UUID, ...],
-    ontology_key: OntologyKey,
+    ontology_key: str,
 ) -> tuple[OntologyFinding, ...]:
     """Describe replacements rejected because they would create duplicates."""
     return tuple(
@@ -556,15 +575,7 @@ def _duplicate_findings(
     )
 
 
-def _ontology_key(source_key: str) -> OntologyKey | None:
-    """Return the ontology for a source key, or `None` if it is not supported."""
-    try:
-        return OntologyKey(source_key)
-    except ValueError:
-        return None
-
-
-def _ontology_document(key: OntologyKey, document: SourceDocument) -> OntologyDocument:
+def _ontology_document(key: str, document: SourceDocument) -> OntologyDocument:
     """Convert a fetched document into the ontology parser's input."""
     return OntologyDocument(
         ontology_key=key,

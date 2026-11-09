@@ -2,17 +2,19 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyDefinition,
     OntologyDocument,
-    OntologyKey,
     OntologySnapshot,
     OntologyTerm,
     propose_term_replacements,
 )
 
-DEFINITION = OntologyDefinition(OntologyKey.GO, ("GO",), ("is_a",))
+DEFINITION = OntologyDefinition(GO_ONTOLOGY_KEY, ("GO",), ("is_a",), "go")
 
 
 def _annotation(**changes: object) -> Annotation:
@@ -39,7 +41,7 @@ def _annotation(**changes: object) -> Annotation:
 
 def _snapshot(terms: dict[str, OntologyTerm]) -> OntologySnapshot:
     document = OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=b"test",
         source_type="test",
         source_locator="fixture",
@@ -155,3 +157,34 @@ def test_groups_repeated_unresolved_term_paths_in_one_finding() -> None:
         "/ontology_class_id",
         "/annotation_extensions/0/extension_term",
     )
+
+
+@pytest.mark.parametrize(
+    ("replacement", "terms"),
+    [
+        ("GO:0000001", {"GO:0000001": _term("GO:0000001", obsolete=True)}),
+        ("CL:0000001", {}),
+        ("GO:0009999", {}),
+    ],
+    ids=["obsolete", "another-ontology", "undefined"],
+)
+def test_a_replacement_that_is_not_a_current_term_is_reported_not_applied(
+    replacement: str, terms: dict[str, OntologyTerm]
+) -> None:
+    """An annotation keeps its term when the replacement is not a current term."""
+    snapshot = _snapshot(
+        {
+            **terms,
+            "GO:0000002": _term(
+                "GO:0000002", obsolete=True, replaced_by=(replacement,)
+            ),
+        }
+    )
+
+    proposal = propose_term_replacements(_annotation(), snapshot, {}, DEFINITION)
+
+    assert proposal.changed_paths == ()
+    assert proposal.annotation.ontology_class_id == "GO:0000002"
+    assert [
+        (finding.code, finding.replacement_ids) for finding in proposal.findings
+    ] == [("unusable_replacement", (replacement,))]

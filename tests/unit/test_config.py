@@ -66,7 +66,7 @@ def test_settings_expose_the_shipped_sources_file() -> None:
     settings = _settings()
 
     assert settings.sources_file == Path("config/sources.yaml")
-    assert settings.sources.keys(RefreshKindName.ONTOLOGY) == ("go",)
+    assert "go" in settings.sources.keys(RefreshKindName.ONTOLOGY)
     assert settings.source_connect_timeout_seconds == 10
     assert settings.source_read_timeout_seconds == 60
 

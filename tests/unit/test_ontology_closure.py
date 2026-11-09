@@ -5,10 +5,10 @@ from hashlib import sha256
 from types import MappingProxyType
 
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyClosureRow,
     OntologyDocument,
     OntologyEdge,
-    OntologyKey,
     OntologySnapshot,
     OntologyTerm,
     compute_closure,
@@ -24,7 +24,7 @@ def _snapshot(
     content = b"test ontology"
     return OntologySnapshot(
         document=OntologyDocument(
-            ontology_key=OntologyKey.GO,
+            ontology_key=GO_ONTOLOGY_KEY,
             content=content,
             source_type="test",
             source_locator="fixture:closure",

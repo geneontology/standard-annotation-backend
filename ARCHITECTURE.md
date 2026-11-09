@@ -869,21 +869,33 @@ pieces fit together in the code.
 **Authorization.** The go-site `users.yaml` replaces SABE's users and grants as
 described under Authorization Model.
 
-**Ontologies.** A refresh stages a complete snapshot with closure rows for the approved
-predicates (`rdfs:subClassOf` and `BFO:0000050`), activates it, and updates annotations
-whose terms have a single `replaced_by` value through the normal versioned mutation
-path. A closure row records the subject term, predicate, object term, and depth, where
-the subject is the more specific term and the object is the broader queried term. Cases
-SABE cannot resolve automatically (a term obsoleted without replacement, a removed term,
-or multiple `consider`
-alternatives) are reported through QC reporting. Complete term and closure data is kept
-only for the active snapshot, its newest successful predecessor, and candidates of
-unfinished jobs. Older snapshots keep their metadata, results, and audit events. A
-snapshot whose bulk data was pruned cannot become active or be used by operations that
-need terms or closure. Pruning and activation take the same per-ontology advisory lock,
-so cleanup cannot race with a refresh of that ontology. Pruning runs after each ontology
-job finishes (`sabe.ontology.prune`); a failure to schedule or run it leaves the job's
-status and result unchanged, and pruning is retried.
+**Ontologies.** `config/sources.yaml` lists every ontology SABE loads and says how to
+read each one: the `ontology:` header the file must declare, the identifier prefixes the
+ontology owns, the relationships whose closure SABE computes, and the subsets the file
+must declare. Each prefix belongs to exactly one ontology, and terms with other prefixes
+in a file are ignored. A file that lacks a required subset is refused. GO is required
+and is loaded from `go-basic.obo` for its complete inferred subclass hierarchy. Its
+entry must list `rdfs:subClassOf` among its closure predicates and require the
+`gocheck_do_not_annotate` and `gocheck_obsoletion_candidate` subsets that GO Rules
+check; SABE refuses to start otherwise. The other ontologies are loaded as term lists
+without closure. Before parsing, SABE removes the term clauses it does not read, such as
+definitions and cross-references, so a malformed clause there cannot stop a published
+file from loading. A refresh stages a complete snapshot of terms, their subsets,
+alternative identifiers, and closure rows, activates it, and updates annotations whose
+terms have a single `replaced_by` value that is a current term of the same ontology,
+through the normal versioned mutation path. A closure row records the subject term,
+predicate, object term, and depth, where the subject is the more specific term and the
+object is the broader queried term. Cases SABE cannot resolve automatically (a term
+obsoleted without replacement, a removed term, a replacement that is not a current term
+of the same ontology, or multiple `consider` alternatives) are reported through QC
+reporting. Complete term and closure data is kept only for the active snapshot, its
+newest successful predecessor, and candidates of unfinished jobs. Older snapshots keep
+their metadata, results, and audit events. A snapshot whose bulk data was pruned cannot
+become active or be used by operations that need terms or closure. Pruning and
+activation take the same per-ontology advisory lock, so cleanup cannot race with a
+refresh of that ontology. Pruning runs after each ontology job finishes
+(`sabe.ontology.prune`); a failure to schedule or run it leaves the job's status and
+result unchanged, and pruning is retried.
 
 **Entities.** An entity is an annotatable subject identified by `db_object_id`. Each
 configured GPI source supplies a complete catalog. An identifier can be active in only

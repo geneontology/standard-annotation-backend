@@ -22,7 +22,7 @@ from standard_annotation_backend.domain.annotations import (
     StaleAnnotationVersionError,
     new_annotation_id,
 )
-from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.persistence.annotation_data import (
     AnnotationPersistenceData,
     prepare_annotation_for_persistence,
@@ -69,7 +69,7 @@ def _closure_condition(term_id: str, predicate_id: str) -> ColumnElement[bool]:
             OntologyMetadataRecord.version_id == OntologyClosureRecord.version_id,
         )
         .where(
-            OntologyMetadataRecord.ontology_key == OntologyKey.GO.value,
+            OntologyMetadataRecord.ontology_key == GO_ONTOLOGY_KEY,
             OntologyMetadataRecord.active.is_(True),
             OntologyClosureRecord.subject_term_id == AnnotationRecord.ontology_class_id,
             OntologyClosureRecord.object_term_id == term_id,

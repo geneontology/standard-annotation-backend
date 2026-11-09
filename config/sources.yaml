@@ -10,7 +10,15 @@
 #     the single go-site users.yaml source (source key `go-site`)
 #
 # ontologies
-#     keyed by ontology; `go` is required.
+#     keyed by ontology; `go` is required. Each entry also sets:
+#       document_ontology_id  the `ontology:` header value the file must declare
+#       prefixes              identifier prefixes the ontology owns; each prefix
+#                             may belong to only one ontology
+#       closure_predicates    relationships whose closure SABE computes; `go` must
+#                             include rdfs:subClassOf. Omit for a term list.
+#       required_subsets      subsets the file must declare, or the refresh fails;
+#                             `go` must include the subsets GO Rules check
+#                             (gocheck_do_not_annotate, gocheck_obsoletion_candidate)
 #
 # entities
 #    keyed by a stable source key: lowercase letters, digits, `_`, or `-`, starting
@@ -32,12 +40,81 @@ authorization:
   ref: master
   path: metadata/users.yaml
 
+# The ontology list is GO, NCBITaxon (for interacting taxa), and every ontology that
+# GORULE:0000058 allows in annotation extensions. GO comes from go-basic.obo because
+# it has the complete inferred subclass hierarchy.
+#
+# ChEBI uses its lite file because it is smaller but has the same information that SABE
+# needs. It also uses a direct HTTPS URL because the PURL redirects to an insecure HTTP
+# URL, which SABE rejects.
 ontologies:
   go:
-    type: github
-    repository: geneontology/go-ontology
-    ref: master
-    path: src/ontology/go-edit.obo
+    type: https
+    url: https://current.geneontology.org/ontology/go-basic.obo
+    document_ontology_id: go
+    prefixes: [ GO ]
+    closure_predicates: [ rdfs:subClassOf, BFO:0000050 ]
+    required_subsets: [ gocheck_do_not_annotate, gocheck_obsoletion_candidate ]
+  ncbitaxon:
+    type: https
+    url: https://purl.obolibrary.org/obo/ncbitaxon/subsets/taxslim.obo
+    document_ontology_id: ncbitaxon/subsets/taxslim.obo
+    prefixes: [ NCBITaxon ]
+  chebi:
+    type: https
+    url: https://ftp.ebi.ac.uk/pub/databases/chebi/ontology/chebi_lite.obo
+    document_ontology_id: chebi_lite
+    prefixes: [ CHEBI ]
+  pr:
+    type: https
+    url: https://purl.obolibrary.org/obo/pr.obo
+    document_ontology_id: pr
+    prefixes: [ PR ]
+  uberon:
+    type: https
+    url: https://purl.obolibrary.org/obo/uberon/uberon-basic.obo
+    document_ontology_id: uberon/uberon-basic
+    prefixes: [ UBERON ]
+  cl:
+    type: https
+    url: https://purl.obolibrary.org/obo/cl/cl-basic.obo
+    document_ontology_id: cl/cl-basic
+    prefixes: [ CL ]
+  emapa:
+    type: https
+    url: https://purl.obolibrary.org/obo/emapa.obo
+    document_ontology_id: emapa
+    prefixes: [ EMAPA ]
+  zfa:
+    type: https
+    url: https://purl.obolibrary.org/obo/zfa.obo
+    document_ontology_id: zfa
+    prefixes: [ ZFA ]
+  xao:
+    type: https
+    url: https://purl.obolibrary.org/obo/xao.obo
+    document_ontology_id: xao
+    prefixes: [ XAO ]
+  wbbt:
+    type: https
+    url: https://purl.obolibrary.org/obo/wbbt.obo
+    document_ontology_id: wbbt
+    prefixes: [ WBbt ]
+  fbbt:
+    type: https
+    url: https://purl.obolibrary.org/obo/fbbt.obo
+    document_ontology_id: fbbt.obo
+    prefixes: [ FBbt ]
+  wbls:
+    type: https
+    url: https://purl.obolibrary.org/obo/wbls.obo
+    document_ontology_id: wbls/wbls-simple
+    prefixes: [ WBls ]
+  so:
+    type: https
+    url: https://purl.obolibrary.org/obo/so.obo
+    document_ontology_id: so
+    prefixes: [ SO ]
 
 entities:
   caeel:

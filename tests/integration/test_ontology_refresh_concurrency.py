@@ -13,6 +13,7 @@ import httpx2
 import pytest
 from refresh_helpers import (
     REVISION,
+    TEST_SOURCES,
     OboTerm,
     go_document,
     ignore_progress,
@@ -31,8 +32,8 @@ from standard_annotation_backend.domain.annotations import (
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyDocument,
-    OntologyKey,
     OntologySnapshot,
     OntologyTerm,
 )
@@ -90,7 +91,7 @@ FAILURE_GUARD_SECONDS = 5
 
 def _document(revision: str) -> OntologyDocument:
     return OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=revision.encode(),
         source_type="test",
         source_locator="fixture/go.obo",
@@ -192,7 +193,7 @@ def _active_state(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> tuple[str | None, str, int]:
     with unit_of_work_factory() as unit_of_work:
-        active = unit_of_work.ontologies.get_active(OntologyKey.GO)
+        active = unit_of_work.ontologies.get_active(GO_ONTOLOGY_KEY)
         annotation = unit_of_work.annotations.get(REPLACED_ANNOTATION_ID)
         assert active is not None
         assert annotation is not None
@@ -255,7 +256,7 @@ def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
     calls: list[datetime] = []
 
     def record_pruning(
-        _repository: OntologyRepository, key: OntologyKey, pruned_at: datetime
+        _repository: OntologyRepository, key: str, pruned_at: datetime
     ) -> tuple[UUID, ...]:
         calls.append(pruned_at)
         return ()
@@ -263,14 +264,14 @@ def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
     monkeypatch.setattr(OntologyRepository, "prune_candidates", record_pruning)
 
     with try_advisory_lock(
-        database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+        database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
     ) as acquired:
         assert acquired is True
         with pytest.raises(WorkerTaskUnavailableError):
-            prune_ontology_snapshots.run(OntologyKey.GO.value)
+            prune_ontology_snapshots.run(GO_ONTOLOGY_KEY)
         assert calls == []
 
-    prune_ontology_snapshots.run(OntologyKey.GO.value)
+    prune_ontology_snapshots.run(GO_ONTOLOGY_KEY)
 
     assert len(calls) == 1
 
@@ -312,7 +313,7 @@ def test_refresh_task_retries_while_the_ontology_lock_is_held_then_succeeds(
 
     try:
         with try_advisory_lock(
-            database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+            database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
         ) as acquired:
             assert acquired is True
             with pytest.raises(WorkerTaskUnavailableError):
@@ -349,7 +350,7 @@ def test_activation_is_atomically_visible_and_blocks_ordinary_writes(
     """Readers see complete states while an ordinary writer waits for activation."""
     job, document = _prepare_load(unit_of_work_factory, session_factory)
     service = OntologyRefreshService(
-        unit_of_work_factory, bind_try_lock(database_engine), None
+        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
     )
     update_flushed = Event()
     allow_activation_commit = Event()
@@ -438,7 +439,7 @@ def test_failed_activation_never_exposes_partial_state(
     """A reader during and after a failed activation sees the prior complete state."""
     job, document = _prepare_load(unit_of_work_factory, session_factory)
     service = OntologyRefreshService(
-        unit_of_work_factory, bind_try_lock(database_engine), None
+        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
     )
     update_flushed = Event()
     allow_failure = Event()

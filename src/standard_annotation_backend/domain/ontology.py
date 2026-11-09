@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
@@ -19,11 +18,24 @@ from standard_annotation_backend.domain.refresh import (
 )
 from standard_annotation_backend.domain.stored_json import StoredJson
 
+GO_ONTOLOGY_KEY = "go"
+"""Key of the GO ontology in `config/sources.yaml`.
 
-class OntologyKey(StrEnum):
-    """Identify ontologies configured for loading by SABE."""
+Every deployment configures GO. Code that needs GO itself, such as closure search on
+`ontology_class_id`, looks it up by this key.
+"""
 
-    GO = "go"
+SUBCLASS_PREDICATE = "rdfs:subClassOf"
+"""Closure predicate for OBO `is_a` relationships."""
+
+REQUIRED_GO_SUBSETS = ("gocheck_do_not_annotate", "gocheck_obsoletion_candidate")
+"""GO subsets that GO Rules check annotations against.
+
+GORULE:0000008 uses `gocheck_do_not_annotate` and GORULE:0000065 uses
+`gocheck_obsoletion_candidate`. A GO file that does not declare them would make
+those rules stop finding anything, so GO's entry in `config/sources.yaml` must
+list both in its `required_subsets`.
+"""
 
 
 class OntologyCandidateConflictError(TerminalRefreshError):
@@ -34,19 +46,31 @@ class OntologyCandidateConflictError(TerminalRefreshError):
 
 @dataclass(frozen=True, slots=True)
 class OntologyDefinition:
-    """Describe identifiers and relationship handling for an ontology."""
+    """Describe how SABE reads one configured ontology.
 
-    key: OntologyKey
+    Attributes:
+        key: The ontology's key in `config/sources.yaml`, such as `go`.
+        identifier_prefixes: Identifier prefixes the ontology owns, such as `GO`.
+            Terms with other prefixes in the same file are ignored.
+        closure_predicates: Relationships whose closure SABE computes, such as
+            `rdfs:subClassOf`. Empty when the ontology is loaded as a term list.
+        document_ontology_id: The `ontology:` header value the file must declare.
+        required_subsets: Subsets the file must declare. A file that lacks one is
+            refused.
+    """
+
+    key: str
     identifier_prefixes: tuple[str, ...]
     closure_predicates: tuple[str, ...]
-    document_ontology_id: str | None = None
+    document_ontology_id: str
+    required_subsets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class OntologyDocument:
     """Contain retrieved ontology bytes and the source details that identify them."""
 
-    ontology_key: OntologyKey
+    ontology_key: str
     content: bytes
     source_type: str
     source_locator: str
@@ -57,12 +81,23 @@ class OntologyDocument:
 
 @dataclass(frozen=True, slots=True)
 class OntologyTerm:
-    """Describe one term and the replacement metadata needed by SABE."""
+    """Describe one term: its status, replacement suggestions, and subsets.
+
+    Attributes:
+        term_id: The term's identifier, such as `GO:0005515`.
+        obsolete: Whether the ontology marks the term obsolete.
+        replaced_by: The terms the ontology says to use instead, as published.
+            They may be obsolete or belong to another ontology.
+        consider: Terms the ontology suggests considering instead.
+        subsets: Names of the ontology subsets the term belongs to, such as
+            `gocheck_do_not_annotate`.
+    """
 
     term_id: str
     obsolete: bool
     replaced_by: tuple[str, ...]
     consider: tuple[str, ...]
+    subsets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -76,13 +111,28 @@ class OntologyEdge:
 
 @dataclass(frozen=True, slots=True)
 class OntologySnapshot:
-    """Contain the parsed terms and approved direct edges from one document."""
+    """Contain everything SABE reads from one ontology document.
+
+    Attributes:
+        document: The fetched document the snapshot was parsed from.
+        document_version: The document's `data-version`, if it declares one.
+        closure_predicates: Relationships whose closure SABE computes.
+        identifier_prefixes: Identifier prefixes the snapshot was read with.
+        terms: The ontology's terms by identifier.
+        edges: Direct relationships used to compute closure.
+        alt_ids: The primary term of each alternative identifier. Ontologies keep
+            the identifiers of merged terms as alternative identifiers.
+        declared_subsets: Subset names the document's header declares.
+    """
 
     document: OntologyDocument
     document_version: str | None
     closure_predicates: tuple[str, ...]
     terms: Mapping[str, OntologyTerm]
     edges: tuple[OntologyEdge, ...]
+    alt_ids: Mapping[str, str] = field(default_factory=dict)
+    declared_subsets: frozenset[str] = frozenset()
+    identifier_prefixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -110,8 +160,13 @@ class OntologyRefreshWarning:
 
 def ontology_refresh_warnings(
     terms: Mapping[str, OntologyTerm],
+    identifier_prefixes: tuple[str, ...],
 ) -> tuple[OntologyRefreshWarning, ...]:
-    """Return warnings for advisory references to terms outside the snapshot."""
+    """Return warnings for `consider` targets the snapshot should define but does not.
+
+    Only targets with one of the ontology's own prefixes are checked. A suggestion
+    that points into another ontology cannot be checked against this snapshot.
+    """
     return tuple(
         OntologyRefreshWarning(
             code="undefined_consider_target",
@@ -120,7 +175,27 @@ def ontology_refresh_warnings(
         )
         for term in sorted(terms.values(), key=lambda value: value.term_id)
         for target in sorted(set(term.consider))
-        if target not in terms
+        if target not in terms and target.partition(":")[0] in identifier_prefixes
+    )
+
+
+def missing_required_subsets(
+    snapshot: OntologySnapshot, definition: OntologyDefinition
+) -> tuple[str, ...]:
+    """Return the subsets an ontology's entry requires that its file does not declare.
+
+    Args:
+        snapshot: The parsed file.
+        definition: The ontology's entry in `config/sources.yaml`.
+
+    Returns:
+        The missing subset names, in the order the entry lists them. Empty when the
+        file declares every required subset.
+    """
+    return tuple(
+        subset
+        for subset in definition.required_subsets
+        if subset not in snapshot.declared_subsets
     )
 
 
@@ -129,7 +204,7 @@ class OntologyFinding:
     """Describe an ontology condition that prevented an automatic update."""
 
     code: str
-    ontology_key: OntologyKey
+    ontology_key: str
     term_id: str
     field_paths: tuple[str, ...]
     replacement_ids: tuple[str, ...] = ()
@@ -161,7 +236,7 @@ class OntologyVersion:
     """Describe one stored ontology snapshot returned by the service layer."""
 
     version_id: UUID
-    ontology_key: OntologyKey
+    ontology_key: str
     source_type: str
     source_locator: str
     source_revision: str | None
@@ -249,7 +324,7 @@ class StoredOntologyFinding:
     """
 
     code: str
-    ontology: OntologyKey
+    ontology: str
     term_id: str
     annotation_id: UUID | None
     field_paths: tuple[str, ...]
@@ -285,7 +360,7 @@ class StoredOntologyRefresh:
         findings: Conditions that prevented automatic annotation updates.
     """
 
-    ontology: OntologyKey | None
+    ontology: str | None
     ontology_version_id: UUID | None
     source_type: str | None
     source_locator: str | None
@@ -316,9 +391,10 @@ def propose_term_replacements(
     """Replace obsolete terms when the ontology provides one replacement.
 
     The function checks the primary ontology term and annotation extension terms.
-    It records a finding instead of changing a term that is missing, has multiple
-    replacements, only has `consider` suggestions, or has no replacement. It does
-    not treat relation or evidence fields as ontology terms.
+    It records a finding instead of changing a term that is missing, has more than
+    one replacement, has a replacement that is not a current term of this
+    ontology, only has `consider` suggestions, or has no replacement. It does not
+    treat relation or evidence fields as ontology terms.
     """
     annotation_data = annotation.model_dump(mode="json")
     occurrences: list[tuple[str, str]] = [
@@ -344,18 +420,17 @@ def propose_term_replacements(
         if not term.obsolete:
             continue
         if len(term.replaced_by) == 1:
-            _set_term_path(annotation_data, path, term.replaced_by[0])
-            changed_paths.append(path)
-            replacement_paths.setdefault((term_id, term.replaced_by[0]), []).append(
-                path
-            )
-            continue
-        if len(term.replaced_by) > 1:
-            finding_key = (
-                "ambiguous_replacement",
-                term_id,
-                term.replaced_by,
-            )
+            replacement = snapshot.terms.get(term.replaced_by[0])
+            if replacement is not None and not replacement.obsolete:
+                _set_term_path(annotation_data, path, replacement.term_id)
+                changed_paths.append(path)
+                replacement_paths.setdefault((term_id, replacement.term_id), []).append(
+                    path
+                )
+                continue
+            finding_key = ("unusable_replacement", term_id, term.replaced_by)
+        elif len(term.replaced_by) > 1:
+            finding_key = ("ambiguous_replacement", term_id, term.replaced_by)
         elif term.consider:
             finding_key = ("consider_only", term_id, term.consider)
         else:

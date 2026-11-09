@@ -9,9 +9,9 @@ from fastapi import status
 from fastapi.testclient import TestClient
 
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyClosureRow,
     OntologyDocument,
-    OntologyKey,
     OntologySnapshot,
     OntologyTerm,
 )
@@ -68,7 +68,7 @@ def _load_active_ontology(unit_of_work_factory: UnitOfWorkFactory) -> None:
     now = datetime(2026, 9, 28, tzinfo=UTC)
     job_id = UUID("00000000-0000-0000-0000-000000000071")
     document = OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=b"fixture",
         source_type="test",
         source_locator="fixture/go.obo",

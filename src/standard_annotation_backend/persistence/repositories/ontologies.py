@@ -12,12 +12,13 @@ from standard_annotation_backend.domain.jobs import ACTIVE_JOB_STATUSES
 from standard_annotation_backend.domain.ontology import (
     OntologyCandidateConflictError,
     OntologyClosureRow,
+    OntologyDefinition,
     OntologyDocument,
-    OntologyKey,
     OntologySnapshot,
 )
 from standard_annotation_backend.persistence.models import (
     JobRecord,
+    OntologyAltIdRecord,
     OntologyClosureRecord,
     OntologyMetadataRecord,
     OntologyTermRecord,
@@ -73,7 +74,7 @@ class OntologyRepository:
                 existing.source_revision,
                 existing.source_checksum,
             ) != (
-                document.ontology_key.value,
+                document.ontology_key,
                 document.source_type,
                 document.source_locator,
                 document.source_revision,
@@ -84,13 +85,14 @@ class OntologyRepository:
                 )
             return existing
         record = OntologyMetadataRecord(
-            ontology_key=document.ontology_key.value,
+            ontology_key=document.ontology_key,
             source_type=document.source_type,
             source_locator=document.source_locator,
             source_revision=document.source_revision,
             source_checksum=document.source_checksum,
             document_version=snapshot.document_version,
             loaded_predicates=list(snapshot.closure_predicates),
+            identifier_prefixes=list(snapshot.identifier_prefixes),
             job_id=job_id,
             fetched_at=document.fetched_at,
             active=False,
@@ -105,11 +107,19 @@ class OntologyRepository:
                 "obsolete": term.obsolete,
                 "replaced_by": list(term.replaced_by),
                 "consider": list(term.consider),
+                "subsets": list(term.subsets),
             }
             for term in sorted(snapshot.terms.values(), key=lambda value: value.term_id)
         )
         for batch in batched(term_rows, _INSERT_BATCH_SIZE, strict=False):
             self.session.execute(insert(OntologyTermRecord), batch)
+
+        alt_id_rows = (
+            {"version_id": record.version_id, "alt_id": alt_id, "term_id": term_id}
+            for alt_id, term_id in sorted(snapshot.alt_ids.items())
+        )
+        for batch in batched(alt_id_rows, _INSERT_BATCH_SIZE, strict=False):
+            self.session.execute(insert(OntologyAltIdRecord), batch)
 
         closure_values = (
             {
@@ -181,28 +191,39 @@ class OntologyRepository:
             )
         return candidate, active
 
-    def get_active(self, key: OntologyKey) -> OntologyMetadataRecord | None:
+    def get_active(self, key: str) -> OntologyMetadataRecord | None:
         """Return the active snapshot for an ontology key."""
         return self.session.scalar(
             select(OntologyMetadataRecord).where(
-                OntologyMetadataRecord.ontology_key == key.value,
+                OntologyMetadataRecord.ontology_key == key,
                 OntologyMetadataRecord.active.is_(True),
             )
         )
 
-    def matches_active_source(self, document: OntologyDocument) -> bool:
-        """Return whether source details and checksum match the active snapshot."""
+    def matches_active_source(
+        self, document: OntologyDocument, definition: OntologyDefinition
+    ) -> bool:
+        """Return whether the active snapshot came from this document and definition.
+
+        The source details, checksum, identifier prefixes, and closure predicates
+        must all match. A changed definition therefore loads an unchanged file
+        again.
+        """
         active = self.get_active(document.ontology_key)
         return active is not None and (
             active.source_type,
             active.source_locator,
             active.source_revision,
             active.source_checksum,
+            sorted(active.identifier_prefixes),
+            sorted(active.loaded_predicates),
         ) == (
             document.source_type,
             document.source_locator,
             document.source_revision,
             document.source_checksum,
+            sorted(definition.identifier_prefixes),
+            sorted(definition.closure_predicates),
         )
 
     def activate(self, version_id: UUID) -> OntologyMetadataRecord:
@@ -228,9 +249,7 @@ class OntologyRepository:
         record.refresh_result = result
         self.session.flush([record])
 
-    def prune_candidates(
-        self, key: OntologyKey, pruned_at: datetime
-    ) -> tuple[UUID, ...]:
+    def prune_candidates(self, key: str, pruned_at: datetime) -> tuple[UUID, ...]:
         """Delete term and closure rows for snapshots outside the retention set.
 
         The active snapshot, newest successfully activated predecessor, and snapshots
@@ -249,7 +268,7 @@ class OntologyRepository:
                 select(OntologyMetadataRecord, JobRecord.status)
                 .join(JobRecord, JobRecord.job_id == OntologyMetadataRecord.job_id)
                 .where(
-                    OntologyMetadataRecord.ontology_key == key.value,
+                    OntologyMetadataRecord.ontology_key == key,
                     OntologyMetadataRecord.bulk_data_pruned_at.is_(None),
                 )
                 .order_by(OntologyMetadataRecord.staging_sequence)

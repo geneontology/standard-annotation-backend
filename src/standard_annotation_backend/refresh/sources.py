@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 
 import yaml
 from pydantic import (
+    AfterValidator,
     AnyHttpUrl,
     BaseModel,
     ConfigDict,
@@ -24,7 +25,12 @@ from pydantic import (
     field_validator,
 )
 
-from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
+    REQUIRED_GO_SUBSETS,
+    SUBCLASS_PREDICATE,
+    OntologyDefinition,
+)
 from standard_annotation_backend.domain.refresh import (
     AUTHORIZATION_SOURCE_KEY,
     SOURCE_KEY_PATTERN,
@@ -34,6 +40,32 @@ from standard_annotation_backend.domain.refresh import (
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 SourceKey = Annotated[str, StringConstraints(pattern=SOURCE_KEY_PATTERN)]
+
+OntologyPrefix = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_]*$")]
+"""An identifier prefix that an ontology owns, such as `GO` or `NCBITaxon`."""
+
+
+def _without_repeats(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Reject a list that names the same value more than once."""
+    if len(set(values)) != len(values):
+        raise ValueError("must not list the same value twice")
+    return values
+
+
+OntologyPrefixes = Annotated[
+    tuple[OntologyPrefix, ...], Field(min_length=1), AfterValidator(_without_repeats)
+]
+"""The identifier prefixes an ontology owns; at least one, none repeated."""
+
+ClosurePredicates = Annotated[
+    tuple[TrimmedNonBlankString, ...], AfterValidator(_without_repeats)
+]
+"""The relationships whose closure SABE computes for an ontology; none repeated."""
+
+RequiredSubsets = Annotated[
+    tuple[TrimmedNonBlankString, ...], AfterValidator(_without_repeats)
+]
+"""The subsets an ontology's file must declare; none repeated."""
 
 _GITHUB_PATH_SEGMENT_CHARACTERS = frozenset(
     string.ascii_letters + string.digits + "._-"
@@ -130,7 +162,48 @@ class HttpsAnnotationSource(HttpsSource):
     format: Literal["gpad"] = "gpad"
 
 
+class GitHubOntologySource(GitHubSource):
+    """Configure an OBO ontology stored in GitHub.
+
+    Attributes:
+        document_ontology_id: The `ontology:` header value the file must declare,
+            such as `go` or `cl/cl-basic`.
+        prefixes: Identifier prefixes the ontology owns, such as `GO`.
+        closure_predicates: Relationships whose closure SABE computes, such as
+            `rdfs:subClassOf`. Omit them to load the ontology as a term list.
+        required_subsets: Subsets the file must declare, such as
+            `gocheck_do_not_annotate`. A file that lacks one is refused.
+    """
+
+    document_ontology_id: TrimmedNonBlankString
+    prefixes: OntologyPrefixes
+    closure_predicates: ClosurePredicates = ()
+    required_subsets: RequiredSubsets = ()
+
+
+class HttpsOntologySource(HttpsSource):
+    """Configure an OBO ontology published over HTTPS.
+
+    Attributes:
+        document_ontology_id: The `ontology:` header value the file must declare,
+            such as `go` or `cl/cl-basic`.
+        prefixes: Identifier prefixes the ontology owns, such as `GO`.
+        closure_predicates: Relationships whose closure SABE computes, such as
+            `rdfs:subClassOf`. Omit them to load the ontology as a term list.
+        required_subsets: Subsets the file must declare, such as
+            `gocheck_do_not_annotate`. A file that lacks one is refused.
+    """
+
+    document_ontology_id: TrimmedNonBlankString
+    prefixes: OntologyPrefixes
+    closure_predicates: ClosurePredicates = ()
+    required_subsets: RequiredSubsets = ()
+
+
 SourceSpec = Annotated[GitHubSource | HttpsSource, Field(discriminator="type")]
+OntologySourceSpec = Annotated[
+    GitHubOntologySource | HttpsOntologySource, Field(discriminator="type")
+]
 EntitySourceSpec = Annotated[
     GitHubEntitySource | HttpsEntitySource, Field(discriminator="type")
 ]
@@ -144,7 +217,8 @@ class SourcesFile(BaseModel):
 
     Attributes:
         authorization: The single go-site `users.yaml` source.
-        ontologies: Ontology sources keyed by ontology. GO is required.
+        ontologies: Ontology sources keyed by ontology, each saying how to read its
+            file. GO is required.
         entities: Entity sources keyed by stable source key. Keys are stored with
             published catalogs, so renaming a key retires the old catalog.
         annotations: GPAD annotation sources keyed by stable source key. No two
@@ -154,7 +228,7 @@ class SourcesFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     authorization: SourceSpec
-    ontologies: dict[OntologyKey, SourceSpec]
+    ontologies: dict[SourceKey, OntologySourceSpec]
     entities: dict[SourceKey, EntitySourceSpec] = Field(default_factory=dict)
     annotations: dict[SourceKey, AnnotationSourceSpec] = Field(default_factory=dict)
 
@@ -166,12 +240,49 @@ class SourcesFile(BaseModel):
 
     @field_validator("ontologies")
     @classmethod
-    def require_go(
-        cls, value: dict[OntologyKey, GitHubSource | HttpsSource]
-    ) -> dict[OntologyKey, GitHubSource | HttpsSource]:
-        """Require a GO source, because every SABE deployment refreshes GO."""
-        if OntologyKey.GO not in value:
+    def require_go_with_what_go_rules_use(
+        cls, value: dict[str, GitHubOntologySource | HttpsOntologySource]
+    ) -> dict[str, GitHubOntologySource | HttpsOntologySource]:
+        """Require GO with subclass closure and the subsets GO Rules check.
+
+        GO Rules and closure search depend on them, so a GO entry without them
+        would let those checks silently stop working.
+        """
+        go = value.get(GO_ONTOLOGY_KEY)
+        if go is None:
             raise ValueError("must configure the GO ontology")
+        if SUBCLASS_PREDICATE not in go.closure_predicates:
+            raise ValueError(
+                f"the GO ontology must list {SUBCLASS_PREDICATE} in closure_predicates"
+            )
+        missing = [
+            subset
+            for subset in REQUIRED_GO_SUBSETS
+            if subset not in go.required_subsets
+        ]
+        if missing:
+            raise ValueError(
+                "the GO ontology must list these in required_subsets: "
+                + ", ".join(missing)
+            )
+        return value
+
+    @field_validator("ontologies")
+    @classmethod
+    def require_one_ontology_per_prefix(
+        cls, value: dict[str, GitHubOntologySource | HttpsOntologySource]
+    ) -> dict[str, GitHubOntologySource | HttpsOntologySource]:
+        """Reject a prefix claimed twice, so each identifier has one ontology."""
+        owners: dict[str, list[str]] = {}
+        for key, source in value.items():
+            for prefix in source.prefixes:
+                owners.setdefault(prefix, []).append(key)
+        shared = sorted(prefix for prefix, keys in owners.items() if len(keys) > 1)
+        if shared:
+            raise ValueError(
+                "each identifier prefix may belong to only one ontology: "
+                + ", ".join(shared)
+            )
         return value
 
     @field_validator("annotations")
@@ -217,14 +328,22 @@ class RefreshSources:
             RefreshKindName.AUTHORIZATION: {
                 AUTHORIZATION_SOURCE_KEY: file.authorization
             },
-            RefreshKindName.ONTOLOGY: {
-                key.value: source for key, source in file.ontologies.items()
-            },
+            RefreshKindName.ONTOLOGY: dict(file.ontologies),
             RefreshKindName.ENTITY: dict(file.entities),
             RefreshKindName.ANNOTATION: dict(file.annotations),
         }
         self._annotation_groups = {
             key: source.group for key, source in file.annotations.items()
+        }
+        self._ontology_definitions = {
+            key: OntologyDefinition(
+                key=key,
+                identifier_prefixes=source.prefixes,
+                closure_predicates=source.closure_predicates,
+                document_ontology_id=source.document_ontology_id,
+                required_subsets=source.required_subsets,
+            )
+            for key, source in file.ontologies.items()
         }
 
     def sources(
@@ -258,6 +377,17 @@ class RefreshSources:
         if group is None:
             raise UnknownSourceError(RefreshKindName.ANNOTATION, key)
         return group
+
+    def ontology_definition(self, key: str) -> OntologyDefinition:
+        """Return how to read one configured ontology's file.
+
+        Raises:
+            UnknownSourceError: If `key` is not a configured ontology.
+        """
+        definition = self._ontology_definitions.get(key)
+        if definition is None:
+            raise UnknownSourceError(RefreshKindName.ONTOLOGY, key)
+        return definition
 
 
 def _is_github_path_segment(value: str) -> bool:

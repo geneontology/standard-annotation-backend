@@ -7,19 +7,20 @@ from pathlib import Path
 import pytest
 
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyDefinition,
     OntologyDocument,
     OntologyEdge,
-    OntologyKey,
     OntologyParseError,
 )
 from standard_annotation_backend.ontology.obo_parser import parse_obo
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "ontology"
 GO_DEFINITION = OntologyDefinition(
-    key=OntologyKey.GO,
+    key=GO_ONTOLOGY_KEY,
     identifier_prefixes=("GO",),
     closure_predicates=("rdfs:subClassOf", "BFO:0000050"),
+    document_ontology_id="go",
 )
 
 
@@ -27,7 +28,7 @@ def _document(name: str, *, content: bytes | None = None) -> OntologyDocument:
     """Build one immutable source document from a checked-in fixture."""
     raw = (FIXTURES / name).read_bytes() if content is None else content
     return OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=raw,
         source_type="test",
         source_locator=f"fixture:{name}",
@@ -89,9 +90,10 @@ xref: BFO:0000050
 xref: RO:0002211
 """
     definition = OntologyDefinition(
-        key=OntologyKey.GO,
+        key=GO_ONTOLOGY_KEY,
         identifier_prefixes=("GO",),
         closure_predicates=("BFO:0000050", "RO:0002211"),
+        document_ontology_id="go",
     )
 
     with pytest.raises(OntologyParseError, match="typedef part_of maps to multiple"):
@@ -132,23 +134,6 @@ def test_parse_obo_rejects_an_undefined_edge_target() -> None:
         parse_obo(_document("invalid-reference.obo"), GO_DEFINITION)
 
 
-def test_parse_obo_rejects_an_undefined_replacement_target() -> None:
-    """Replacement metadata must point to a term in the same snapshot."""
-    content = b"""\
-format-version: 1.4
-ontology: go
-
-[Term]
-id: GO:0000001
-name: obsolete
-is_obsolete: true
-replaced_by: GO:9999999
-"""
-
-    with pytest.raises(OntologyParseError, match="undefined term GO:9999999"):
-        parse_obo(_document("replacement.obo", content=content), GO_DEFINITION)
-
-
 def test_parse_obo_retains_an_undefined_consider_target() -> None:
     """Advisory `consider` identifiers need not name terms in the snapshot."""
     content = b"""\
@@ -184,7 +169,7 @@ def test_parse_obo_translates_third_party_syntax_failures() -> None:
         ),
         (
             b"format-version: 1.4\nontology: go\n\n[Term]\nid: CL:0000001\n",
-            "unexpected identifier CL:0000001",
+            "contains no terms",
         ),
         (
             b"format-version: 1.4\nontology: go\n\n[Term]\nid: GO:0000001\n\n[Term]\nid: GO:0000001\n",
@@ -200,8 +185,64 @@ def test_parse_obo_rejects_wrong_or_incomplete_ontology_content(
         parse_obo(_document("identity.obo", content=content), GO_DEFINITION)
 
 
-def test_parse_obo_rejects_an_obsolete_replacement_target() -> None:
-    """Automatic replacement targets must be current terms in the snapshot."""
+def test_parse_obo_ignores_terms_with_prefixes_the_ontology_does_not_own() -> None:
+    """Terms from other ontologies in the same file are not loaded."""
+    content = b"""\
+format-version: 1.4
+ontology: go
+
+[Term]
+id: GO:0000001
+
+[Term]
+id: CL:0000001
+is_a: GO:0000001
+"""
+
+    snapshot = parse_obo(_document("foreign.obo", content=content), GO_DEFINITION)
+
+    assert set(snapshot.terms) == {"GO:0000001"}
+    assert snapshot.edges == ()
+
+
+def test_parse_obo_loads_a_file_whose_unread_clauses_are_malformed() -> None:
+    """A malformed `def:` or `xref:` does not stop a file from loading.
+
+    `[Typedef]` frames are kept, so relation aliases still map to closure
+    predicates.
+    """
+    content = b"""\
+format-version: 1.4
+ontology: go
+
+[Term]
+id: GO:0000001
+def: "A test." [PMID: 1]
+xref: http://example.org/wiki/Category\\:Test
+
+[Term]
+id: GO:0000002
+relationship: part_of GO:0000001
+
+[Typedef]
+id: part_of
+xref: BFO:0000050
+"""
+
+    snapshot = parse_obo(_document("unread.obo", content=content), GO_DEFINITION)
+
+    assert set(snapshot.terms) == {"GO:0000001", "GO:0000002"}
+    assert snapshot.edges == (
+        OntologyEdge(
+            subject_term_id="GO:0000002",
+            predicate_id="BFO:0000050",
+            object_term_id="GO:0000001",
+        ),
+    )
+
+
+def test_parse_obo_keeps_replacement_suggestions_as_published() -> None:
+    """A replacement may be obsolete or belong to another ontology."""
     content = b"""\
 format-version: 1.4
 ontology: go
@@ -214,7 +255,72 @@ replaced_by: GO:0000002
 [Term]
 id: GO:0000002
 is_obsolete: true
+replaced_by: CL:0000001
 """
 
-    with pytest.raises(OntologyParseError, match="replacement target GO:0000002"):
-        parse_obo(_document("obsolete-target.obo", content=content), GO_DEFINITION)
+    snapshot = parse_obo(_document("chain.obo", content=content), GO_DEFINITION)
+
+    assert snapshot.terms["GO:0000001"].replaced_by == ("GO:0000002",)
+    assert snapshot.terms["GO:0000002"].replaced_by == ("CL:0000001",)
+
+
+def test_parse_obo_records_alternative_identifiers_that_name_one_term() -> None:
+    """An alternative identifier is recorded only when it names exactly one term.
+
+    Identifiers with another prefix, identifiers that are also terms, and
+    identifiers claimed by two terms are left out.
+    """
+    content = b"""\
+format-version: 1.4
+ontology: go
+
+[Term]
+id: GO:0000001
+alt_id: GO:0000009
+alt_id: BS:0000001
+
+[Term]
+id: GO:0000002
+alt_id: GO:0000003
+
+[Term]
+id: GO:0000003
+
+[Term]
+id: GO:0000004
+alt_id: GO:0000008
+
+[Term]
+id: GO:0000005
+alt_id: GO:0000008
+"""
+
+    snapshot = parse_obo(_document("alt-ids.obo", content=content), GO_DEFINITION)
+
+    assert dict(snapshot.alt_ids) == {"GO:0000009": "GO:0000001"}
+
+
+def test_parse_obo_reads_term_subsets_and_declared_subsets() -> None:
+    """Each term's subsets and the subsets the header declares are read."""
+    content = b"""\
+format-version: 1.4
+ontology: go
+subsetdef: gocheck_do_not_annotate "Term not to be used for direct annotation"
+
+[Term]
+id: GO:0000001
+subset: goslim_generic
+subset: gocheck_do_not_annotate
+
+[Term]
+id: GO:0000002
+"""
+
+    snapshot = parse_obo(_document("subsets.obo", content=content), GO_DEFINITION)
+
+    assert snapshot.terms["GO:0000001"].subsets == (
+        "gocheck_do_not_annotate",
+        "goslim_generic",
+    )
+    assert snapshot.terms["GO:0000002"].subsets == ()
+    assert snapshot.declared_subsets == frozenset({"gocheck_do_not_annotate"})

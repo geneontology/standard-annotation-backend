@@ -24,7 +24,7 @@ from standard_annotation_backend.domain.auth import (
     authorize_role,
     derive_creation_group,
 )
-from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.domain.validation import validate_annotation
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
@@ -313,7 +313,7 @@ class AnnotationService:
         scope = ownership_scope(context)
         with self._unit_of_work_factory() as unit_of_work:
             if criteria.ontology_class_id_closure is not None:
-                active = unit_of_work.ontologies.get_active(OntologyKey.GO)
+                active = unit_of_work.ontologies.get_active(GO_ONTOLOGY_KEY)
                 if active is None:
                     raise OntologyUnavailableError
                 if criteria.ontology_class_id_closure not in active.loaded_predicates:

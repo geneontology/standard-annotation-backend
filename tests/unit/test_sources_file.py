@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from standard_annotation_backend.domain.ontology import OntologyDefinition
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     UnknownSourceError,
@@ -33,6 +34,16 @@ GO = {
     "repository": "geneontology/go-ontology",
     "ref": "master",
     "path": "src/ontology/go-edit.obo",
+    "document_ontology_id": "go",
+    "prefixes": ["GO"],
+    "closure_predicates": ["rdfs:subClassOf", "BFO:0000050"],
+    "required_subsets": ["gocheck_do_not_annotate", "gocheck_obsoletion_candidate"],
+}
+CL = {
+    "type": "https",
+    "url": "https://example.org/cl-basic.obo",
+    "document_ontology_id": "cl/cl-basic",
+    "prefixes": ["CL"],
 }
 
 
@@ -42,11 +53,26 @@ def _file(**sections: object) -> dict[str, object]:
 
 
 def test_shipped_sources_file_is_valid() -> None:
-    """The committed sources file is valid."""
+    """The committed sources file is valid and configures every needed ontology."""
     sources = RefreshSources(load_sources_file(SHIPPED_FILE))
 
     assert sources.keys(RefreshKindName.AUTHORIZATION) == ("go-site",)
-    assert sources.keys(RefreshKindName.ONTOLOGY) == ("go",)
+    assert sources.keys(RefreshKindName.ONTOLOGY) == (
+        "chebi",
+        "cl",
+        "emapa",
+        "fbbt",
+        "go",
+        "ncbitaxon",
+        "pr",
+        "so",
+        "uberon",
+        "wbbt",
+        "wbls",
+        "xao",
+        "zfa",
+    )
+    assert sources.ontology_definition("go").document_ontology_id == "go"
 
 
 def test_any_kind_may_use_either_source_type() -> None:
@@ -76,6 +102,84 @@ def test_any_kind_may_use_either_source_type() -> None:
     assert isinstance(mgi, GitHubEntitySource) and mgi.format == "gpi"
     assert isinstance(rgd, HttpsEntitySource) and rgd.format == "gpi"
     assert isinstance(sources.source(RefreshKindName.ONTOLOGY, "go"), GitHubSource)
+
+
+def test_each_ontology_is_read_as_its_entry_describes() -> None:
+    """An ontology entry sets the header to expect, the prefixes, and the closure."""
+    sources = RefreshSources(
+        SourcesFile.model_validate(_file(ontologies={"go": GO, "cl": CL}))
+    )
+
+    assert sources.ontology_definition("cl") == OntologyDefinition(
+        key="cl",
+        identifier_prefixes=("CL",),
+        closure_predicates=(),
+        document_ontology_id="cl/cl-basic",
+    )
+    assert sources.ontology_definition("go").closure_predicates == (
+        "rdfs:subClassOf",
+        "BFO:0000050",
+    )
+
+
+def test_an_unconfigured_ontology_has_no_definition() -> None:
+    """Asking how to read an ontology the file does not configure fails."""
+    sources = RefreshSources(SourcesFile.model_validate(_file()))
+
+    with pytest.raises(UnknownSourceError):
+        sources.ontology_definition("cl")
+
+
+@pytest.mark.parametrize(
+    "ontologies",
+    [
+        {"cl": CL},
+        {"go": {**GO, "closure_predicates": ["BFO:0000050"]}},
+        {"go": {**GO, "required_subsets": ["gocheck_do_not_annotate"]}},
+        {"go": GO, "cl": {**CL, "prefixes": []}},
+        {"go": GO, "cl": {**CL, "prefixes": ["GO"]}},
+        {
+            "go": {
+                key: value for key, value in GO.items() if key != "document_ontology_id"
+            }
+        },
+    ],
+    ids=[
+        "no-go",
+        "go-without-subclass-closure",
+        "go-without-rule-subsets",
+        "no-prefixes",
+        "shared-prefix",
+        "no-expected-header",
+    ],
+)
+def test_ontology_entries_sabe_cannot_rely_on_are_rejected(
+    ontologies: dict[str, object],
+) -> None:
+    """Entries that would leave GO or an identifier prefix unusable are rejected.
+
+    GO needs subclass closure and the subsets GO Rules check, and every prefix
+    needs exactly one ontology.
+    """
+    with pytest.raises(ValidationError):
+        SourcesFile.model_validate(_file(ontologies=ontologies))
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {**CL, "prefixes": ["CL", "CL"]},
+        {**CL, "closure_predicates": ["rdfs:subClassOf", "rdfs:subClassOf"]},
+        {**CL, "required_subsets": ["cellxgene_subset", "cellxgene_subset"]},
+    ],
+    ids=["repeated-prefix", "repeated-closure-predicate", "repeated-required-subset"],
+)
+def test_an_ontology_entry_may_not_repeat_a_value(
+    entry: dict[str, object],
+) -> None:
+    """A value listed twice in one ontology entry is rejected at startup."""
+    with pytest.raises(ValidationError, match="the same value twice"):
+        SourcesFile.model_validate(_file(ontologies={"go": GO, "cl": entry}))
 
 
 @pytest.mark.parametrize("section", ["ontologies", "entities"])

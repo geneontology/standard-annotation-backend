@@ -7,9 +7,9 @@ from refresh_helpers import start_job
 
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyCandidateConflictError,
     OntologyDocument,
-    OntologyKey,
     OntologySnapshot,
     OntologyTerm,
     compute_closure,
@@ -23,7 +23,7 @@ def _document(
     revision: str, checksum: str, *, fetched_at: datetime
 ) -> OntologyDocument:
     return OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=revision.encode(),
         source_type="test",
         source_locator="fixture/go.obo",
@@ -135,6 +135,6 @@ def test_older_staged_job_cannot_replace_a_newer_active_snapshot(
         uow.ontologies.lock_activation_state(older_job.job_id)
 
     with unit_of_work_factory() as uow:
-        active = uow.ontologies.get_active(OntologyKey.GO)
+        active = uow.ontologies.get_active(GO_ONTOLOGY_KEY)
         assert active is not None
         assert active.source_revision == "newer"

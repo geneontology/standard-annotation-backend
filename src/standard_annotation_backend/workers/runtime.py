@@ -70,7 +70,9 @@ def create_refresh_runner(
     jobs = JobService(unit_of_work_factory)
     authorization = AuthorizationRefreshService(unit_of_work_factory)
     entity = EntityRefreshService(unit_of_work_factory, sources)
-    ontology = OntologyRefreshService(unit_of_work_factory, try_lock, enqueue_prune)
+    ontology = OntologyRefreshService(
+        unit_of_work_factory, sources, try_lock, enqueue_prune
+    )
     annotation = AnnotationRefreshService(unit_of_work_factory, sources, try_lock)
     return RefreshComponents(
         ontology=ontology,

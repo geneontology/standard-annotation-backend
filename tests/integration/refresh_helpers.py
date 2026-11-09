@@ -44,10 +44,23 @@ TEST_ANNOTATION_SOURCES: dict[str, object] = {
 }
 
 
+GO_ENTRY: dict[str, object] = {
+    "type": "github",
+    "repository": "geneontology/go-ontology",
+    "ref": "master",
+    "path": "src/ontology/go-edit.obo",
+    "document_ontology_id": "go",
+    "prefixes": ["GO"],
+    "closure_predicates": ["rdfs:subClassOf", "BFO:0000050"],
+    "required_subsets": ["gocheck_do_not_annotate", "gocheck_obsoletion_candidate"],
+}
+
+
 def sources_with(
     *,
     entities: dict[str, object] | None = None,
     annotations: dict[str, object] | None = None,
+    ontologies: dict[str, object] | None = None,
 ) -> RefreshSources:
     """Return test sources with the standard authorization and GO entries.
 
@@ -55,6 +68,7 @@ def sources_with(
         entities: The `entities` section of the sources file; empty if omitted.
         annotations: The `annotations` section of the sources file; empty if
             omitted.
+        ontologies: Ontology entries to configure in addition to GO.
     """
     return RefreshSources(
         SourcesFile.model_validate(
@@ -65,14 +79,7 @@ def sources_with(
                     "ref": "master",
                     "path": "metadata/users.yaml",
                 },
-                "ontologies": {
-                    "go": {
-                        "type": "github",
-                        "repository": "geneontology/go-ontology",
-                        "ref": "master",
-                        "path": "src/ontology/go-edit.obo",
-                    }
-                },
+                "ontologies": {"go": GO_ENTRY, **(ontologies or {})},
                 "entities": entities or {},
                 "annotations": annotations or {},
             }
@@ -192,6 +199,8 @@ def obo(*terms: OboTerm, data_version: str = "releases/2026-09-28") -> bytes:
         "format-version: 1.4",
         f"data-version: {data_version}",
         "ontology: go",
+        'subsetdef: gocheck_do_not_annotate "Term not to be used for direct annotation"',
+        'subsetdef: gocheck_obsoletion_candidate "Terms planned for obsoletion"',
         "",
     ]
     for term in terms:

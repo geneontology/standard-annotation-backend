@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     RefreshKindName,
@@ -397,7 +397,7 @@ def test_ontology_refresh_waits_for_the_ontology_lock_by_retrying(
     job_id = _job(unit_of_work_factory, CASES["ontology"])
 
     with try_advisory_lock(
-        database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+        database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
     ) as acquired:
         assert acquired
         with (
@@ -538,7 +538,7 @@ def test_in_process_pruning_is_skipped_while_the_ontology_lock_is_held(
     )
 
     with try_advisory_lock(
-        database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+        database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
     ) as acquired:
         assert acquired
         components.ontology.after_terminal("go")
@@ -628,7 +628,7 @@ def test_document_activated_while_waiting_for_the_lock_reports_unchanged(
         return bound(namespace, value)
 
     service = OntologyRefreshService(
-        unit_of_work_factory, try_lock_after_the_other_job, None
+        unit_of_work_factory, TEST_SOURCES, try_lock_after_the_other_job, None
     )
     document = FakeFetchers({"go": content}).fetch(
         "go", TEST_SOURCES.source(RefreshKindName.ONTOLOGY, "go")

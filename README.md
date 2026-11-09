@@ -62,12 +62,12 @@ just down
 
 ## Refresh reference data
 
-SABE keeps four kinds of reference data current: authorization (go-site
-`users.yaml`), ontologies (GO), entity catalogs (GPI files), and group annotations
-(GPAD files). Their sources are
-configured in `config/sources.yaml`. `SABE_SOURCES_FILE` can be used to point to a
-different file. Each entry is a `github` source (`repository`, `ref`, `path`) or an
-`https` source (`url`).
+SABE keeps four kinds of reference data current: authorization (go-site `users.yaml`),
+ontologies (GO, NCBITaxon, and the ontologies used in annotation extensions), entity
+catalogs (GPI files), and group annotations (GPAD files). Their sources are configured
+in `config/sources.yaml`. `SABE_SOURCES_FILE` can be used to point to a different file.
+Each entry is a `github` source (`repository`, `ref`, `path`) or an `https` source
+(`url`).
 
 After setup, load authorization into the local database so you can sign in and create
 tokens:

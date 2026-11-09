@@ -541,6 +541,12 @@ class OntologyMetadataRecord(Base):
             name="loaded_predicates_string_array",
         ),
         CheckConstraint(
+            "jsonb_typeof(identifier_prefixes) = 'array' AND NOT "
+            "jsonb_path_exists(identifier_prefixes, "
+            "'$[*] ? (@.type() != \"string\")')",
+            name="identifier_prefixes_string_array",
+        ),
+        CheckConstraint(
             "NOT active OR bulk_data_pruned_at IS NULL",
             name="active_bulk_data_complete",
         ),
@@ -571,6 +577,7 @@ class OntologyMetadataRecord(Base):
     source_checksum: Mapped[str] = mapped_column(String(64))
     document_version: Mapped[str | None] = mapped_column(Text)
     loaded_predicates: Mapped[list[str]] = mapped_column(JSONB)
+    identifier_prefixes: Mapped[list[str]] = mapped_column(JSONB)
     refresh_result: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     job_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
@@ -585,7 +592,7 @@ class OntologyMetadataRecord(Base):
 
 
 class OntologyTermRecord(Base):
-    """Store one term, its obsolete status, and its replacement suggestions."""
+    """Store one term, its obsolete status, replacement suggestions, and subsets."""
 
     __tablename__ = "ontology_term"
     __table_args__ = (
@@ -599,6 +606,11 @@ class OntologyTermRecord(Base):
             "jsonb_path_exists(consider, '$[*] ? (@.type() != \"string\")')",
             name="consider_string_array",
         ),
+        CheckConstraint(
+            "jsonb_typeof(subsets) = 'array' AND NOT "
+            "jsonb_path_exists(subsets, '$[*] ? (@.type() != \"string\")')",
+            name="subsets_string_array",
+        ),
     )
 
     version_id: Mapped[UUID] = mapped_column(
@@ -610,6 +622,34 @@ class OntologyTermRecord(Base):
     obsolete: Mapped[bool] = mapped_column(Boolean)
     replaced_by: Mapped[list[str]] = mapped_column(JSONB)
     consider: Mapped[list[str]] = mapped_column(JSONB)
+    subsets: Mapped[list[str]] = mapped_column(JSONB)
+
+
+class OntologyAltIdRecord(Base):
+    """Map one alternative identifier to the term it names in a snapshot.
+
+    Ontologies keep the identifiers of merged terms as alternative identifiers
+    (`alt_id` in OBO). An annotation that uses one should use the primary term
+    instead. Deleting a snapshot's terms deletes its alternative identifiers.
+    """
+
+    __tablename__ = "ontology_alt_id"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["version_id", "term_id"],
+            ["ontology_term.version_id", "ontology_term.term_id"],
+            ondelete="CASCADE",
+        ),
+        # Deleting a term looks up its alternative identifiers by term, so pruning
+        # a snapshot does not scan every alternative identifier for each term.
+        Index("ix_ontology_alt_id_term", "version_id", "term_id"),
+    )
+
+    version_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    alt_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    term_id: Mapped[str] = mapped_column(Text)
 
 
 class OntologyClosureRecord(Base):

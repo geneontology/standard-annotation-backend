@@ -3,7 +3,14 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from refresh_helpers import OboTerm, go_document, ignore_progress, obo, start_job
+from refresh_helpers import (
+    TEST_SOURCES,
+    OboTerm,
+    go_document,
+    ignore_progress,
+    obo,
+    start_job,
+)
 from seeding import insert_annotation
 from sqlalchemy import Engine
 
@@ -14,8 +21,8 @@ from standard_annotation_backend.domain.annotations import (
 )
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyDocument,
-    OntologyKey,
     OntologySnapshot,
     OntologyTerm,
 )
@@ -33,7 +40,7 @@ TERM_X = "GO:0000004"
 
 def _old_snapshot(terms: dict[str, OntologyTerm]) -> OntologySnapshot:
     document = OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=b"old",
         source_type="test",
         source_locator="fixture/go.obo",
@@ -119,7 +126,7 @@ def test_replacements_that_would_duplicate_each_other_are_both_skipped(
     )
     job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
     service = OntologyRefreshService(
-        unit_of_work_factory, bind_try_lock(database_engine), None
+        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
     )
 
     outcome = service.apply(job, go_document(candidate), ignore_progress)

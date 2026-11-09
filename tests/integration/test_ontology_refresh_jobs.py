@@ -35,6 +35,23 @@ from standard_annotation_backend.workers.tasks import (
 )
 
 SHA = "a" * 40
+WORKER_SOURCES = """\
+authorization:
+  type: github
+  repository: geneontology/go-site
+  ref: master
+  path: metadata/users.yaml
+ontologies:
+  go:
+    type: github
+    repository: geneontology/go-ontology
+    ref: master
+    path: src/ontology/go-edit.obo
+    document_ontology_id: go
+    prefixes: [GO]
+    closure_predicates: [rdfs:subClassOf, BFO:0000050]
+    required_subsets: [gocheck_do_not_annotate, gocheck_obsoletion_candidate]
+"""
 OBO = (
     Path(__file__).parents[1] / "fixtures" / "ontology" / "minimal-go.obo"
 ).read_bytes()
@@ -44,9 +61,18 @@ OBO = (
 def ontology_worker_environment(
     configured_environment: None,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> Iterator[None]:
-    """Point worker-created engines at the guarded disposable test database."""
+    """Point worker-created engines at the guarded disposable test database.
+
+    Workers read a sources file whose only ontology is GO from GitHub, so the fake
+    GitHub responses below answer every request, whatever `config/sources.yaml`
+    configures.
+    """
+    sources_file = tmp_path / "sources.yaml"
+    sources_file.write_text(WORKER_SOURCES, encoding="utf-8")
     monkeypatch.setenv("SABE_DATABASE_URL", os.environ["SABE_TEST_DATABASE_URL"])
+    monkeypatch.setenv("SABE_SOURCES_FILE", str(sources_file))
     get_settings.cache_clear()
     try:
         yield
@@ -245,6 +271,8 @@ def test_worker_reports_an_undefined_consider_target_as_a_warning(
     content = b"""\
 format-version: 1.4
 ontology: go
+subsetdef: gocheck_do_not_annotate "Term not to be used for direct annotation"
+subsetdef: gocheck_obsoletion_candidate "Terms planned for obsoletion"
 
 [Term]
 id: GO:0000001
