@@ -3,6 +3,9 @@
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from go_standard_annotation_schema.datamodel.go_standard_annotation_schema import (
+    EvidenceType,
+)
 
 from standard_annotation_backend.domain.annotations import Annotation
 
@@ -94,6 +97,24 @@ def test_annotation_patch_request_accepts_every_annotation_field(
         Annotation.model_json_schema()["properties"]
     )
     assert "required" not in patch_schema
+
+
+def test_annotation_openapi_lists_allowed_evidence_terms_and_relations(
+    client: TestClient,
+) -> None:
+    """Clients can read the allowed evidence terms and relations from OpenAPI."""
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    annotation = schemas["Annotation"]["properties"]
+    extension = schemas["AnnotationExtension"]["properties"]
+
+    assert annotation["evidence_type"]["$ref"].endswith("/EvidenceType")
+    assert annotation["relation"]["$ref"].endswith("/GeneProductToGoTermRelation")
+    assert extension["extension_relation"]["$ref"].endswith(
+        "/AnnotationExtensionRelation"
+    )
+    assert set(schemas["EvidenceType"]["enum"]) == {
+        member.value for member in EvidenceType
+    }
 
 
 @pytest.mark.parametrize(

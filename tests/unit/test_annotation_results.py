@@ -58,7 +58,11 @@ def test_corrupt_stored_rejection_report_is_rejected(change: dict[str, object]) 
 
 
 def test_refresh_job_result_keeps_its_keys() -> None:
-    """The published-import job result flattens provenance and includes the rejection report."""
+    """A published import's job result lists every field at the top level.
+
+    Provenance is flattened, and the result includes the schema version the rows
+    were checked with and the rejection report.
+    """
     fetched = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
     job_id = UUID("00000000-0000-0000-0000-000000000003")
     result = AnnotationRefreshResult(
@@ -69,6 +73,7 @@ def test_refresh_job_result_keeps_its_keys() -> None:
         provenance=SourceProvenance(
             "https", "https://example.org/a.gpad", None, "b" * 64, fetched
         ),
+        schema_version="0.1.0",
         data_rows=4,
         annotations_published=2,
         records_rejected=2,
@@ -86,6 +91,7 @@ def test_refresh_job_result_keeps_its_keys() -> None:
         "source_revision": None,
         "source_checksum": "b" * 64,
         "fetched_at": "2026-01-02T03:04:05Z",
+        "schema_version": "0.1.0",
         "data_rows": 4,
         "annotations_published": 2,
         "records_rejected": 2,

@@ -62,11 +62,6 @@ def validate_annotation(payload: object) -> AnnotationValidationResult:
         A result containing either the validated annotation or structured
         validation errors. Each error location starts with `annotation`, such as
         `("annotation", "db_object_id")`.
-
-    Note:
-        Identifier formats declared as LinkML structured patterns are not fully
-        enforced until go-standard-annotation-schema is generated with
-        LinkML 1.12.0 or newer.
     """
     try:
         annotation = Annotation.model_validate(payload)

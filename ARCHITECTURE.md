@@ -857,14 +857,14 @@ refresh job fetches one source, records its provenance (type, locator, resolved
 revision, checksum, and fetch time), skips the source if that exact document is already
 active, and otherwise validates the document before any of it becomes active. Annotation
 refreshes qualify this in two ways. They skip only when the group also has no local
-changes and no earlier unknown-entity rejections, and an ordinary annotation refresh
-publishes the valid rows while reporting the rejected ones. Invalid documents and
-unreachable sources fail the job with a stable failure code and leave the previous data
-in place; the next scheduled refresh tries again. Jobs start from a schedule, a
-global-admin API request, or the
-`just refresh` CLI. All three reuse an unfinished job for the same source instead of
-creating another. The [refresh infrastructure guide](docs/refresh-infrastructure.md)
-shows how these pieces fit together in the code.
+changes, no earlier unknown-entity rejections, and no schema upgrade since its last
+import, and an ordinary annotation refresh publishes the valid rows while reporting
+the rejected ones. Invalid documents and unreachable sources fail the job with a stable
+failure code and leave the previous data in place; the next scheduled refresh tries
+again. Jobs start from a schedule, a global-admin API request, or the `just refresh`
+CLI. All three reuse an unfinished job for the same source instead of creating another.
+The [refresh infrastructure guide](docs/refresh-infrastructure.md) shows how these
+pieces fit together in the code.
 
 **Authorization.** The go-site `users.yaml` replaces SABE's users and grants as
 described under Authorization Model.
@@ -925,14 +925,20 @@ entity, because publication rechecks every staged identifier while holding membe
 locks. A cutover never skips as unchanged.
 
 An ordinary refresh skips as unchanged only when the file checksum matches the group's
-last published import, that import rejected no record as
+last published import, that import was validated with the running version of the
+`go-standard-annotation-schema` package, that import rejected no record as
 `unknown_db_object_id`, and nothing local has changed since: no annotation that is not
 an import from that job, no version above 1 (except automatic ontology term
 replacements, which are not local edits), no comment, and no change set for the group.
-The rejection condition lets a rerun admit annotations once their entity joins the
-catalog, even when the file bytes stay the same. Known limitation: when the file does
-change, the re-import restores any obsolete terms it contains until the next ontology
-activation replaces them.
+The version condition imports an unchanged file again after a schema upgrade, because
+its rows may validate differently. The rejection condition lets a rerun admit
+annotations once their entity joins the catalog, even when the file bytes stay the
+same. Known limitations: when the file does change, the re-import restores any obsolete
+terms it contains until the next ontology activation replaces them. After a schema
+upgrade, stored annotations that the new schema rejects cannot be loaded, which blocks
+reading them and ontology activation, until their group is imported again.
+SABE-managed groups are never re-imported, so such annotations in those groups must be
+corrected directly.
 
 If a job is redelivered after publication committed, it returns the stored result
 without fetching. Interrupted staging is discarded and staged again. Removing a source

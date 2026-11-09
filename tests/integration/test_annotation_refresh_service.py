@@ -27,6 +27,7 @@ from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
+from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
 from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import (
@@ -226,6 +227,7 @@ def test_refresh_publishes_valid_annotations_and_reports_rejected_records(
         "source_revision": None,
         "source_checksum": job.result["source_checksum"],
         "fetched_at": "2026-10-01T00:00:00Z",
+        "schema_version": SCHEMA_PACKAGE_VERSION,
         "data_rows": 3,
         "annotations_published": 2,
         "records_rejected": 2,
@@ -484,6 +486,33 @@ def test_identical_file_with_only_unreadable_rows_rejected_is_skipped(
     again = run(content)
     assert again.progress["unchanged"] is True
     assert again.result is not None and again.result["unchanged"] is True
+
+
+def test_identical_file_is_imported_again_after_a_schema_upgrade(
+    run: RunJob,
+    session_factory: sessionmaker[Session],
+    seed_active_subjects: Callable[..., None],
+) -> None:
+    """An unchanged file is imported again when its last import used another schema.
+
+    The installed schema version may accept different rows, so the refresh does not
+    skip the file. The new import records the installed version.
+    """
+    seed_active_subjects("UniProtKB:P12345")
+    first = run(GOOD)
+    with session_factory() as session:
+        session.execute(
+            update(AnnotationImportRecord)
+            .where(AnnotationImportRecord.job_id == first.job_id)
+            .values(schema_version="0.0.5")
+        )
+        session.commit()
+
+    again = run(GOOD)
+
+    assert again.progress["unchanged"] is False
+    assert again.result is not None and again.result["unchanged"] is False
+    assert again.result["schema_version"] == SCHEMA_PACKAGE_VERSION
 
 
 def test_identical_file_with_a_corrupt_stored_rejection_report_is_not_skipped(

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
 )
+from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
 from standard_annotation_backend.persistence.models import (
     AnnotationImportRecord,
     GroupAnnotationManagementRecord,
@@ -106,6 +107,7 @@ def seed_group_import(
                 annotations_staged=0,
                 records_rejected=0,
                 rejection_report={"issue_count": 0, "by_code": {}, "issues": []},
+                schema_version=SCHEMA_PACKAGE_VERSION,
                 staged_at=now,
                 published_at=now,
                 annotations_deleted=0,

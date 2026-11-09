@@ -157,6 +157,8 @@ class AnnotationRefreshResult:
         is_cutover: Whether the import was a cutover, which moved the group to
             SABE management.
         provenance: The exact source document that was imported.
+        schema_version: Version of the `go-standard-annotation-schema` package the
+            file's rows were checked with.
         data_rows: Number of GPAD data rows read, including rejected ones.
         annotations_published: Number of annotations the import published.
         records_rejected: Number of records that were not imported.
@@ -171,6 +173,7 @@ class AnnotationRefreshResult:
     import_job_id: UUID
     is_cutover: bool
     provenance: SourceProvenance
+    schema_version: str
     data_rows: Annotated[int, Field(ge=0)]
     annotations_published: Annotated[int, Field(ge=0)]
     records_rejected: Annotated[int, Field(ge=0)]
@@ -203,8 +206,8 @@ class AnnotationRefreshResult:
 class AnnotationRefreshUnchanged:
     """Describe a refresh that was skipped because nothing would change.
 
-    The fetched file matches the group's last import, and the group has not
-    changed since.
+    The fetched file matches the group's last import, that import was checked with
+    the installed schema package version, and the group has not changed since.
 
     Attributes:
         source_key: Configured annotation source.

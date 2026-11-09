@@ -70,6 +70,19 @@ def test_invalid_rows_become_rejections_in_line_order() -> None:
     assert all(len(rejection.reason) <= 200 for rejection in rejections)
 
 
+def test_row_with_a_non_default_evidence_term_is_rejected() -> None:
+    """A row whose evidence term is not one of the 26 default ECO terms is rejected.
+
+    The rejection names `evidence_type`, so the import report shows what to fix.
+    """
+    items = _items(HEADER + VALID.replace("ECO:0000314", "ECO:0006051") + "\n")
+
+    assert len(items) == 1
+    assert isinstance(items[0], AnnotationRejection)
+    assert (items[0].line_number, items[0].code) == (4, "validation")
+    assert items[0].reason.startswith("evidence_type:")
+
+
 def test_nul_data_line_is_rejected_and_nul_header_is_a_header_error() -> None:
     """A data line with NUL is one `syntax` rejection; a NUL header line fails."""
     items = _items(HEADER + VALID.replace("PMID:1", "PMID:\x001") + "\n")

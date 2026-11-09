@@ -917,6 +917,9 @@ class AnnotationImportRecord(Base):
     A row is written when a job finishes staging and is deleted if the job fails
     before publishing. Published rows are kept after later imports replace the
     group's annotations, as the lasting record of what each job imported.
+    `schema_version` is the `go-standard-annotation-schema` version the file's rows
+    were checked with. A refresh compares it with the installed version to decide
+    whether an unchanged file must be imported again.
     """
 
     __tablename__ = "annotation_import"
@@ -963,6 +966,7 @@ class AnnotationImportRecord(Base):
     annotations_staged: Mapped[int] = mapped_column(BigInteger)
     records_rejected: Mapped[int] = mapped_column(BigInteger)
     rejection_report: Mapped[dict[str, object]] = mapped_column(JSONB)
+    schema_version: Mapped[str] = mapped_column(Text)
     staged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     annotations_deleted: Mapped[int | None] = mapped_column(BigInteger)

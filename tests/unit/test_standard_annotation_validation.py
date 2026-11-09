@@ -66,6 +66,43 @@ def test_schema_constraints_reject_invalid_values(field: str, value: object) -> 
     assert result.errors[0]["location"][:2] == ("annotation", field)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "location"),
+    [
+        ("evidence_type", "ECO:0006051", ("annotation", "evidence_type")),
+        ("relation", "RO:0002333", ("annotation", "relation")),
+        (
+            "annotation_extensions",
+            [{"extension_relation": "RO:0002327", "extension_term": "CHEBI:15422"}],
+            ("annotation", "annotation_extensions", 0, "extension_relation"),
+        ),
+        ("ontology_class_id", "CL:0000540", ("annotation", "ontology_class_id")),
+    ],
+    ids=[
+        "non-default-evidence",
+        "extension-only-relation",
+        "unknown-extension-relation",
+        "non-go-class",
+    ],
+)
+def test_disallowed_evidence_relations_and_identifiers_are_rejected(
+    field: str, value: object, location: tuple[str | int, ...]
+) -> None:
+    """A payload with a value the schema does not allow is rejected at that value.
+
+    Evidence must be one of the 26 default ECO terms, relations must come from the
+    schema's lists of allowed relations, and identifiers must have the expected
+    form, such as a `GO:` identifier for `ontology_class_id`.
+    """
+    payload = valid_annotation_payload()
+    payload[field] = value
+
+    result = validate_annotation(payload)
+
+    assert result.annotation is None
+    assert [error["location"] for error in result.errors] == [location]
+
+
 def test_extra_sabe_identifier_is_rejected_by_core_schema() -> None:
     payload = valid_annotation_payload()
     payload["annotation_id"] = "018f6fa8-709b-7c13-9f75-4513f57b98c2"

@@ -173,8 +173,13 @@ class AnnotationImportRepository:
         data_rows: int,
         annotations_staged: int,
         report: RejectionReport,
+        schema_version: str,
     ) -> AnnotationImportRecord:
-        """Record a job's staged, not yet published, import and return the row."""
+        """Record a job's staged, not yet published, import and return the row.
+
+        `schema_version` is the `go-standard-annotation-schema` version the staged
+        rows were checked with.
+        """
         record = AnnotationImportRecord(
             job_id=job_id,
             source_key=source_key,
@@ -190,6 +195,7 @@ class AnnotationImportRepository:
             annotations_staged=annotations_staged,
             records_rejected=report.issue_count,
             rejection_report=STORED_REJECTION_REPORT.dump(report),
+            schema_version=schema_version,
             staged_at=datetime.now(UTC),
         )
         self.session.add(record)

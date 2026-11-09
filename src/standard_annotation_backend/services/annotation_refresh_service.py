@@ -1,8 +1,9 @@
 """Replace groups' annotations from configured GPAD sources for `RefreshRunner`.
 
 `annotation_refresh` jobs replace a `gpad_imported` group's annotations. They
-skip a file that matches the group's last import when the group has not changed
-since. `annotation_cutover` jobs never skip, require every record to be imported,
+skip a file that matches the group's last import, when that import was checked
+with the installed schema package version and the group has not changed since.
+`annotation_cutover` jobs never skip, require every record to be imported,
 and move the group to `sabe_managed` permanently. One service runs both job types.
 Staging and publication commit in separate transactions.
 """
@@ -35,6 +36,7 @@ from standard_annotation_backend.domain.refresh import (
     SourceProvenance,
     TerminalRefreshError,
 )
+from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
 from standard_annotation_backend.gpad.parser import (
     GpadDocument,
     GpadHeaderError,
@@ -119,7 +121,8 @@ class AnnotationRefreshService:
         """Stage and publish a document while holding the group's lock.
 
         An ordinary refresh is skipped, before taking the lock, when the
-        document matches the group's last import and the group has not changed
+        document matches the group's last import, that import was checked with
+        the installed schema package version, and the group has not changed
         since. A cutover is never skipped.
 
         Raises:
@@ -266,6 +269,7 @@ class AnnotationRefreshService:
                 data_rows=data_rows,
                 annotations_staged=staged,
                 report=report,
+                schema_version=SCHEMA_PACKAGE_VERSION,
             )
             uow.commit()
         return report
@@ -276,12 +280,13 @@ class AnnotationRefreshService:
         """Return a result that lets an ordinary refresh skip an unchanged file.
 
         A refresh can be skipped only when the group is `gpad_imported`, its last
-        published import has the same `source_checksum`, the group has no local
-        changes since that import, and that import rejected no annotations as
-        `unknown_db_object_id`. Local changes include edits, comments, and change
-        sets; see `AnnotationImportRepository.has_local_changes`. Those
-        rejections are retried because the entity catalog may have changed even
-        when the file has not.
+        published import has the same `source_checksum` and was checked with the
+        installed schema package version, the group has no local changes since that
+        import, and that import rejected no annotations as `unknown_db_object_id`.
+        Local changes include edits, comments, and change sets; see
+        `AnnotationImportRepository.has_local_changes`. A different schema version
+        can change which rows are accepted, and the entity catalog may have changed
+        even when the file has not, so either one requires a new import.
 
         Returns:
             The skip result, or `None` when the file must be imported.
@@ -301,6 +306,7 @@ class AnnotationRefreshService:
             if (
                 last is None
                 or last.source_checksum != source_checksum
+                or last.schema_version != SCHEMA_PACKAGE_VERSION
                 or _has_unknown_subject_rejections(last.rejection_report)
                 or imports.has_local_changes(group_key, last.job_id)
             ):
@@ -384,6 +390,7 @@ def _import_result(record: AnnotationImportRecord) -> AnnotationRefreshResult:
             source_checksum=record.source_checksum,
             fetched_at=record.fetched_at,
         ),
+        schema_version=record.schema_version,
         data_rows=record.data_rows,
         annotations_published=record.annotations_staged,
         records_rejected=record.records_rejected,
