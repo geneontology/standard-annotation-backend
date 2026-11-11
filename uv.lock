@@ -383,14 +383,14 @@ wheels = [
 
 [[package]]
 name = "go-standard-annotation-schema"
-version = "0.1.0"
+version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "linkml-runtime" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/62/4c/6191ccb91cc31419680aba2e6945cc7e0ea44e88eca3209475f3f72be6b6/go_standard_annotation_schema-0.1.0.tar.gz", hash = "sha256:ed776ca4fac3a6c8ea611752e6811aa09e8efd585d7405053dcc37bf965c3bf8", size = 204089, upload-time = "2026-11-06T00:27:10.517Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/32/fd/497d2e89db45fb72657caff10c08402aa7b68d8ed51f8a3833c36f380738/go_standard_annotation_schema-0.1.1.tar.gz", hash = "sha256:361dc31b19dc3a7e95e5e6e748e0597762e2c5977533883a7c1c172a7fbc822d", size = 204138, upload-time = "2026-11-11T21:10:25.369Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/71/e0/7f83e8976596647f8428d6ca2f1be2fdc4fe9f17c16c15f2dd7005909764/go_standard_annotation_schema-0.1.0-py3-none-any.whl", hash = "sha256:16314d31175cf1fea5fe1eec63babc57ac6721c785f98e3f1f53921ef429a3da", size = 32801, upload-time = "2026-11-06T00:27:09.158Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/9e/bce021263bbd1a996fe1339b831838fbeda795b05a905adecf5f55061836/go_standard_annotation_schema-0.1.1-py3-none-any.whl", hash = "sha256:7424b76eeb1b993baf0d3e96e60d2f3c23235e84612611d6b2f3c9cbffa2eddc", size = 32792, upload-time = "2026-11-11T21:10:23.773Z" },
 ]
 
 [[package]]
@@ -1287,7 +1287,7 @@ requires-dist = [
     { name = "celery" },
     { name = "fastapi" },
     { name = "fastobo", specifier = "==0.14.1" },
-    { name = "go-standard-annotation-schema", specifier = "==0.1.0" },
+    { name = "go-standard-annotation-schema", specifier = "==0.1.1" },
     { name = "httpx2" },
     { name = "jsonpatch", specifier = ">=1.33" },
     { name = "linkml-runtime" },

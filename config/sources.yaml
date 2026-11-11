@@ -128,13 +128,28 @@ ontologies:
     document_ontology_id: so
     prefixes: [ SO ]
 
+# Each entity source is the annotating group's own GPI file. Some of these files do
+# not pass validation yet; they are configured as the sources SABE expects to use,
+# and their refreshes are expected to succeed once the files are fixed.
 entities:
-  caeel:
+  mgi:
     type: https
-    url: https://current.geneontology.org/annotations/gpi/CAEEL-mod.gpi.gz
-  mouse:
+    url: https://www.informatics.jax.org/downloads/reports/mgi.gpi.gz
+  wb:
     type: https
-    url: https://current.geneontology.org/annotations/gpi/MOUSE-mod.gpi.gz
+    url: https://caltech-curation.textpressolab.com/files/pub/gene_ontology/c_elegans.PRJNA13758.WS298.gene_product_info.gpi.gz
+  zfin:
+    type: https
+    url: https://zfin.org/downloads/zfin.gpi.gz
+  sgd:
+    type: https
+    url: https://downloads.yeastgenome.org/latest/gpi.sgd.gz
+  xenbase_xlae:
+    type: https
+    url: https://download.xenbase.org/xenbase/GenePageReports/GOBySpecies/xenbase_v2.0.xlaev.only.gpi.gz
+  xenbase_xtro:
+    type: https
+    url: https://download.xenbase.org/xenbase/GenePageReports/GOBySpecies/xenbase_v2.0.xtrop.only.gpi.gz
 
 # WARNING: The current.geneontology.org sources are NOT good long-term sources. They are
 #          species-oriented and do not map 1:1 with owning groups. A better source would

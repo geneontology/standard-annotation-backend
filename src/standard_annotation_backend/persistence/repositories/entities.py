@@ -326,10 +326,7 @@ class EntityRepository:
         )
         self._insert_memberships(candidate, new_ids)
         for batch in batched(
-            (
-                {key: value for key, value in row.items() if key != "job_id"}
-                for row in rows
-            ),
+            (_source_record_values(row) for row in rows),
             _INSERT_BATCH_SIZE,
             strict=False,
         ):
@@ -629,3 +626,21 @@ def _catalog_digest(
         )
         hasher.update(b"\n")
     return hasher.hexdigest()
+
+
+def _source_record_values(row: dict[str, object]) -> dict[str, object]:
+    """Return the `entity_source_record` values for one verified staging row.
+
+    The entity's taxon and type are copied into their own columns. Staging rows
+    hold schema-validated entities, which always have both.
+    """
+    entity = row["entity"]
+    if not isinstance(entity, dict):
+        raise EntityCandidateConflictError
+    return {
+        "db_object_id": row["db_object_id"],
+        "line_number": row["line_number"],
+        "entity": entity,
+        "db_object_taxon_id": entity["db_object_taxon_id"],
+        "db_object_type": entity["db_object_type"],
+    }

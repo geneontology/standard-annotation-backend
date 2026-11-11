@@ -13,6 +13,7 @@ from refresh_helpers import (
 )
 from seeding import insert_annotation
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
@@ -41,6 +42,7 @@ from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
+    EntitySourceRecord,
     EntityStagingRecord,
 )
 from standard_annotation_backend.persistence.repositories.entities import (
@@ -56,7 +58,7 @@ from standard_annotation_backend.services.job_service import Job
 
 
 def source_gpi(*identifiers: str) -> str:
-    """Return valid GPI text, preserving repeated identifiers and source order."""
+    """Return valid GPI text with one line per identifier, in the given order."""
     text = "!gpi-version: 2.0\n!generated-by: TestDB\n!date-generated: 2026-09-29\n"
     return text + "".join(
         f"{identifier}\tSYM{index}\tProtein\t\tSO:0001217\tNCBITaxon:9606\t\t{identifier}\t\t\t\n"
@@ -125,12 +127,12 @@ def test_publication_records_one_audit_event_and_a_durable_result(
 ) -> None:
     """Publishing records one audit event and a durable result.
 
-    Each distinct identifier becomes one active entity. Recovering the job or
+    Each identifier becomes one active entity. Recovering the job or
     staging the same catalog again afterward returns the same result without
     adding audit events.
     """
     service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    job = publish_catalog(service, unit_of_work_factory, "MGI:2", "MGI:1", "MGI:1")
+    job = publish_catalog(service, unit_of_work_factory, "MGI:2", "MGI:1")
     recovered = service.recover(job)
     assert recovered is not None
     result = STORED_ENTITY_REFRESH_RESULT.load(recovered.result)
@@ -138,14 +140,14 @@ def test_publication_records_one_audit_event_and_a_durable_result(
         result.source_record_count,
         result.active_identifier_count,
         result.added_count,
-    ) == (3, 2, 2)
+    ) == (2, 2, 2)
     assert (result.retained_count, result.removed_count, result.removal_impacts) == (
         0,
         0,
         (),
     )
     assert result.source_key == "mgi"
-    document = _document("mgi", "MGI:2", "MGI:1", "MGI:1")
+    document = _document("mgi", "MGI:2", "MGI:1")
     assert (
         result.source_type,
         result.source_locator,
@@ -431,3 +433,57 @@ def test_publication_spans_multiple_insert_batches_without_losing_records(
     assert result is not None
     assert result.source_record_count == result.active_identifier_count == 5001
     assert len(active_ids(session_factory)) == 5001
+
+
+def test_publication_stores_each_entity_taxon_and_type(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Each published entity's taxon and type are stored in their own columns."""
+    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    text = (
+        "!gpi-version: 2.0\n!generated-by: TestDB\n!date-generated: 2026-09-29\n"
+        "MGI:1\tA\tProtein\t\tPR:000000001\tNCBITaxon:10090\t\tMGI:1\t\t\t\n"
+        "MGI:2\tB\tComplex\t\tGO:0032991\tNCBITaxon:9606\t\tMGI:2\t\t\t\n"
+    )
+    job = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "mgi")
+
+    service.apply(job, source_document("mgi", text.encode()), ignore_progress)
+
+    with session_factory() as session:
+        rows = session.execute(
+            select(
+                EntitySourceRecord.db_object_id,
+                EntitySourceRecord.db_object_taxon_id,
+                EntitySourceRecord.db_object_type,
+            ).order_by(EntitySourceRecord.db_object_id)
+        ).all()
+    assert [tuple(row) for row in rows] == [
+        ("MGI:1", "NCBITaxon:10090", "PR:000000001"),
+        ("MGI:2", "NCBITaxon:9606", "GO:0032991"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"db_object_taxon_id": "NCBITaxon:10090"},
+        {"db_object_type": "SO:0000704"},
+        {"entity": EntitySourceRecord.entity.op("-")("db_object_type")},
+    ],
+    ids=["taxon", "type", "type-missing-from-entity"],
+)
+def test_entity_columns_cannot_disagree_with_the_stored_entity(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    values: dict[str, object],
+) -> None:
+    """PostgreSQL rejects a taxon or type column that differs from the entity.
+
+    That includes an entity that no longer has the value at all.
+    """
+    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    publish_catalog(service, unit_of_work_factory, "MGI:1")
+
+    with pytest.raises(IntegrityError), session_factory.begin() as session:
+        session.execute(update(EntitySourceRecord).values(**values))

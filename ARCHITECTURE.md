@@ -916,12 +916,14 @@ result unchanged, and pruning is retried.
 
 **Entities.** An entity is an annotatable subject identified by `db_object_id`. Each
 configured GPI source supplies a complete catalog. An identifier can be active in only
-one source. An invalid file fails the job, and the job records each invalid row's line
-number and reason. Direct annotation creates and updates, and accepted create or update
-change sets, require an active `db_object_id`; deletes do not. Replacing or retiring a
-catalog never modifies existing annotations. Instead, the job result lists the
-annotations that reference each removed identifier. Removing a source from the
-configuration retires its catalog on the next refresh of all entity sources.
+one source and may appear on only one line of its file. Each entity's taxon and type are
+also stored in their own columns, for validation. An invalid file fails the job, and the
+job records each invalid row's line number and reason. Direct annotation creates and
+updates, and accepted create or update change sets, require an active `db_object_id`;
+deletes do not. Replacing or retiring a catalog never modifies existing annotations.
+Instead, the job result lists the annotations that reference each removed identifier.
+Removing a source from the configuration retires its catalog on the next refresh of all
+entity sources.
 
 **Annotation refreshes.** Each entry in the `annotations` section of the sources file
 names a GPAD 2.0 file and the group (`owning_group_id`) whose annotations it supplies. A

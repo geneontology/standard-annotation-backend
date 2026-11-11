@@ -504,17 +504,25 @@ class EntityMembershipRecord(Base):
 
 
 class EntitySourceRecord(Base):
-    """Store one source file record for an active entity identifier.
+    """Store the source file record of an active entity identifier.
 
-    An identifier may appear on several lines of a source file, so each record is
-    stored separately with its line number. Records are deleted with their
-    membership row when the catalog is replaced or retired.
+    Each identifier appears on one line of its source file. The record is deleted
+    with its membership row when the catalog is replaced or retired.
+
+    The entity's taxon and type are copied out of `entity` into their own columns,
+    so validation can read them without parsing the stored entity. A check keeps
+    them equal to the values in `entity`, and fails if `entity` lacks either one.
     """
 
     __tablename__ = "entity_source_record"
     __table_args__ = (
         CheckConstraint("line_number > 0", name="line_number_positive"),
         CheckConstraint("jsonb_typeof(entity) = 'object'", name="entity_object"),
+        CheckConstraint(
+            "db_object_taxon_id IS NOT DISTINCT FROM entity->>'db_object_taxon_id' "
+            "AND db_object_type IS NOT DISTINCT FROM entity->>'db_object_type'",
+            name="taxon_and_type_match_entity",
+        ),
     )
 
     db_object_id: Mapped[str] = mapped_column(
@@ -524,6 +532,8 @@ class EntitySourceRecord(Base):
     )
     line_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     entity: Mapped[dict[str, object]] = mapped_column(JSONB)
+    db_object_taxon_id: Mapped[str] = mapped_column(Text)
+    db_object_type: Mapped[str] = mapped_column(Text)
 
 
 class OntologyMetadataRecord(Base):

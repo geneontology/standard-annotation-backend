@@ -29,8 +29,7 @@ class EntityRecord:
 
     Attributes:
         line_number: One-based physical line number of the record in the
-            source file. A source may repeat an identifier, so this number,
-            not `entity.db_object_id`, distinguishes records.
+            source file.
         entity: The schema-validated entity.
     """
 

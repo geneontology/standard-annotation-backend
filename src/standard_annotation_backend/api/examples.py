@@ -138,7 +138,7 @@ ONTOLOGY_REFRESH_EXAMPLES: dict[str, Example] = {
 ENTITY_REFRESH_EXAMPLES: dict[str, Example] = {
     "single-source": {
         "summary": "Refresh a single entity source",
-        "value": {"source_key": "caeel"},
+        "value": {"source_key": "wb"},
     },
     "all-sources": {
         "summary": "Refresh all configured entity sources",
