@@ -26,10 +26,15 @@ def _settings(**overrides: object) -> Settings:
 
 
 def test_refresh_schedules_default_to_the_documented_times() -> None:
-    """Authorization refreshes daily at 00:00, ontologies Mon/Wed/Fri 02:00, entities 03:00."""
+    """Each kind refreshes on its documented UTC schedule.
+
+    Authorization runs daily at 00:00, GO Rule data at 01:00, ontologies on Monday,
+    Wednesday, and Friday at 02:00, entities at 03:00, and annotations at 04:00.
+    """
     settings = _settings()
 
     assert settings.authorization_refresh_cron == "0 0 * * *"
+    assert settings.rules_refresh_cron == "0 1 * * *"
     assert settings.ontology_refresh_cron == "0 2 * * 1,3,5"
     assert settings.entity_refresh_cron == "0 3 * * *"
     assert settings.annotation_refresh_cron == "0 4 * * *"
@@ -39,6 +44,7 @@ def test_refresh_schedules_default_to_the_documented_times() -> None:
     "setting",
     [
         "authorization_refresh_cron",
+        "rules_refresh_cron",
         "ontology_refresh_cron",
         "entity_refresh_cron",
         "annotation_refresh_cron",

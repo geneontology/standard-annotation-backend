@@ -212,6 +212,23 @@ class AuditService:
             AuditAction.AUTHORIZATION_REFRESHED, actor_id, job_id, details
         )
 
+    def record_rules_refreshed(
+        self, *, actor_id: str, job_id: UUID, details: dict[str, object]
+    ) -> AuditEventRecord:
+        """Record a summary of an activated GO Rule data snapshot.
+
+        Args:
+            actor_id: Person or process that requested the refresh.
+            job_id: Job that requested the refresh.
+            details: The refresh result.
+
+        Returns:
+            The audit event added to the current transaction.
+        """
+        return self._record_job_summary(
+            AuditAction.RULES_REFRESHED, actor_id, job_id, details
+        )
+
     def record_token_created(
         self,
         *,

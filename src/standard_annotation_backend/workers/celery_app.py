@@ -24,6 +24,7 @@ def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
     """
     crons = {
         "authorization": settings.authorization_refresh_cron,
+        "rules": settings.rules_refresh_cron,
         "ontology": settings.ontology_refresh_cron,
         "entity": settings.entity_refresh_cron,
         "annotation": settings.annotation_refresh_cron,

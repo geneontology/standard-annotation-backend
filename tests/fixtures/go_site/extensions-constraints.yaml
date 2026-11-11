@@ -1,0 +1,34 @@
+# Annotation extension constraints
+#
+# Each entry is a set of conditions that an extension unit in an annotation
+# can satisfy. An extension unit is valid if it satisfies all the conditions
+# of at least one entry.
+#
+- relation: occurs_in
+  relation_id: BFO:0000066
+  namespaces:
+    - GO
+    - CHEBI
+  primary_root_terms:
+    - GO:0003674
+    - GO:0008150
+  cardinality: 1
+- relation: has_input
+  relation_id: RO:0002233
+  namespaces:
+    - MGI
+    - CHEBI
+    - MGI
+  primary_root_terms:
+    - GO:0003674
+- relation: has_regulation_target
+  namespaces:
+    - MGI
+  primary_root_terms:
+    - GO:0008150
+- relation: part_of
+  relation_id: BFO:0000050
+  namespaces:
+    - GO
+  primary_root_terms:
+    - GO:0008150

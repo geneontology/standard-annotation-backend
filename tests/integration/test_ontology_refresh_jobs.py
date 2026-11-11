@@ -41,6 +41,10 @@ authorization:
   repository: geneontology/go-site
   ref: master
   path: metadata/users.yaml
+rules:
+  type: github
+  repository: geneontology/go-site
+  ref: master
 ontologies:
   go:
     type: github

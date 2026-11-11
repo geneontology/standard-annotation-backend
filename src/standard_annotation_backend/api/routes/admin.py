@@ -104,6 +104,28 @@ def refresh_authorization(
 
 
 @router.post(
+    "/rules-refreshes",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=RefreshJobsResource,
+    summary="Refresh GO Rule data",
+    description=(
+        "Refresh the go-site metadata files that GO Rules read (db-xrefs.yaml, "
+        "gorefs.yaml, groups.yaml, retracted-publications.txt, "
+        "eco-usage-constraints.yaml, and extensions-constraints.yaml) from one "
+        "commit of the configured repository, and activate them together. There is "
+        f"one rules source, so no body is needed. {_SHARED_DESCRIPTION}"
+    ),
+    response_description=_RESPONSE_DESCRIPTION,
+)
+def refresh_rules(
+    service: Annotated[RefreshStartService, Depends(get_refresh_start_service)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
+) -> RefreshJobsResource:
+    """Start a refresh of the single GO Rule data source."""
+    return _start(service, context, RefreshKindName.RULES, None)
+
+
+@router.post(
     "/ontology-refreshes",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,

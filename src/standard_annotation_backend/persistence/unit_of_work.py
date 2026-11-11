@@ -17,6 +17,7 @@ from standard_annotation_backend.persistence.repositories import (
     EntityRepository,
     JobRepository,
     OntologyRepository,
+    RulesRepository,
 )
 from standard_annotation_backend.persistence.repositories.auth import (
     CredentialPersistenceError,
@@ -49,6 +50,7 @@ class SqlAlchemyUnitOfWork:
         self.jobs: JobRepository
         self.ontologies: OntologyRepository
         self.entities: EntityRepository
+        self.rules: RulesRepository
 
     def __enter__(self) -> "SqlAlchemyUnitOfWork":
         self._session = self._session_factory()
@@ -62,6 +64,7 @@ class SqlAlchemyUnitOfWork:
         self.jobs = JobRepository(self._session)
         self.ontologies = OntologyRepository(self._session)
         self.entities = EntityRepository(self._session)
+        self.rules = RulesRepository(self._session)
         return self
 
     def commit(self) -> None:

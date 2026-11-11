@@ -823,8 +823,9 @@ POST /exports  (planned)
   Creates an annotation export job and returns 202 Accepted with a job ID.
 
 POST /admin/authorization-refreshes
-  Global-admin request that refreshes the single authorization source and returns
-  202 Accepted with the created or reused job.
+POST /admin/rules-refreshes
+  Global-admin requests that refresh the single authorization source or the single
+  GO Rule data source and return 202 Accepted with the created or reused job.
 
 POST /admin/ontology-refreshes
 POST /admin/entity-refreshes
@@ -851,14 +852,14 @@ corrupting annotation state.
 
 ### Reference Data Refreshes
 
-SABE keeps authorization, ontologies, entity catalogs, and group annotations current
-from the sources in `config/sources.yaml`. Every kind follows the same pattern. A
-refresh job fetches one source, records its provenance (type, locator, resolved
-revision, checksum, and fetch time), skips the source if that exact document is already
-active, and otherwise validates the document before any of it becomes active. Annotation
-refreshes qualify this in two ways. They skip only when the group also has no local
-changes, no earlier unknown-entity rejections, and no schema upgrade since its last
-import, and an ordinary annotation refresh publishes the valid rows while reporting
+SABE keeps authorization, GO Rule data, ontologies, entity catalogs, and group
+annotations current from the sources in `config/sources.yaml`. Every kind follows the
+same pattern. A refresh job fetches one source, records its provenance (type, locator,
+resolved revision, checksum, and fetch time), skips the source if that exact document is
+already active, and otherwise validates the document before any of it becomes active.
+Annotation refreshes qualify this in two ways. They skip only when the group also has no
+local changes, no earlier unknown-entity rejections, and no schema upgrade since its
+last import, and an ordinary annotation refresh publishes the valid rows while reporting
 the rejected ones. Invalid documents and unreachable sources fail the job with a stable
 failure code and leave the previous data in place; the next scheduled refresh tries
 again. Jobs start from a schedule, a global-admin API request, or the `just refresh`
@@ -868,6 +869,22 @@ pieces fit together in the code.
 
 **Authorization.** The go-site `users.yaml` replaces SABE's users and grants as
 described under Authorization Model.
+
+**GO Rule data.** The `rules` entry names the go-site repository and ref. Each refresh
+resolves the ref to one commit and reads six metadata files at it: `db-xrefs.yaml`,
+`gorefs.yaml`, `groups.yaml`, `retracted-publications.txt`,
+`eco-usage-constraints.yaml`, and `extensions-constraints.yaml`. Every file is
+validated, keeping only the values GO Rules check, and the six activate together as one
+snapshot. Extension constraints are kept only for entries that name their relation by
+`relation_id`, because annotations name relations by ID. An invalid or unreachable file
+fails the job and leaves the previous snapshot active. A refresh skips as unchanged when
+the files match the active snapshot's, whichever commit they came from, and the snapshot
+already holds what this release parses from them. Retracted PMIDs are stored as rows of
+their snapshot, and the other five files as one validated document. Activation keeps the
+snapshot it replaces and deletes older ones. The job warns about each
+`extensions-constraints.yaml` namespace that is neither a configured ontology prefix nor
+a `db-xrefs.yaml` database. This refresh is separate from the authorization refresh,
+which reads `users.yaml` from the same repository on its own schedule.
 
 **Ontologies.** `config/sources.yaml` lists every ontology SABE loads and says how to
 read each one: the `ontology:` header the file must declare, the identifier prefixes the

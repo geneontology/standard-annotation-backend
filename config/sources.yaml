@@ -9,6 +9,13 @@
 # authorization
 #     the single go-site users.yaml source (source key `go-site`)
 #
+# rules
+#     the go-site repository whose metadata files GO Rules read (source key
+#     `go-site`). It gives only `type: github`, `repository`, and `ref`: each
+#     refresh reads db-xrefs.yaml, gorefs.yaml, groups.yaml,
+#     retracted-publications.txt, eco-usage-constraints.yaml, and
+#     extensions-constraints.yaml under `metadata/` at one commit.
+#
 # ontologies
 #     keyed by ontology; `go` is required. Each entry also sets:
 #       document_ontology_id  the `ontology:` header value the file must declare
@@ -39,6 +46,11 @@ authorization:
   repository: geneontology/go-site
   ref: master
   path: metadata/users.yaml
+
+rules:
+  type: github
+  repository: geneontology/go-site
+  ref: master
 
 # The ontology list is GO, NCBITaxon (for interacting taxa), and every ontology that
 # GORULE:0000058 allows in annotation extensions. GO comes from go-basic.obo because

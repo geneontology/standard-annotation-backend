@@ -23,6 +23,7 @@ def configured_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("SABE_ENVIRONMENT", "testing")
     monkeypatch.setenv("SABE_LOG_FORMAT", "console")
     monkeypatch.setenv("SABE_AUTHORIZATION_REFRESH_CRON", "0 0 * * *")
+    monkeypatch.setenv("SABE_RULES_REFRESH_CRON", "0 1 * * *")
     monkeypatch.setenv("SABE_ONTOLOGY_REFRESH_CRON", "0 2 * * 1,3,5")
     monkeypatch.setenv("SABE_ENTITY_REFRESH_CRON", "0 3 * * *")
     monkeypatch.setenv("SABE_ANNOTATION_REFRESH_CRON", "0 4 * * *")

@@ -33,6 +33,9 @@ from standard_annotation_backend.services.job_service import JobService
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
 )
+from standard_annotation_backend.services.rules_refresh_service import (
+    RulesRefreshService,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +72,7 @@ def create_refresh_runner(
     try_lock = bind_try_lock(engine)
     jobs = JobService(unit_of_work_factory)
     authorization = AuthorizationRefreshService(unit_of_work_factory)
+    rules = RulesRefreshService(unit_of_work_factory, sources)
     entity = EntityRefreshService(unit_of_work_factory, sources)
     ontology = OntologyRefreshService(
         unit_of_work_factory, sources, try_lock, enqueue_prune
@@ -81,7 +85,7 @@ def create_refresh_runner(
             jobs=jobs,
             fetchers=fetchers,
             sources=sources,
-            kinds=(authorization, entity, ontology, annotation),
+            kinds=(authorization, rules, entity, ontology, annotation),
             retirer=entity,
         ),
     )

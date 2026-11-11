@@ -5,9 +5,18 @@ from hashlib import sha256
 import httpx2
 import pytest
 
-from standard_annotation_backend.domain.refresh import RefreshFailureCode
+from standard_annotation_backend.domain.refresh import (
+    RefreshFailureCode,
+    pack_source_files,
+    unpack_source_files,
+)
+from standard_annotation_backend.go_site.rule_files import RULE_FILE_PATHS
 from standard_annotation_backend.refresh.fetchers import SourceError, SourceFetchers
-from standard_annotation_backend.refresh.sources import GitHubSource, HttpsSource
+from standard_annotation_backend.refresh.sources import (
+    GitHubRulesSource,
+    GitHubSource,
+    HttpsSource,
+)
 
 SHA = "A" * 40
 GITHUB = GitHubSource(
@@ -17,6 +26,9 @@ GITHUB = GitHubSource(
     path="metadata/users.yaml",
 )
 HTTPS = HttpsSource(type="https", url="https://example.org/mgi.gpi.gz")
+RULES = GitHubRulesSource(
+    type="github", repository="geneontology/go-site", ref="master"
+)
 
 
 def _fetchers(handler: httpx2.MockTransport) -> SourceFetchers:
@@ -59,6 +71,70 @@ def test_github_source_resolves_ref_and_records_commit() -> None:
     assert document.content == body
     assert document.fetched_at.tzinfo is not None
     assert document.provenance.source_revision == SHA.lower()
+
+
+def test_rules_source_reads_every_file_from_one_commit() -> None:
+    """The ref is resolved once, and every GO Rule file is read at that commit."""
+    requests: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.url.host == "api.github.com":
+            return httpx2.Response(200, json={"sha": SHA})
+        return httpx2.Response(200, content=request.url.path.encode())
+
+    document = _fetchers(httpx2.MockTransport(handle)).fetch("go-site", RULES)
+
+    commit = SHA.lower()
+    assert [str(request.url) for request in requests] == [
+        "https://api.github.com/repos/geneontology/go-site/commits/master",
+        *(
+            f"https://raw.githubusercontent.com/geneontology/go-site/{commit}/{path}"
+            for path in RULE_FILE_PATHS
+        ),
+    ]
+    assert unpack_source_files(document.content) == {
+        path: f"/geneontology/go-site/{commit}/{path}".encode()
+        for path in RULE_FILE_PATHS
+    }
+    assert document.source_type == "github"
+    assert document.source_locator == "github:geneontology/go-site"
+    assert document.source_revision == commit
+    assert document.source_checksum == sha256(document.content).hexdigest()
+
+
+def test_rules_source_fails_if_any_file_is_unavailable() -> None:
+    """One unavailable file fails the whole fetch, so no partial set is returned."""
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == "api.github.com":
+            return httpx2.Response(200, json={"sha": SHA})
+        if request.url.path.endswith("/metadata/groups.yaml"):
+            return httpx2.Response(404)
+        return httpx2.Response(200, content=b"[]")
+
+    with pytest.raises(SourceError) as raised:
+        _fetchers(httpx2.MockTransport(handle)).fetch("go-site", RULES)
+
+    assert raised.value.code is RefreshFailureCode.SOURCE_ERROR
+
+
+def test_packing_the_same_files_always_gives_the_same_content() -> None:
+    """The order files are given in does not change the content or its checksum."""
+    first = pack_source_files({"b.txt": b"2", "a.txt": b"\x001"})
+    second = pack_source_files({"a.txt": b"\x001", "b.txt": b"2"})
+
+    assert first == second
+    assert unpack_source_files(first) == {"a.txt": b"\x001", "b.txt": b"2"}
+
+
+@pytest.mark.parametrize(
+    "content", [b"\xff", b"not json", b"[]", b'{"a.txt": 1}', b'{"a.txt": "*"}']
+)
+def test_content_that_is_not_packed_files_is_rejected(content: bytes) -> None:
+    """Unpacking accepts only content in the form that packing writes."""
+    with pytest.raises(ValueError):
+        unpack_source_files(content)
 
 
 def test_https_source_follows_redirects_and_keeps_configured_locator() -> None:

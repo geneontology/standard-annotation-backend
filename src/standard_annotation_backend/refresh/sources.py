@@ -1,8 +1,10 @@
 """Read the reviewed file that configures every reference data source.
 
-`config/sources.yaml` lists the authorization source, each ontology source, each
-entity source, and each group's GPAD annotation source. Each entry is a file in a
-GitHub repository or an HTTPS URL.
+`config/sources.yaml` lists the authorization source, the go-site repository
+whose metadata files GO Rules read, each ontology source, each entity source, and
+each group's GPAD annotation source. Most entries are a file in a GitHub
+repository or an HTTPS URL. The GO Rule entry names a GitHub repository and ref,
+because SABE reads a fixed set of files from it.
 `Settings` validates the file when it is constructed, so an invalid file stops the
 API, worker, scheduler, and CLI at startup instead of failing later inside a job.
 """
@@ -12,7 +14,7 @@ from __future__ import annotations
 import string
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 
 import yaml
 from pydantic import (
@@ -33,10 +35,12 @@ from standard_annotation_backend.domain.ontology import (
 )
 from standard_annotation_backend.domain.refresh import (
     AUTHORIZATION_SOURCE_KEY,
+    RULES_SOURCE_KEY,
     SOURCE_KEY_PATTERN,
     RefreshKindName,
     UnknownSourceError,
 )
+from standard_annotation_backend.go_site.rule_files import RULE_FILE_PATHS
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 SourceKey = Annotated[str, StringConstraints(pattern=SOURCE_KEY_PATTERN)]
@@ -162,6 +166,32 @@ class HttpsAnnotationSource(HttpsSource):
     format: Literal["gpad"] = "gpad"
 
 
+class GitHubRulesSource(BaseModel):
+    """Configure the go-site repository whose metadata files GO Rules read.
+
+    Each fetch resolves `ref` to one commit and downloads every file in `paths` at
+    that commit, so the files always come from the same revision.
+
+    Attributes:
+        paths: The files read from the repository. They cannot be configured,
+            because SABE has a parser for each one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    paths: ClassVar[tuple[str, ...]] = RULE_FILE_PATHS
+
+    type: Literal["github"]
+    repository: str
+    ref: TrimmedNonBlankString
+
+    @field_validator("repository")
+    @classmethod
+    def validate_repository(cls, value: str) -> str:
+        """Validate a GitHub repository in `owner/repository` form."""
+        return validated_github_repository(value)
+
+
 class GitHubOntologySource(GitHubSource):
     """Configure an OBO ontology stored in GitHub.
 
@@ -210,6 +240,8 @@ EntitySourceSpec = Annotated[
 AnnotationSourceSpec = Annotated[
     GitHubAnnotationSource | HttpsAnnotationSource, Field(discriminator="type")
 ]
+ConfiguredSource = GitHubSource | HttpsSource | GitHubRulesSource
+"""Any one configured source. `SourceFetchers` has a fetcher for each type."""
 
 
 class SourcesFile(BaseModel):
@@ -217,6 +249,8 @@ class SourcesFile(BaseModel):
 
     Attributes:
         authorization: The single go-site `users.yaml` source.
+        rules: The go-site repository whose metadata files GO Rules read. It must
+            be on GitHub, so that every file comes from one commit.
         ontologies: Ontology sources keyed by ontology, each saying how to read its
             file. GO is required.
         entities: Entity sources keyed by stable source key. Keys are stored with
@@ -228,6 +262,7 @@ class SourcesFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     authorization: SourceSpec
+    rules: GitHubRulesSource
     ontologies: dict[SourceKey, OntologySourceSpec]
     entities: dict[SourceKey, EntitySourceSpec] = Field(default_factory=dict)
     annotations: dict[SourceKey, AnnotationSourceSpec] = Field(default_factory=dict)
@@ -324,10 +359,11 @@ class RefreshSources:
     """Look up configured sources by refresh kind and source key."""
 
     def __init__(self, file: SourcesFile) -> None:
-        self._sources: dict[RefreshKindName, dict[str, GitHubSource | HttpsSource]] = {
+        self._sources: dict[RefreshKindName, dict[str, ConfiguredSource]] = {
             RefreshKindName.AUTHORIZATION: {
                 AUTHORIZATION_SOURCE_KEY: file.authorization
             },
+            RefreshKindName.RULES: {RULES_SOURCE_KEY: file.rules},
             RefreshKindName.ONTOLOGY: dict(file.ontologies),
             RefreshKindName.ENTITY: dict(file.entities),
             RefreshKindName.ANNOTATION: dict(file.annotations),
@@ -346,9 +382,7 @@ class RefreshSources:
             for key, source in file.ontologies.items()
         }
 
-    def sources(
-        self, kind: RefreshKindName
-    ) -> Mapping[str, GitHubSource | HttpsSource]:
+    def sources(self, kind: RefreshKindName) -> Mapping[str, ConfiguredSource]:
         """Return a copy of one kind's sources keyed by source key."""
         return dict(self._sources[kind])
 
@@ -356,7 +390,7 @@ class RefreshSources:
         """Return one kind's configured source keys in sorted order."""
         return tuple(sorted(self._sources[kind]))
 
-    def source(self, kind: RefreshKindName, key: str) -> GitHubSource | HttpsSource:
+    def source(self, kind: RefreshKindName, key: str) -> ConfiguredSource:
         """Return one configured source.
 
         Raises:

@@ -34,6 +34,9 @@ from standard_annotation_backend.workers.runtime import WorkerRuntime, worker_ru
 
 logger = logging.getLogger(__name__)
 
+_SINGLE_SOURCE_KINDS = frozenset({RefreshKindName.AUTHORIZATION, RefreshKindName.RULES})
+"""Kinds with exactly one configured source, which take no `source_key`."""
+
 
 def run_refreshes(
     runtime: WorkerRuntime, kind: RefreshKindName, source_key: str | None
@@ -95,14 +98,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         nargs="?",
         help=(
             "Refresh one ontology, entity, or annotation source. Omit it to refresh "
-            "every configured source. Authorization has a single source and takes "
-            "none."
+            "every configured source. Authorization and rules each have a single "
+            "source and take none."
         ),
     )
     arguments = parser.parse_args(argv)
     kind = RefreshKindName(arguments.kind)
-    if kind is RefreshKindName.AUTHORIZATION and arguments.source_key is not None:
-        parser.error("authorization has a single source; omit source_key")
+    if kind in _SINGLE_SOURCE_KINDS and arguments.source_key is not None:
+        parser.error(f"{kind.value} has a single source; omit source_key")
     try:
         # Without `enqueue_prune`, ontology pruning also runs in this process.
         with worker_runtime() as runtime:

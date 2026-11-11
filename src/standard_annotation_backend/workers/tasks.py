@@ -6,7 +6,7 @@ Four tasks make up the refresh pipeline:
   It starts a job for every configured source of that kind through
   `RefreshStartService`, which commits each job to PostgreSQL before sending it.
   Annotation sources whose group is SABE-managed are skipped.
-- `sabe.refresh.run(job_id)` runs one authorization, ontology, entity, or
+- `sabe.refresh.run(job_id)` runs one authorization, rules, ontology, entity, or
   annotation refresh job, or one annotation cutover job.
 - `sabe.entity_retirement.run(job_id)` retires the catalog of an entity source
   that is no longer configured.

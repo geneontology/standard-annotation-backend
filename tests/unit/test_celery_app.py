@@ -43,6 +43,7 @@ def test_beat_schedules_each_kind_on_its_own_cron_setting() -> None:
             ontology_refresh_cron="2 0 * * *",
             entity_refresh_cron="3 0 * * *",
             annotation_refresh_cron="4 0 * * *",
+            rules_refresh_cron="5 0 * * *",
         )
 
     assert beat_schedule(settings) == {
@@ -56,5 +57,6 @@ def test_beat_schedules_each_kind_on_its_own_cron_setting() -> None:
             ("ontology", "2"),
             ("entity", "3"),
             ("annotation", "4"),
+            ("rules", "5"),
         )
     }

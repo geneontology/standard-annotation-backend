@@ -305,7 +305,7 @@ class JobRecord(Base):
         CheckConstraint(
             "job_type IN ('annotation_cutover', 'annotation_refresh', "
             "'authorization_refresh', 'entity_refresh', 'entity_retirement', "
-            "'ontology_refresh')",
+            "'ontology_refresh', 'rules_refresh')",
             name="type_allowed",
         ),
         CheckConstraint(
@@ -685,6 +685,70 @@ class OntologyClosureRecord(Base):
     predicate_id: Mapped[str] = mapped_column(Text, primary_key=True)
     object_term_id: Mapped[str] = mapped_column(Text, primary_key=True)
     depth: Mapped[int] = mapped_column(Integer)
+
+
+class RulesSnapshotRecord(Base):
+    """Store one snapshot of the go-site files that GO Rules read.
+
+    `rule_data` holds five of the files as validated `RuleData` JSON, and
+    `RetractedPublicationRecord` rows hold the sixth. At most one snapshot is
+    active. Activation keeps the snapshot it replaces and deletes older ones.
+    """
+
+    __tablename__ = "rules_snapshot"
+    __table_args__ = (
+        CheckConstraint(
+            "source_checksum ~ '^[0-9a-f]{64}$'", name="source_checksum_format"
+        ),
+        CheckConstraint("jsonb_typeof(rule_data) = 'object'", name="rule_data_object"),
+        CheckConstraint(
+            "retracted_publication_count >= 0",
+            name="retracted_publication_count_nonnegative",
+        ),
+        Index(
+            "uq_rules_snapshot_active",
+            "active",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+    )
+
+    snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    source_type: Mapped[str] = mapped_column(String(20))
+    source_locator: Mapped[str] = mapped_column(Text)
+    source_revision: Mapped[str | None] = mapped_column(Text)
+    source_checksum: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    rule_data: Mapped[dict[str, object]] = mapped_column(JSONB)
+    retracted_publication_count: Mapped[int] = mapped_column(Integer)
+
+
+class RetractedPublicationRecord(Base):
+    """Store one PMID that a snapshot's `retracted-publications.txt` lists.
+
+    The primary key serves lookups of an annotation's PMIDs within one snapshot.
+    """
+
+    __tablename__ = "retracted_publication"
+    __table_args__ = (CheckConstraint("pmid ~ '^PMID:[0-9]+$'", name="pmid_format"),)
+
+    snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("rules_snapshot.snapshot_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    pmid: Mapped[str] = mapped_column(Text, primary_key=True)
 
 
 class AnnotationRecord(Base):

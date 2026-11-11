@@ -13,6 +13,7 @@ from standard_annotation_backend.domain.refresh import (
 from standard_annotation_backend.refresh.sources import (
     GitHubAnnotationSource,
     GitHubEntitySource,
+    GitHubRulesSource,
     GitHubSource,
     HttpsAnnotationSource,
     HttpsEntitySource,
@@ -29,6 +30,7 @@ GO_SITE = {
     "ref": "master",
     "path": "metadata/users.yaml",
 }
+RULES = {"type": "github", "repository": "geneontology/go-site", "ref": "master"}
 GO = {
     "type": "github",
     "repository": "geneontology/go-ontology",
@@ -49,7 +51,12 @@ CL = {
 
 def _file(**sections: object) -> dict[str, object]:
     """Return a valid sources mapping with the given sections replaced."""
-    return {"authorization": GO_SITE, "ontologies": {"go": GO}, **sections}
+    return {
+        "authorization": GO_SITE,
+        "rules": RULES,
+        "ontologies": {"go": GO},
+        **sections,
+    }
 
 
 def test_shipped_sources_file_is_valid() -> None:
@@ -57,6 +64,10 @@ def test_shipped_sources_file_is_valid() -> None:
     sources = RefreshSources(load_sources_file(SHIPPED_FILE))
 
     assert sources.keys(RefreshKindName.AUTHORIZATION) == ("go-site",)
+    assert sources.keys(RefreshKindName.RULES) == ("go-site",)
+    assert sources.source(RefreshKindName.RULES, "go-site") == GitHubRulesSource(
+        type="github", repository="geneontology/go-site", ref="master"
+    )
     assert sources.keys(RefreshKindName.ONTOLOGY) == (
         "chebi",
         "cl",
@@ -208,6 +219,11 @@ def test_null_entity_section_is_empty_but_go_stays_required(section: str) -> Non
         _file(authorization={**GO_SITE, "repository": "go-site"}),
         _file(authorization={**GO_SITE, "ref": "  "}),
         _file(authorization={**GO_SITE, "unexpected": True}),
+        {key: value for key, value in _file().items() if key != "rules"},
+        _file(rules={"type": "https", "url": "https://example.org/metadata"}),
+        _file(rules={**RULES, "path": "metadata/gorefs.yaml"}),
+        _file(rules={**RULES, "repository": "go-site"}),
+        _file(rules={**RULES, "ref": "  "}),
         _file(entities={"Mouse": {"type": "https", "url": "https://e.org/m"}}),
         _file(
             entities={

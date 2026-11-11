@@ -11,6 +11,7 @@ from refresh_helpers import (
     TEST_SOURCES,
     FakeFetchers,
     build_runner,
+    rule_files,
     sources_with_entities,
 )
 from sqlalchemy import Engine, func, select
@@ -25,6 +26,7 @@ from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     JobRecord,
+    RulesSnapshotRecord,
     SabeUserRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
@@ -205,21 +207,38 @@ def test_unknown_kind_is_a_usage_error() -> None:
     assert raised.value.code == 2
 
 
-def test_authorization_rejects_a_source_key(
+@pytest.mark.parametrize("kind", ["authorization", "rules"])
+def test_single_source_kinds_reject_a_source_key(
     use_runtime: InstallRuntime,
     session_factory: sessionmaker[Session],
     capsys: pytest.CaptureFixture[str],
+    kind: str,
 ) -> None:
-    """Authorization has a single source, so naming one is a usage error."""
-    use_runtime({"go-site": USERS_YAML})
+    """Authorization and rules each have one source, so naming one is a usage error."""
+    use_runtime({})
 
     with pytest.raises(SystemExit) as raised:
-        cli.main(["authorization", "go-site"])
+        cli.main([kind, "go-site"])
 
     assert raised.value.code == 2
     assert "omit source_key" in capsys.readouterr().err
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(JobRecord)) == 0
+
+
+def test_cli_refreshes_rules_in_process(
+    use_runtime: InstallRuntime,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refreshing rules from the CLI activates a snapshot through a recorded job."""
+    use_runtime({"go-site": rule_files()})
+
+    assert cli.main(["rules"]) == 0
+
+    assert "rules_refresh go-site succeeded" in capsys.readouterr().out
+    with session_factory() as session:
+        assert session.scalar(select(RulesSnapshotRecord.active)) is True
 
 
 def test_cli_runs_an_annotation_refresh_in_process(

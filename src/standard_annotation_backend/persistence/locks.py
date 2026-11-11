@@ -34,6 +34,8 @@ class LockNamespace(Enum):
             group key.
         AUTHORIZATION_REFRESH: Replacement of users and grants. Used without a
             value.
+        RULES_REFRESH: Activation of go-site GO Rule data snapshots. Used without a
+            value.
         REFRESH_START: Creation of refresh jobs of every kind. Used without a
             value.
     """
@@ -43,6 +45,7 @@ class LockNamespace(Enum):
     ENTITY_CATALOG = b"SABEENT"
     ANNOTATION_GROUP = b"SABEGPAD"
     AUTHORIZATION_REFRESH = b"SABEAUTH"
+    RULES_REFRESH = b"SABERULES"
     REFRESH_START = b"SABERSTRT"
 
 

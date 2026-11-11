@@ -1,16 +1,18 @@
 """Define the vocabulary shared by every reference data refresh.
 
 SABE keeps reference data current from external sources: authorization from
-go-site `users.yaml`, ontologies from OBO files, entities from GPI files, and
-annotations from group GPAD files. Refreshing one source means fetching it and
-applying it. These values are shared by every kind and need neither HTTP nor a
-database.
+go-site `users.yaml`, the data GO Rules check from six other go-site files,
+ontologies from OBO files, entities from GPI files, and annotations from group
+GPAD files. Refreshing one source means fetching it and applying it. These values
+are shared by every kind and need neither HTTP nor a database.
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -18,12 +20,16 @@ from typing import Literal, Protocol
 
 from standard_annotation_backend.domain.errors import InvalidInputError
 from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.validation import ValidationIssue
 
 SOURCE_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
 """Pattern for every configured source key, also enforced in SQL checks."""
 
 AUTHORIZATION_SOURCE_KEY = "go-site"
 """Fixed key of the single authorization source."""
+
+RULES_SOURCE_KEY = "go-site"
+"""Fixed key of the single source of the go-site files that GO Rules read."""
 
 
 class RefreshKindName(StrEnum):
@@ -33,6 +39,7 @@ class RefreshKindName(StrEnum):
     ONTOLOGY = "ontology"
     ENTITY = "entity"
     ANNOTATION = "annotation"
+    RULES = "rules"
 
 
 class RefreshFailureCode(StrEnum):
@@ -67,7 +74,8 @@ class SourceProvenance:
 
     Attributes:
         source_type: `github` or `https`.
-        source_locator: `github:<repository>:<path>`, or the configured URL.
+        source_locator: `github:<repository>:<path>`, `github:<repository>` for
+            files packed with `pack_source_files`, or the configured URL.
         source_revision: Resolved commit SHA for GitHub sources, otherwise `None`.
         source_checksum: Lowercase SHA-256 of the downloaded bytes, before any
             decompression.
@@ -88,12 +96,14 @@ class SourceDocument:
     Attributes:
         source_key: Configured key of the fetched source.
         source_type: `github` or `https`.
-        source_locator: `github:<repository>:<path>`, or the configured URL even
-            when redirects were followed.
+        source_locator: `github:<repository>:<path>`, `github:<repository>` for
+            files packed with `pack_source_files`, or the configured URL even when
+            redirects were followed.
         source_revision: Resolved commit SHA for GitHub sources, otherwise `None`.
         source_checksum: Lowercase SHA-256 of `content`.
         fetched_at: When retrieval completed.
-        content: The downloaded bytes, before any decompression.
+        content: The downloaded bytes, before any decompression. Several files
+            read from one commit are packed with `pack_source_files`.
     """
 
     source_key: str
@@ -231,6 +241,7 @@ REFRESH_JOB_TYPES: Mapping[RefreshKindName, JobType] = {
     RefreshKindName.ONTOLOGY: JobType.ONTOLOGY_REFRESH,
     RefreshKindName.ENTITY: JobType.ENTITY_REFRESH,
     RefreshKindName.ANNOTATION: JobType.ANNOTATION_REFRESH,
+    RefreshKindName.RULES: JobType.RULES_REFRESH,
 }
 """Job type that refreshes one source of each kind.
 
@@ -257,6 +268,29 @@ def refresh_dispatch_failure_message(kind: RefreshKindName) -> str:
     return f"{kind.value.capitalize()} refresh could not be dispatched"
 
 
+MAX_REPORTED_ISSUES = 100
+"""Most validation issues stored with one failed refresh job."""
+
+
+def validation_failure_details(issues: Sequence[ValidationIssue]) -> dict[str, object]:
+    """Describe a document's validation issues for a failed refresh job.
+
+    Every issue is counted, but only the first 100 are kept, so a badly broken
+    document cannot make the job record very large.
+    """
+    return {
+        "issue_count": len(issues),
+        "issues": [
+            {
+                "location": list(issue["location"]),
+                "message": issue["message"],
+                "type": issue["type"],
+            }
+            for issue in issues[:MAX_REPORTED_ISSUES]
+        ],
+    }
+
+
 def job_source_key(parameters: Mapping[str, object]) -> str:
     """Return the `source_key` stored on a refresh or retirement job.
 
@@ -272,3 +306,44 @@ def job_source_key(parameters: Mapping[str, object]) -> str:
     ):
         raise ValueError("invalid persisted refresh job parameters")
     return source_key
+
+
+def pack_source_files(files: Mapping[str, bytes]) -> bytes:
+    """Combine files fetched from one commit into the content of one document.
+
+    A kind that reads several files from the same commit, such as the `rules`
+    kind, receives them as one `SourceDocument`, so they share one provenance and
+    one checksum. The content is JSON that maps each path to its base64-encoded
+    bytes. Paths are sorted, so the same files always give the same content and
+    checksum.
+
+    Args:
+        files: The downloaded bytes of each file, keyed by path.
+    """
+    return json.dumps(
+        {path: base64.b64encode(files[path]).decode("ascii") for path in sorted(files)},
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
+def unpack_source_files(content: bytes) -> dict[str, bytes]:
+    """Return the files that `pack_source_files` combined.
+
+    Raises:
+        ValueError: If `content` is not in the form `pack_source_files` writes.
+    """
+    try:
+        packed = json.loads(content)
+    except ValueError:
+        raise ValueError("content is not packed source files") from None
+    if not isinstance(packed, dict) or not all(
+        isinstance(value, str) for value in packed.values()
+    ):
+        raise ValueError("content is not packed source files")
+    try:
+        return {
+            path: base64.b64decode(value, validate=True)
+            for path, value in packed.items()
+        }
+    except ValueError:
+        raise ValueError("content is not packed source files") from None

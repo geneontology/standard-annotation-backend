@@ -26,6 +26,7 @@ from standard_annotation_backend.persistence.repositories.ontologies import (
     OntologySnapshotPrunedError,
 )
 from standard_annotation_backend.persistence.repositories.pagination import Page
+from standard_annotation_backend.persistence.repositories.rules import RulesRepository
 
 __all__ = [
     "AnnotationCommentRepository",
@@ -40,4 +41,5 @@ __all__ = [
     "OntologyRepository",
     "OntologySnapshotPrunedError",
     "Page",
+    "RulesRepository",
 ]

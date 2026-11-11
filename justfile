@@ -26,7 +26,7 @@ logs:
 migrate:
     docker compose run --build --rm web alembic upgrade head
 
-# Refresh reference data from config/sources.yaml: KIND is authorization, ontology, entity, or annotation.
+# Refresh reference data from config/sources.yaml: KIND is authorization, rules, ontology, entity, or annotation.
 [positional-arguments]
 refresh KIND *SOURCE:
     docker compose run --build --rm web python -m standard_annotation_backend.cli.refresh "$@"

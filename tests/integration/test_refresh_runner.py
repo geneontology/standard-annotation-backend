@@ -13,6 +13,7 @@ from refresh_helpers import (
     FakeFetchers,
     build_runner,
     ignore_progress,
+    rule_files,
     start_job,
 )
 from seeding import create_job
@@ -26,6 +27,7 @@ from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     RefreshKindName,
 )
+from standard_annotation_backend.go_site.rule_files import GOREFS_PATH
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     bind_try_lock,
@@ -125,6 +127,16 @@ CASES = {
         applied_action=AuditAction.AUTHORIZATION_REFRESHED,
         public_error="Authorization refresh failed",
         recovery_refetches=True,
+    ),
+    "rules": KindCase(
+        job_type=JobType.RULES_REFRESH,
+        source_key="go-site",
+        content=rule_files(),
+        invalid_content=rule_files({GOREFS_PATH: b"- id: GO_REF:15\n"}),
+        invalid_code=RefreshFailureCode.INVALID_DOCUMENT,
+        applied_action=AuditAction.RULES_REFRESHED,
+        public_error="Rules refresh failed",
+        recovery_refetches=False,
     ),
 }
 

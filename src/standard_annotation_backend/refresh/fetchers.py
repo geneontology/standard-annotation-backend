@@ -1,9 +1,11 @@
 """Fetch configured reference data sources.
 
-There is one fetcher per source type. Both return a `SourceDocument`: the
-downloaded bytes plus provenance that identifies exactly what was fetched. Each
-refresh service decodes the bytes itself. Failures raise `SourceError` with a fixed
-code; messages and logs never include URLs or content.
+There is one fetcher per source type. Each returns a `SourceDocument`: the
+downloaded bytes plus provenance that identifies exactly what was fetched. The
+GO Rule source is several files read at one commit, which
+`GitHubSourceFetcher.fetch_files` packs into one document. Each refresh service
+decodes the bytes itself. Failures raise `SourceError` with a fixed code;
+messages and logs never include URLs or content.
 """
 
 from __future__ import annotations
@@ -18,12 +20,18 @@ from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     SourceDocument,
     TerminalRefreshError,
+    pack_source_files,
 )
 from standard_annotation_backend.integrations.github import (
     GitHubClient,
     GitHubIntegrationError,
 )
-from standard_annotation_backend.refresh.sources import GitHubSource, HttpsSource
+from standard_annotation_backend.refresh.sources import (
+    ConfiguredSource,
+    GitHubRulesSource,
+    GitHubSource,
+    HttpsSource,
+)
 
 _RETRIEVAL_CODES = frozenset(
     {
@@ -63,9 +71,7 @@ class SourceFetcher(Protocol):
     that returns fixed documents without using the network.
     """
 
-    def fetch(
-        self, source_key: str, source: GitHubSource | HttpsSource
-    ) -> SourceDocument:
+    def fetch(self, source_key: str, source: ConfiguredSource) -> SourceDocument:
         """Return the fetched document.
 
         Raises:
@@ -97,6 +103,35 @@ class GitHubSourceFetcher:
             source_key=source_key,
             source_type="github",
             source_locator=f"github:{source.repository}:{source.path}",
+            source_revision=commit,
+            source_checksum=hashlib.sha256(content).hexdigest(),
+            fetched_at=datetime.now(UTC),
+            content=content,
+        )
+
+    def fetch_files(self, source_key: str, source: GitHubRulesSource) -> SourceDocument:
+        """Resolve the ref once, then download every path at the resolved commit.
+
+        The files are packed into one document with `pack_source_files`, so they
+        share one revision and one checksum.
+
+        Raises:
+            SourceError: With `source_error` if GitHub cannot supply the commit or
+                any file.
+        """
+        try:
+            commit = self._github.resolve_commit(source.repository, source.ref)
+            files = {
+                path: self._github.fetch_raw_content(source.repository, path, commit)
+                for path in source.paths
+            }
+        except GitHubIntegrationError:
+            raise SourceError(RefreshFailureCode.SOURCE_ERROR) from None
+        content = pack_source_files(files)
+        return SourceDocument(
+            source_key=source_key,
+            source_type="github",
+            source_locator=f"github:{source.repository}",
             source_revision=commit,
             source_checksum=hashlib.sha256(content).hexdigest(),
             fetched_at=datetime.now(UTC),
@@ -168,14 +203,14 @@ class SourceFetchers:
         self._github = GitHubSourceFetcher(client, timeout)
         self._https = HttpsSourceFetcher(client, timeout)
 
-    def fetch(
-        self, source_key: str, source: GitHubSource | HttpsSource
-    ) -> SourceDocument:
+    def fetch(self, source_key: str, source: ConfiguredSource) -> SourceDocument:
         """Fetch one source.
 
         Raises:
             SourceError: If retrieval fails.
         """
+        if isinstance(source, GitHubRulesSource):
+            return self._github.fetch_files(source_key, source)
         if isinstance(source, GitHubSource):
             return self._github.fetch(source_key, source)
         return self._https.fetch(source_key, source)

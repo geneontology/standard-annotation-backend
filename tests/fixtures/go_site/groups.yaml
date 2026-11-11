@@ -1,0 +1,13 @@
+####
+#### Metadata on GOC groups.
+####
+-
+  label: 'GO Central'
+  id: http://geneontology.org
+  shorthand: GO_Central
+  parent_group: GOC
+-
+  label: 'Mouse Genome Informatics'
+  id: http://www.informatics.jax.org
+  shorthand: MGI
+  parent_group: GOC
