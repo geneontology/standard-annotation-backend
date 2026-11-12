@@ -17,10 +17,12 @@ settings = get_settings()
 
 
 def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
-    """Return the Celery Beat schedule that refreshes each kind of reference data.
+    """Return the Celery Beat schedule of refreshes and the nightly QC report.
 
-    Each kind gets one entry that runs `sabe.refresh.schedule` with the kind's name,
-    on the cron expression from that kind's `*_refresh_cron` setting.
+    Each kind of reference data gets one entry that runs `sabe.refresh.schedule`
+    with the kind's name, on the cron expression from that kind's
+    `*_refresh_cron` setting. The all-groups QC report runs
+    `sabe.qc_report.schedule` on `qc_report_cron`.
     """
     crons = {
         "authorization": settings.authorization_refresh_cron,
@@ -29,7 +31,7 @@ def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
         "entity": settings.entity_refresh_cron,
         "annotation": settings.annotation_refresh_cron,
     }
-    return {
+    schedule: dict[str, dict[str, object]] = {
         f"{kind}-refresh": {
             "task": "sabe.refresh.schedule",
             "schedule": crontab.from_string(cron),
@@ -37,6 +39,12 @@ def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
         }
         for kind, cron in crons.items()
     }
+    schedule["annotation-qc-report"] = {
+        "task": "sabe.qc_report.schedule",
+        "schedule": crontab.from_string(settings.qc_report_cron),
+        "args": (),
+    }
+    return schedule
 
 
 @setup_logging.connect

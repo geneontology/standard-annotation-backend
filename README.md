@@ -95,7 +95,8 @@ have a single source, so they take no `SOURCE`.
 When `just up` is running, the scheduler refreshes each kind on a UTC cron schedule:
 `SABE_AUTHORIZATION_REFRESH_CRON`, `SABE_RULES_REFRESH_CRON`,
 `SABE_ONTOLOGY_REFRESH_CRON`, `SABE_ENTITY_REFRESH_CRON`, and
-`SABE_ANNOTATION_REFRESH_CRON`. With an `admin/global` bearer token, you can also
+`SABE_ANNOTATION_REFRESH_CRON`. It runs the nightly annotation QC report on
+`SABE_QC_REPORT_CRON`. With an `admin/global` bearer token, you can also
 start a refresh and follow its job through the API:
 
 ```bash

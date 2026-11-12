@@ -1,4 +1,4 @@
-"""Create and run reference data refresh jobs with Celery.
+"""Create and run reference data refresh jobs and QC reports with Celery.
 
 Four tasks make up the refresh pipeline:
 
@@ -12,6 +12,12 @@ Four tasks make up the refresh pipeline:
   that is no longer configured.
 - `sabe.ontology.prune(ontology_key)` deletes old snapshot data. `RefreshRunner`
   schedules it after each ontology job finishes.
+
+Ontology activations and annotation publications queue term replacement jobs,
+which `sabe.term_replacement.run(job_id)` runs. QC reports follow the same
+pattern: `sabe.qc_report.schedule` is published by Celery Beat and starts the
+nightly all-groups report, and `sabe.qc_report.run(job_id)` runs one report,
+whether scheduled or started through the API.
 
 Scheduling and execution are separate tasks so that a job exists in PostgreSQL
 before any worker is asked to run it. If publishing a message fails, the job is
@@ -42,6 +48,7 @@ from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshBusyError,
 )
+from standard_annotation_backend.services.qc_report_service import QcReportService
 from standard_annotation_backend.services.refresh_start_service import (
     RefreshStartService,
 )
@@ -219,6 +226,55 @@ def run_term_replacement(task: Task, job_id: str) -> None:
         failure_type = type(error).__name__
     if failure_type is not None:
         _retry_safely(task, job_id, failure_type)
+
+
+@celery_app.task(bind=True, max_retries=None, name="sabe.qc_report.run")
+def run_qc_report(task: Task, job_id: str) -> None:
+    """Run one QC report.
+
+    A report whose scope is busy, and any unexpected error, is retried after 30
+    seconds like `run_refresh`; a retried report starts again from empty rows.
+    """
+    failure_type: str | None = None
+    try:
+        durable_job_id = UUID(job_id)
+        with worker_runtime(
+            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
+        ) as runtime:
+            runtime.qc_report.run(durable_job_id)
+    except Exception as error:
+        failure_type = type(error).__name__
+    if failure_type is not None:
+        _retry_safely(task, job_id, failure_type)
+
+
+def dispatch_qc_report(job: Job) -> None:
+    """Send a queued QC report to its Celery task.
+
+    `QcReportService.start` calls this after committing the job.
+    """
+    run_qc_report.delay(str(job.job_id))
+
+
+@celery_app.task(bind=True, max_retries=None, name="sabe.qc_report.schedule")
+def schedule_qc_report(task: Task) -> None:
+    """Start the nightly all-groups QC report.
+
+    Celery Beat runs this task on `qc_report_cron`. If a report of all groups
+    is already queued, it is joined and sent again instead of duplicated.
+    """
+    failure_type: str | None = None
+    try:
+        with worker_runtime(
+            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
+        ) as runtime:
+            QcReportService(runtime.unit_of_work_factory, dispatch_qc_report).start(
+                system_context("scheduler"), None
+            )
+    except Exception as error:
+        failure_type = type(error).__name__
+    if failure_type is not None:
+        _retry_safely(task, "scheduler", failure_type)
 
 
 def _dispatch_replacement(job: Job) -> None:

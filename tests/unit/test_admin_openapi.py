@@ -91,6 +91,7 @@ def test_job_resource_documents_exact_fields_and_vocabulary(schema: dict) -> Non
     assert set(resource["required"]) == set(resource["properties"])
     assert schema["components"]["schemas"]["JobType"]["enum"] == [
         "annotation_cutover",
+        "annotation_qc_report",
         "annotation_refresh",
         "authorization_refresh",
         "entity_refresh",

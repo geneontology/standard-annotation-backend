@@ -1,7 +1,7 @@
 """Gather the facts semantic validation needs from the active reference data."""
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from itertools import batched
 from uuid import UUID
 
@@ -13,10 +13,16 @@ from standard_annotation_backend.domain.ontology import (
     GO_ONTOLOGY_KEY,
     SUBCLASS_PREDICATE,
 )
+from standard_annotation_backend.domain.qc_reports import (
+    EntityCatalogUse,
+    OntologySnapshotUse,
+    ReferenceDataVersions,
+)
 from standard_annotation_backend.domain.semantic_validation.checked_ancestors import (
     checked_ancestor_terms,
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
+    ActiveSnapshots,
     AnnotationFacts,
     EntityFact,
     ReferenceDataUnavailableError,
@@ -30,10 +36,10 @@ from standard_annotation_backend.domain.semantic_validation.identifiers import (
 )
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     STORED_RULE_DATA,
-    RuleData,
 )
 from standard_annotation_backend.domain.term_replacement import replacement_step
 from standard_annotation_backend.persistence.models import (
+    EntityCatalogSnapshotRecord,
     EntitySourceRecord,
     OntologyAltIdRecord,
     OntologyClosureRecord,
@@ -46,15 +52,6 @@ from standard_annotation_backend.persistence.models import (
 _QUERY_BATCH_SIZE = 5_000
 RULES_REFERENCE_DATA = "rules"
 """The name `ReferenceDataUnavailableError` uses for the go-site rule data."""
-
-
-@dataclass(frozen=True, slots=True)
-class _ActiveSnapshots:
-    """The snapshots one call reads, resolved once when it starts."""
-
-    ontology_versions: Mapping[str, UUID]
-    rules_snapshot_id: UUID
-    rule_data: RuleData
 
 
 class ValidationFactsRepository:
@@ -72,6 +69,8 @@ class ValidationFactsRepository:
         annotations: Sequence[Annotation],
         peers: Sequence[tuple[UUID, ...]],
         ontologies: Mapping[str, tuple[str, ...]],
+        *,
+        snapshots: ActiveSnapshots | None = None,
     ) -> tuple[AnnotationFacts, ...]:
         """Return the facts about each annotation, in the same order.
 
@@ -90,6 +89,9 @@ class ValidationFactsRepository:
                 write's peers come from its prepare step, taken under locks.
             ontologies: The identifier prefixes of each configured ontology, keyed
                 by ontology key. GO must be among them.
+            snapshots: Snapshots the caller already resolved with
+                `active_snapshots`, such as a report that records which ones it
+                used. Resolved here when omitted.
 
         Returns:
             One `AnnotationFacts` per annotation.
@@ -102,7 +104,8 @@ class ValidationFactsRepository:
         """
         if len(peers) != len(annotations):
             raise ValueError("every annotation needs its duplicate peers")
-        snapshots = self._active_snapshots(ontologies)
+        if snapshots is None:
+            snapshots = self.active_snapshots(ontologies)
         version_by_prefix = {
             prefix: snapshots.ontology_versions[key]
             for key, prefixes in ontologies.items()
@@ -198,7 +201,7 @@ class ValidationFactsRepository:
             ReferenceDataUnavailableError: If a configured ontology or the go-site
                 rule data has no active snapshot.
         """
-        snapshots = self._active_snapshots(ontologies)
+        snapshots = self.active_snapshots(ontologies)
         version_by_prefix = {
             prefix: snapshots.ontology_versions[key]
             for key, prefixes in ontologies.items()
@@ -233,13 +236,17 @@ class ValidationFactsRepository:
             },
         )
 
-    def _active_snapshots(
+    def active_snapshots(
         self, ontologies: Mapping[str, Iterable[str]]
-    ) -> _ActiveSnapshots:
+    ) -> ActiveSnapshots:
         """Return the active snapshots of every configured ontology and the rule data.
+
+        Args:
+            ontologies: The configured ontologies, keyed by ontology key.
 
         Raises:
             ReferenceDataUnavailableError: If any of them has no active snapshot.
+            StoredDataError: If the stored rule data cannot be read.
         """
         versions = {
             key: version_id
@@ -264,10 +271,60 @@ class ValidationFactsRepository:
         if missing:
             raise ReferenceDataUnavailableError(missing)
         assert rules is not None
-        return _ActiveSnapshots(
+        return ActiveSnapshots(
             ontology_versions=versions,
             rules_snapshot_id=rules.snapshot_id,
             rule_data=STORED_RULE_DATA.load(rules.rule_data),
+        )
+
+    def reference_versions(self, snapshots: ActiveSnapshots) -> ReferenceDataVersions:
+        """Describe the reference data of `snapshots` and the active entity catalogs.
+
+        Entity facts are always read from the active catalogs, so the catalogs
+        active when this runs are the ones listed.
+        """
+        ontology_rows = self.session.execute(
+            select(
+                OntologyMetadataRecord.ontology_key,
+                OntologyMetadataRecord.version_id,
+                OntologyMetadataRecord.document_version,
+                OntologyMetadataRecord.source_revision,
+            )
+            .where(
+                OntologyMetadataRecord.version_id.in_(
+                    list(snapshots.ontology_versions.values())
+                )
+            )
+            .order_by(OntologyMetadataRecord.ontology_key)
+        )
+        go_site_revision = self.session.scalar(
+            select(RulesSnapshotRecord.source_revision).where(
+                RulesSnapshotRecord.snapshot_id == snapshots.rules_snapshot_id
+            )
+        )
+        catalogs = self.session.execute(
+            select(
+                EntityCatalogSnapshotRecord.source_key,
+                EntityCatalogSnapshotRecord.snapshot_id,
+            )
+            .where(EntityCatalogSnapshotRecord.active.is_(True))
+            .order_by(EntityCatalogSnapshotRecord.source_key)
+        )
+        return ReferenceDataVersions(
+            ontologies=tuple(
+                OntologySnapshotUse(
+                    ontology_key=key,
+                    version_id=version_id,
+                    document_version=document_version,
+                    source_revision=source_revision,
+                )
+                for key, version_id, document_version, source_revision in ontology_rows
+            ),
+            go_site_revision=go_site_revision,
+            entity_catalogs=tuple(
+                EntityCatalogUse(source_key=source_key, snapshot_id=snapshot_id)
+                for source_key, snapshot_id in catalogs
+            ),
         )
 
     def _term_facts(self, wanted: dict[UUID, set[str]]) -> dict[str, TermFact]:

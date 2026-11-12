@@ -838,9 +838,13 @@ POST /admin/annotation-cutovers
   and makes the group permanently SABE-managed. Requires `source_key`.
 
 POST /reports/annotation-qc
-  Creates an annotation QC / semantic validation report job and returns
-  202 Accepted with a job ID. The same job type may also be created by a
-  scheduler for periodic reports.
+  Creates, or reuses the queued, annotation QC report job for all groups or
+  one group and returns 202 Accepted with the job. The scheduler also creates
+  a nightly all-groups report.
+
+GET /reports/annotation-qc/{report_id}
+GET /reports/annotation-qc/{report_id}/findings
+  Return a report's summary, and its findings, within the caller's scope.
 
 GET /admin/jobs/{job_id}
   Returns queued/running/succeeded/failed status, progress, counts,
@@ -1039,19 +1043,27 @@ identifies them, counts, and warnings/errors.
 ### QC Reporting
 
 Semantic validation of client writes is synchronous, as described under Validation.
-Reporting on stored annotations, which can have semantic issues from imports or from
-later reference data refreshes, should use the asynchronous job model. Full QC/report
-generation should be handled as manually triggered or periodic jobs so that large scans
-do not block normal API requests.
+Stored annotations can still have issues, from GPAD imports or from later reference data
+refreshes, so an `annotation_qc_report` job validates every active annotation in its
+scope (all groups or one owning group) with the same checks, in ID-ordered batches read
+without locks. Admins start reports through the API, and the scheduler runs an
+all-groups report nightly. One report runs per scope at a time.
 
-A separate QC process may apply the same pairwise duplicate predicate to imported data;
-the import job itself performs no duplicate checks or duplicate rejection. QC should
-report the annotation pairs that satisfy the predicate. Because reference overlap is not
-necessarily transitive for multi-reference annotations, QC must not claim that connected
-components of duplicate pairs are equivalence classes. Report jobs should record the
-applicable rule set or duplicate-policy version, input selection, source import job or
-included annotation versions, counts, findings, warnings/errors, and links to report
-artifacts.
+The report stores one finding per annotation with issues, and counts by group and by
+group and issue type. A stored annotation that no longer passes the schema becomes a
+finding of type `structural` rather than failing the job. Duplicates are reported per
+annotation, each listing its peers: because reference overlap is not transitive for
+multi-reference annotations, reports never group duplicate pairs into connected
+components. Snapshots are resolved per batch, and the job result records every set of
+ontology snapshots, entity catalog snapshots, and go-site commits used, with the SABE and
+schema versions. Missing reference data fails the job with `reference_data_unavailable`
+and leaves no rows.
+
+Summaries and counts are kept permanently. Findings are kept only for the most recent
+completed report of each scope: the transaction that marks a report succeeded deletes
+the findings of older reports of that scope. Readers need only the read role; counts are
+limited to the reader's group and findings to the reader's ownership scope. See
+[annotation validation](docs/annotation-validation.md#reports) for the API behavior.
 
 ## Deployment and Operations
 

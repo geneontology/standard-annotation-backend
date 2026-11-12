@@ -38,6 +38,9 @@ class LockNamespace(Enum):
             value.
         REFRESH_START: Creation of refresh jobs of every kind. Used without a
             value.
+        QC_REPORT: One running QC report per scope, keyed by group key, or
+            without a value for all groups.
+        QC_REPORT_START: Creation of QC report jobs. Used without a value.
         TERM_REPLACEMENT: One running term replacement job per scope, keyed by
             group key, or without a value for all groups.
         TERM_REPLACEMENT_START: Creation of term replacement jobs. Used without a
@@ -51,6 +54,8 @@ class LockNamespace(Enum):
     AUTHORIZATION_REFRESH = b"SABEAUTH"
     RULES_REFRESH = b"SABERULES"
     REFRESH_START = b"SABERSTRT"
+    QC_REPORT = b"SABEQC"
+    QC_REPORT_START = b"SABEQCSTRT"
     TERM_REPLACEMENT = b"SABETERM"
     TERM_REPLACEMENT_START = b"SABETRPLS"
 

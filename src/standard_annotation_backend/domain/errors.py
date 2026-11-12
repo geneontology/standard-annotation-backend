@@ -103,6 +103,10 @@ class ConflictError(SabeError):
     """The request is valid but conflicts with the current state."""
 
 
+class GoneError(SabeError):
+    """The resource existed but is permanently no longer available."""
+
+
 class PreconditionFailedError(SabeError):
     """The version named in `If-Match` is not current."""
 

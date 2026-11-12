@@ -159,3 +159,14 @@ ANNOTATION_REFRESH_EXAMPLES: dict[str, Example] = {
         "value": {},
     },
 }
+
+QC_REPORT_EXAMPLES: dict[str, Example] = {
+    "all-groups": {
+        "summary": "Report on every group (global admins)",
+        "value": {},
+    },
+    "one-group": {
+        "summary": "Report on one group",
+        "value": {"owning_group_id": "MGI"},
+    },
+}

@@ -118,31 +118,6 @@ def _set_value(data: dict[str, Any], path: tuple[str | int, ...], value: str) ->
     container[path[-1]] = value
 
 
-def term_replacement_parameters(group_key: str | None) -> dict[str, object]:
-    """Return the parameters of a job for one group, or for all groups."""
-    return {} if group_key is None else {"group_key": group_key}
-
-
-def term_replacement_scope(parameters: Mapping[str, object]) -> str | None:
-    """Return the group a job's parameters name, or `None` for all groups.
-
-    Raises:
-        ValueError: If the parameters are neither `{}` nor `{"group_key": key}`
-            with a non-blank key and no surrounding whitespace.
-    """
-    if not parameters:
-        return None
-    group_key = parameters.get("group_key")
-    if (
-        set(parameters) != {"group_key"}
-        or not isinstance(group_key, str)
-        or not group_key
-        or group_key != group_key.strip()
-    ):
-        raise ValueError("term replacement parameters must be {} or {group_key}")
-    return group_key
-
-
 @dataclass(frozen=True, slots=True)
 class TermReplacementResult:
     """Summarize one term replacement job.

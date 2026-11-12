@@ -23,7 +23,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -303,9 +303,10 @@ class JobRecord(Base):
     __tablename__ = "job"
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('annotation_cutover', 'annotation_refresh', "
-            "'authorization_refresh', 'entity_refresh', 'entity_retirement', "
-            "'ontology_refresh', 'rules_refresh', 'term_replacement')",
+            "job_type IN ('annotation_cutover', 'annotation_qc_report', "
+            "'annotation_refresh', 'authorization_refresh', 'entity_refresh', "
+            "'entity_retirement', 'ontology_refresh', 'rules_refresh', "
+            "'term_replacement')",
             name="type_allowed",
         ),
         CheckConstraint(
@@ -374,6 +375,69 @@ class JobRecord(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class QcReportFindingRecord(Base):
+    """Store one annotation's issues in one QC report.
+
+    Rows are kept only for the most recent completed report of each scope;
+    `QcReportRepository.expire_findings_of_other_reports` deletes the rest.
+    """
+
+    __tablename__ = "qc_report_finding"
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(issues) = 'array'", name="issues_array"),
+        Index(
+            "ix_qc_report_finding_job_id_owning_group_id", "job_id", "owning_group_id"
+        ),
+        Index(
+            "ix_qc_report_finding_issue_types", "issue_types", postgresql_using="gin"
+        ),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    annotation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    annotation_version: Mapped[int] = mapped_column(Integer)
+    owning_group_id: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(Text)
+    issue_types: Mapped[list[str]] = mapped_column(ARRAY(Text))
+    issues: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+
+
+class QcReportGroupCountRecord(Base):
+    """Count one group's checked annotations and annotations with issues in a report."""
+
+    __tablename__ = "qc_report_group_count"
+
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    owning_group_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    annotations_checked: Mapped[int] = mapped_column(Integer)
+    annotations_with_issues: Mapped[int] = mapped_column(Integer)
+
+
+class QcReportIssueCountRecord(Base):
+    """Count one group's annotations with one issue type in a report."""
+
+    __tablename__ = "qc_report_issue_count"
+
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    owning_group_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    issue_type: Mapped[str] = mapped_column(Text, primary_key=True)
+    annotation_count: Mapped[int] = mapped_column(Integer)
 
 
 class EntityCatalogSnapshotRecord(Base):

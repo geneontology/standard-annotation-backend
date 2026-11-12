@@ -1,11 +1,12 @@
 """Read and write annotations in caller-managed transactions."""
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from itertools import batched
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, delete, exists, select
+from sqlalchemy import ColumnElement, delete, exists, select, tuple_
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotation_search import (
@@ -22,6 +23,7 @@ from standard_annotation_backend.domain.annotations import (
     StaleAnnotationVersionError,
     new_annotation_id,
 )
+from standard_annotation_backend.domain.duplicate_policy import DuplicateKey
 from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.persistence.annotation_data import (
     AnnotationPersistenceData,
@@ -43,6 +45,9 @@ from standard_annotation_backend.persistence.repositories.pagination import (
     Page,
     load_page,
 )
+
+_PEER_BATCH_SIZE = 2_000
+"""How many lookup values one batched query reads."""
 
 
 def _closure_condition(term_id: str, predicate_id: str) -> ColumnElement[bool]:
@@ -398,6 +403,84 @@ class AnnotationRepository:
                 != exclude_annotation_id
             )
         return tuple(self.session.scalars(statement))
+
+    def duplicate_peers_for(
+        self, keys: Mapping[UUID, DuplicateKey]
+    ) -> dict[UUID, tuple[UUID, ...]]:
+        """Return each annotation's active duplicate peers, for a whole batch.
+
+        Peers share the annotation's signature and at least one of its
+        references, as in `find_duplicate_peer_ids`. Nothing is locked, so the
+        result suits reports, not writes.
+
+        Args:
+            keys: Each annotation's duplicate key.
+
+        Returns:
+            Each annotation's peers, in ID order, excluding itself.
+        """
+        pairs = sorted(
+            {
+                (key.signature, reference)
+                for key in keys.values()
+                for reference in key.references
+            }
+        )
+        holders: dict[tuple[str, str], set[UUID]] = {}
+        for batch in batched(pairs, _PEER_BATCH_SIZE, strict=False):
+            rows = self.session.execute(
+                select(
+                    AnnotationDuplicateReferenceRecord.duplicate_base_signature,
+                    AnnotationDuplicateReferenceRecord.canonical_reference,
+                    AnnotationDuplicateReferenceRecord.annotation_id,
+                )
+                .join(
+                    AnnotationRecord,
+                    AnnotationRecord.annotation_id
+                    == AnnotationDuplicateReferenceRecord.annotation_id,
+                )
+                .where(
+                    AnnotationRecord.status == AnnotationStatus.ACTIVE,
+                    tuple_(
+                        AnnotationDuplicateReferenceRecord.duplicate_base_signature,
+                        AnnotationDuplicateReferenceRecord.canonical_reference,
+                    ).in_(batch),
+                )
+            )
+            for signature, reference, annotation_id in rows:
+                holders.setdefault((signature, reference), set()).add(annotation_id)
+        return {
+            annotation_id: tuple(
+                sorted(
+                    {
+                        peer
+                        for reference in key.references
+                        for peer in holders.get((key.signature, reference), ())
+                    }
+                    - {annotation_id}
+                )
+            )
+            for annotation_id, key in keys.items()
+        }
+
+    def creators(self, annotation_ids: Collection[UUID]) -> dict[UUID, str]:
+        """Return the actor of each annotation's first version.
+
+        This is the actor a self-scoped token must match to read the annotation.
+        """
+        found: dict[UUID, str] = {}
+        for batch in batched(sorted(annotation_ids), _PEER_BATCH_SIZE, strict=False):
+            rows = self.session.execute(
+                select(
+                    AnnotationVersionRecord.annotation_id,
+                    AnnotationVersionRecord.actor_id,
+                ).where(
+                    AnnotationVersionRecord.annotation_id.in_(batch),
+                    AnnotationVersionRecord.version == 1,
+                )
+            )
+            found.update({annotation_id: actor for annotation_id, actor in rows})
+        return found
 
     def prepare_create(self, annotation: Annotation) -> PreparedCreate:
         """Take the locks a create needs and find the annotation's duplicates.

@@ -11,12 +11,14 @@ from seeding import (
     SHIPPED_SOURCES,
     SeedTerm,
     _succeeded_job,
+    insert_annotation,
     set_rule_data,
 )
 from sqlalchemy import update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.duplicate_policy import duplicate_key
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.domain.semantic_validation.facts import (
     EntityFact,
@@ -265,3 +267,52 @@ def test_replacement_facts_follow_chains_to_terms_the_annotation_does_not_use(
     assert facts.terms["GO:0000013"].status is TermStatus.CURRENT
     assert facts.snapshot_ids["go"] == go_version_id
     assert set(facts.snapshot_ids) == set(ONTOLOGIES) | {"rules"}
+
+
+def test_reference_versions_name_each_snapshot_gather_used(
+    unit_of_work_factory: UnitOfWorkFactory,
+    seed_active_subjects: Callable[..., None],
+    reference_data: Callable[..., None],
+) -> None:
+    """Resolved snapshots are reused by gather and described for the report."""
+    seed_active_subjects("UniProtKB:P12345")
+    with unit_of_work_factory() as uow:
+        snapshots = uow.validation_facts.active_snapshots(ONTOLOGIES)
+        versions = uow.validation_facts.reference_versions(snapshots)
+        (facts,) = uow.validation_facts.gather(
+            [_annotation()], [()], ONTOLOGIES, snapshots=snapshots
+        )
+
+    assert {use.ontology_key for use in versions.ontologies} == set(ONTOLOGIES)
+    assert {use.version_id for use in versions.ontologies} == set(
+        snapshots.ontology_versions.values()
+    )
+    assert versions.go_site_revision == "c" * 40
+    assert len(versions.entity_catalogs) == 1
+    assert facts.entity is not None
+
+
+def test_duplicate_peers_are_found_for_a_whole_batch(
+    unit_of_work_factory: UnitOfWorkFactory, session_factory: sessionmaker[Session]
+) -> None:
+    """Each annotation of a duplicate pair lists the other; distinct ones list none."""
+    shared = _annotation()
+    distinct = _annotation(references=["PMID:99"])
+    with session_factory() as session:
+        first = insert_annotation(session, shared).annotation_id
+        second = insert_annotation(session, shared, actor_id="other").annotation_id
+        alone = insert_annotation(session, distinct).annotation_id
+        session.commit()
+
+    with unit_of_work_factory() as uow:
+        peers = uow.annotations.duplicate_peers_for(
+            {
+                first: duplicate_key(shared),
+                second: duplicate_key(shared),
+                alone: duplicate_key(distinct),
+            }
+        )
+        creators = uow.annotations.creators([first, second, alone])
+
+    assert peers == {first: (second,), second: (first,), alone: ()}
+    assert creators == {first: "curator", second: "other", alone: "curator"}

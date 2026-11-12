@@ -111,6 +111,10 @@ class JobRepository:
             .limit(1)
         )
 
+    def lock_qc_report_starts(self) -> None:
+        """Serialize creation of QC report jobs until the transaction ends."""
+        acquire_transaction_lock(self.session, LockNamespace.QC_REPORT_START)
+
     def lock_term_replacement_starts(self) -> None:
         """Serialize creation of term replacement jobs until the transaction ends."""
         acquire_transaction_lock(self.session, LockNamespace.TERM_REPLACEMENT_START)

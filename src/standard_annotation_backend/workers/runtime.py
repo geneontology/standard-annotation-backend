@@ -33,6 +33,7 @@ from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
 )
+from standard_annotation_backend.services.qc_report_service import QcReportRunner
 from standard_annotation_backend.services.rules_refresh_service import (
     RulesRefreshService,
 )
@@ -49,11 +50,13 @@ class RefreshComponents:
         ontology: The ontology service, whose `prune` the prune task calls.
         runner: Runs jobs of every kind.
         term_replacement: Runs term replacement jobs.
+        qc_report: Runs QC report jobs.
     """
 
     ontology: OntologyRefreshService
     runner: RefreshRunner
     term_replacement: TermReplacementService
+    qc_report: QcReportRunner
 
 
 def create_refresh_runner(
@@ -101,6 +104,7 @@ def create_refresh_runner(
         term_replacement=TermReplacementService(
             unit_of_work_factory, sources, try_lock
         ),
+        qc_report=QcReportRunner(unit_of_work_factory, sources, try_lock),
         runner=RefreshRunner(
             try_lock=try_lock,
             jobs=jobs,
@@ -122,6 +126,7 @@ class WorkerRuntime:
     ontology: OntologyRefreshService
     runner: RefreshRunner
     term_replacement: TermReplacementService
+    qc_report: QcReportRunner
 
 
 @contextmanager
@@ -164,6 +169,7 @@ def worker_runtime(
                 ontology=refresh.ontology,
                 runner=refresh.runner,
                 term_replacement=refresh.term_replacement,
+                qc_report=refresh.qc_report,
             )
     finally:
         engine.dispose()

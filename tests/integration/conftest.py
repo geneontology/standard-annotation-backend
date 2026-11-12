@@ -194,6 +194,9 @@ APPLICATION_TABLES = (
     "annotation_version",
     "audit_event",
     "annotation",
+    "qc_report_finding",
+    "qc_report_group_count",
+    "qc_report_issue_count",
     "job",
 )
 

@@ -167,6 +167,33 @@ change source `term_replacement` and the requester of the job that triggered the
 replacement. They do not count as local changes when SABE decides whether a GPAD file
 must be imported again.
 
+## Reports
+
+An annotation QC report validates every active annotation in its scope, all groups or
+one owning group, with the same checks as client writes, and keeps one finding for each
+annotation with at least one issue. Each finding lists every issue in the format write
+responses use. A stored annotation that no longer passes the schema becomes a finding
+whose issues have the issue type `structural`. Each annotation of a duplicate pair
+lists its peers; reports do not group duplicates further.
+
+- **Starting.** `POST /reports/annotation-qc` with an optional `owning_group_id`
+  returns `202` and the job. It requires the admin role: a global admin reports on one
+  group or on all groups, and a group admin on its own group. A queued report of the
+  same scope is reused. An all-groups report also runs nightly, on
+  `SABE_QC_REPORT_CRON` (default `0 6 * * *` UTC).
+- **Reading.** `GET /reports/annotation-qc/{report_id}` returns the status, scope,
+  timing, the reference data versions used, and counts by issue type and by group.
+  `GET /reports/annotation-qc/{report_id}/findings` lists findings, filtered by
+  `issue_type` and `owning_group_id`. Reading requires the read role. Counts cover the
+  reader's group, or every group for global scope, and findings follow the reader's
+  ownership scope, as in annotation search.
+- **Retention.** Summaries and counts are kept permanently. Findings are kept only for
+  the most recent completed report of each scope, so an older report's findings
+  return `410 report_findings_expired`. The findings of a report that has not
+  succeeded return `409 report_not_completed`.
+- **Missing reference data.** If a configured ontology or the go-site metadata has no
+  active snapshot, the report fails with `reference_data_unavailable`.
+
 ## Errors
 
 A create or update that fails returns `422 invalid_annotation`; accepting a change set

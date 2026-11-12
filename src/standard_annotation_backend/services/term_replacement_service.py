@@ -21,6 +21,8 @@ from standard_annotation_backend.domain.jobs import (
     TERMINAL_JOB_STATUSES,
     JobNotFoundError,
     JobType,
+    group_scope,
+    group_scope_parameters,
 )
 from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
@@ -32,8 +34,6 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
 from standard_annotation_backend.domain.term_replacement import (
     TermReplacementResult,
     replaced_annotation,
-    term_replacement_parameters,
-    term_replacement_scope,
 )
 from standard_annotation_backend.persistence.locks import AdvisoryTryLock, LockNamespace
 from standard_annotation_backend.persistence.unit_of_work import (
@@ -69,7 +69,7 @@ def queue_term_replacement(
         The queued job, new or joined.
     """
     unit_of_work.jobs.lock_term_replacement_starts()
-    parameters = term_replacement_parameters(group_key)
+    parameters = group_scope_parameters(group_key)
     record = unit_of_work.jobs.find_queued(
         job_type=JobType.TERM_REPLACEMENT, parameters=parameters
     )
@@ -157,7 +157,7 @@ class TermReplacementService:
             try:
                 if job.job_type is not JobType.TERM_REPLACEMENT:
                     raise ValueError("not a term replacement job")
-                group_key = term_replacement_scope(job.parameters)
+                group_key = group_scope(job.parameters)
             except ValueError:
                 self._fail(job_id, RefreshFailureCode.INVALID_PARAMETERS)
                 return

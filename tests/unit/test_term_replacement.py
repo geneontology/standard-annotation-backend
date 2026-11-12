@@ -14,8 +14,6 @@ from standard_annotation_backend.domain.term_replacement import (
     TermReplacementResult,
     replaced_annotation,
     replacement_for,
-    term_replacement_parameters,
-    term_replacement_scope,
 )
 
 ONTOLOGY_OF = {"GO": "go", "CL": "cl", "CHEBI": "chebi", "NCBITaxon": "ncbitaxon"}
@@ -143,22 +141,6 @@ def test_an_annotation_with_nothing_to_replace_gives_none() -> None:
     }
 
     assert replaced_annotation(_annotation(), terms, ONTOLOGY_OF) is None
-
-
-@pytest.mark.parametrize("group_key", [None, "MGI"])
-def test_scope_parameters_round_trip(group_key: str | None) -> None:
-    """All groups is `{}`; one group is `{"group_key": ...}`."""
-    assert term_replacement_scope(term_replacement_parameters(group_key)) == group_key
-
-
-@pytest.mark.parametrize(
-    "parameters",
-    [{"group_key": ""}, {"group_key": 5}, {"group_key": " MGI"}, {"source_key": "mgi"}],
-)
-def test_other_scope_parameters_are_rejected(parameters: dict[str, object]) -> None:
-    """Any other parameters are invalid."""
-    with pytest.raises(ValueError, match="term replacement parameters"):
-        term_replacement_scope(parameters)
 
 
 def test_the_stored_result_round_trips() -> None:

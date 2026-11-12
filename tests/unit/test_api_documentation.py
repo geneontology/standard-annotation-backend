@@ -46,6 +46,7 @@ def test_bearer_security_applies_only_to_data_operations(client: TestClient) -> 
                     "/admin",
                     "/annotations",
                     "/change-sets",
+                    "/reports",
                 )
             ):
                 assert operation["security"] == [{"Bearer": []}]

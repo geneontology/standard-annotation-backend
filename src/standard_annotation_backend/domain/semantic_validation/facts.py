@@ -86,6 +86,22 @@ class AnnotationFacts:
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveSnapshots:
+    """Hold the snapshots one validation reads, resolved once.
+
+    Attributes:
+        ontology_versions: Each configured ontology's active snapshot, keyed by
+            ontology key.
+        rules_snapshot_id: The active go-site rule data snapshot.
+        rule_data: That snapshot's rule data.
+    """
+
+    ontology_versions: Mapping[str, UUID]
+    rules_snapshot_id: UUID
+    rule_data: RuleData
+
+
+@dataclass(frozen=True, slots=True)
 class ReplacementFacts:
     """Hold what term replacement knows about a batch of annotations.
 
