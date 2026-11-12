@@ -136,15 +136,16 @@ schema.
 SABE validates every annotation it would write in two stages. Structural validation
 checks the payload against the Standard Annotation schema and applies to every write,
 including each GPAD import row. Semantic validation checks a structurally valid
-annotation against the active entity catalogs, the configured ontologies, and SABE's
-other annotations: the subject must be an active entity, every identifier with a
-configured ontology's prefix must be a current term of it, and no other active
-annotation may be a duplicate. Client creates and updates, direct or through an
-accepted change set, must produce an annotation with no semantic issues; deletes and
-GPAD imports are never semantically checked. Both stages report through one error,
-`invalid_annotation` (`invalid_change_set` for acceptance), which lists every issue the
-stage found. The [annotation validation guide](docs/annotation-validation.md) describes
-the checks, issue types, and errors.
+annotation against the active entity catalogs, the configured ontologies, the go-site
+rule data, and SABE's other annotations: the subject must be an active entity, every
+identifier with a configured ontology's prefix must be a current term of it, no other
+active annotation may be a duplicate, and the annotation must satisfy every
+write-blocking GO Rule. Client creates and updates, direct or through an accepted change
+set, must produce an annotation with no semantic issues; deletes and GPAD imports are
+never semantically checked. Both stages report through one error, `invalid_annotation`
+(`invalid_change_set` for acceptance), which lists every issue the stage found. The
+[annotation validation guide](docs/annotation-validation.md) describes the checks, issue
+types, and errors.
 
 Facts are gathered by a repository and every check is a pure domain function, so the
 same checks serve direct writes, change-set preview, and change-set acceptance. Checks
@@ -1154,7 +1155,7 @@ developers can run locally and operate in AWS with limited specialized DevOps bu
 | Initial Protein2GO-aligned pairwise duplicate policy | Settled for the initial implementation                                                                   | No further input is needed. The accepted non-transitivity risk should be reviewed if multi-reference source data becomes material.         | Implementation may proceed with an indexed base signature and per-reference lookup rows. Creates and updates reject any peer as a `duplicate_annotation` issue; soft deletes remove conflicts. Every ordinary annotation mutation uses `READ COMMITTED`, takes the global annotation-write lock in shared mode before ordered signature locks, then freshly re-reads state and peers.                                                                                                                                                                                        |
 | Annotated-entity metadata for GPAD imports           | Settled for GPAD import; alternatives are deferred                                                       | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | GPAD imports do not check `db_object_id` against the entity catalog; semantic validation applies to client writes only. No alternative source or reconciliation workflow is implied.                                                                                                                                                                                                                                                                                                                                                                                         |
 | Structural validation                                | Settled for the initial implementation                                                                   | No further policy input is needed.                                                                                                         | Structural schema validation blocks all writes and individual import records. Invalid imported records are isolated and reported instead of failing the whole import.                                                                                                                                                                                                                                                                                                                                                                                                        |
-| GORULE-style semantic validation                     | Entity, ontology-term, and duplicate checks block client writes; the write-blocking GO Rules are being added | No further policy input is needed for the checks in `docs/annotation-validation.md`.                                                       | Client creates and updates must have no semantic issues; deletes and GPAD imports are not checked. The checks and their issue types are listed in `docs/annotation-validation.md`.                                                                                                                                                                                                                                                                                                                                                                                           |
+| GORULE-style semantic validation                     | Settled: entity, ontology-term, duplicate, and write-blocking GO Rule checks block client writes             | No further policy input is needed for the checks in `docs/annotation-validation.md`.                                                       | Client creates and updates must have no semantic issues; deletes and GPAD imports are not checked. The rules and SABE's reading of each are in `docs/annotation-validation.md`.                                                                                                                                                                                                                                                                                                                                                                                              |
 
 ## Possible Future Expansion
 

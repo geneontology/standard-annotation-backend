@@ -308,10 +308,10 @@ def _accept(change_set_id: UUID, context: RequestContext) -> Operation:
 def test_two_reviewers_accept_one_proposal_only_once(
     session_factory: sessionmaker[Session],
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Competing reviewers produce one annotation, transition, and acceptance audit."""
-    proposal_id = _propose_create(unit_of_work_factory, validated_annotation)
+    proposal_id = _propose_create(unit_of_work_factory, writable_annotation)
     # Dropping the proposal row lock lets the waiter apply a still-proposed copy;
     # dropping the fresh read leaves its preloaded review state out of date.
     outcomes, blocked = _run_review_race(
@@ -355,11 +355,11 @@ def test_two_reviewers_accept_one_proposal_only_once(
 def test_direct_update_makes_waiting_acceptance_stale_without_overwriting(
     session_factory: sessionmaker[Session],
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     operation: str,
 ) -> None:
     """A waiting acceptance commits staleness and preserves the direct writer's data."""
-    payload = validated_annotation.model_dump(mode="json")
+    payload = writable_annotation.model_dump(mode="json")
     created = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
         payload=payload, owning_group_id="group", context=PROPOSER
     )
@@ -368,7 +368,7 @@ def test_direct_update_makes_waiting_acceptance_stale_without_overwriting(
         service.propose_update(
             created.annotation_id,
             base_version=1,
-            patch=[{"op": "replace", "path": "/assigned_by", "value": "Proposed"}],
+            patch=[{"op": "replace", "path": "/assigned_by", "value": "SGD"}],
             reason="Review edit",
             context=PROPOSER,
         )
@@ -384,7 +384,7 @@ def test_direct_update_makes_waiting_acceptance_stale_without_overwriting(
     def direct_update(factory: UnitOfWorkFactory) -> object:
         return AnnotationService(factory, TEST_SOURCES).patch(
             created.annotation_id,
-            changes={"assigned_by": "Direct"},
+            changes={"assigned_by": "WB"},
             expected_version=1,
             context=FIRST_REVIEWER,
         )
@@ -408,14 +408,14 @@ def test_direct_update_makes_waiting_acceptance_stale_without_overwriting(
         assert current is not None
         assert current.status == "active"
         assert current.current_version == 2
-        assert current.assigned_by == "Direct"
+        assert current.assigned_by == "WB"
         versions = (
             AnnotationRepository(session)
             .list_versions_page(created.annotation_id, limit=100, offset=0)
             .items
         )
         assert [version.version for version in versions] == [1, 2]
-        assert versions[-1].annotation_data["assigned_by"] == "Direct"
+        assert versions[-1].annotation_data["assigned_by"] == "WB"
         assert not versions[-1].is_deleted
         proposal = session.get(ChangeSetRecord, proposed.change_set_id)
         assert proposal is not None
@@ -448,11 +448,11 @@ def test_direct_update_makes_waiting_acceptance_stale_without_overwriting(
 def test_same_payload_create_acceptances_cannot_both_succeed(
     session_factory: sessionmaker[Session],
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Conflicting acceptances create one annotation and keep the losing proposal open."""
-    first_id = _propose_create(unit_of_work_factory, validated_annotation)
-    second_id = _propose_create(unit_of_work_factory, validated_annotation)
+    first_id = _propose_create(unit_of_work_factory, writable_annotation)
+    second_id = _propose_create(unit_of_work_factory, writable_annotation)
     # Removing create's signature lock lets both transactions find no peer.
     outcomes, blocked = _run_review_race(
         session_factory,
@@ -488,13 +488,13 @@ def test_same_payload_create_acceptances_cannot_both_succeed(
 def test_unrelated_create_acceptances_overlap_and_both_succeed(
     session_factory: sessionmaker[Session],
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Unrelated create acceptances proceed concurrently and both succeed."""
-    first_id = _propose_create(unit_of_work_factory, validated_annotation)
+    first_id = _propose_create(unit_of_work_factory, writable_annotation)
     unrelated = Annotation.model_validate(
         {
-            **validated_annotation.model_dump(mode="json"),
+            **writable_annotation.model_dump(mode="json"),
             "db_object_id": "UniProtKB:OTHER",
         }
     )
@@ -518,7 +518,7 @@ def test_unrelated_create_acceptances_overlap_and_both_succeed(
 def test_conflicting_update_acceptances_cannot_both_succeed(
     session_factory: sessionmaker[Session],
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Updates of different targets serialize before introducing a shared duplicate."""
     annotation_service = AnnotationService(unit_of_work_factory, TEST_SOURCES)
@@ -528,7 +528,7 @@ def test_conflicting_update_acceptances_cannot_both_succeed(
     for db_object_id in ("UniProtKB:FIRST", "UniProtKB:SECOND"):
         created = annotation_service.create(
             payload={
-                **validated_annotation.model_dump(mode="json"),
+                **writable_annotation.model_dump(mode="json"),
                 "db_object_id": db_object_id,
             },
             owning_group_id="group",
@@ -589,11 +589,11 @@ def test_conflicting_update_acceptances_cannot_both_succeed(
 def test_review_and_preview_wait_for_global_lock_before_locking_proposal(
     session_factory: sessionmaker[Session],
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     operation: str,
 ) -> None:
     """An exclusive global holder can still lock the proposal while review waits."""
-    proposal_id = _propose_create(unit_of_work_factory, validated_annotation)
+    proposal_id = _propose_create(unit_of_work_factory, writable_annotation)
     started = Event()
     finished = Event()
     with (

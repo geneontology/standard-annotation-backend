@@ -2,7 +2,8 @@
 
 Each check is a pure function from an annotation and its facts to the issues it
 finds. `validate_semantics` runs every check in a fixed order, so the same
-annotation and facts always give the same issues in the same order.
+annotation and facts always give the same issues in the same order. The catalog
+and duplicate checks come first, then the GO Rules in rule-number order.
 """
 
 from collections.abc import Callable, Iterable, Iterator
@@ -11,6 +12,38 @@ from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
     TermStatus,
+)
+from standard_annotation_backend.domain.semantic_validation.gorules.metadata import (
+    gorule_0000027,
+    gorule_0000043,
+    gorule_0000058,
+)
+from standard_annotation_backend.domain.semantic_validation.gorules.support import (
+    gorule_0000016,
+    gorule_0000017,
+    gorule_0000018,
+    gorule_0000022,
+    gorule_0000030,
+    gorule_0000033,
+    gorule_0000037,
+    gorule_0000050,
+    gorule_0000055,
+    gorule_0000063,
+)
+from standard_annotation_backend.domain.semantic_validation.gorules.terms import (
+    gorule_0000002,
+    gorule_0000005,
+    gorule_0000006,
+    gorule_0000007,
+    gorule_0000008,
+    gorule_0000011,
+    gorule_0000015,
+    gorule_0000039,
+    gorule_0000042,
+    gorule_0000046,
+    gorule_0000053,
+    gorule_0000061,
+    gorule_0000065,
 )
 from standard_annotation_backend.domain.semantic_validation.identifiers import (
     term_identifiers,
@@ -90,10 +123,41 @@ def check_duplicates(
         )
 
 
+GO_RULES: tuple[SemanticCheck, ...] = (
+    gorule_0000002,
+    gorule_0000005,
+    gorule_0000006,
+    gorule_0000007,
+    gorule_0000008,
+    gorule_0000011,
+    gorule_0000015,
+    gorule_0000016,
+    gorule_0000017,
+    gorule_0000018,
+    gorule_0000022,
+    gorule_0000027,
+    gorule_0000030,
+    gorule_0000033,
+    gorule_0000037,
+    gorule_0000039,
+    gorule_0000042,
+    gorule_0000043,
+    gorule_0000046,
+    gorule_0000050,
+    gorule_0000053,
+    gorule_0000055,
+    gorule_0000058,
+    gorule_0000061,
+    gorule_0000063,
+    gorule_0000065,
+)
+"""Every write-blocking GO Rule, in rule-number order."""
+
 SEMANTIC_CHECKS: tuple[SemanticCheck, ...] = (
     check_entity,
     check_terms,
     check_duplicates,
+    *GO_RULES,
 )
 """Every semantic check, in the order its issues are reported."""
 

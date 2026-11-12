@@ -3,6 +3,10 @@
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.semantic_validation.checked_ancestors import (
+    BP_ROOT,
+    PROTEIN_CONTAINING_COMPLEX,
+)
 from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
     EntityFact,
@@ -12,12 +16,21 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
 from standard_annotation_backend.domain.semantic_validation.identifiers import (
     term_identifiers,
 )
+from standard_annotation_backend.domain.semantic_validation.rule_data import (
+    DatabaseEntry,
+    EcoUsageConstraint,
+    EntityIsComplex,
+    RuleData,
+    WithPresence,
+    WithPresenceCondition,
+)
 from standard_annotation_backend.domain.semantic_validation.rules import (
     validate_semantics,
 )
 
 ENTITY = EntityFact(db_object_taxon_id="NCBITaxon:9606", db_object_type="PR:000000001")
-CURRENT = TermFact(TermStatus.CURRENT)
+TERM = "GO:0006915"
+CURRENT = TermFact(TermStatus.CURRENT, checked_ancestors=frozenset({BP_ROOT}))
 PEER = UUID("00000000-0000-0000-0000-000000000001")
 
 
@@ -27,7 +40,7 @@ def _annotation(**changes: object) -> Annotation:
         {
             "db_object_id": "UniProtKB:P12345",
             "relation": "RO:0002331",
-            "ontology_class_id": "GO:0008150",
+            "ontology_class_id": TERM,
             "references": ["PMID:1"],
             "evidence_type": "ECO:0000314",
             "annotation_date": "2026-11-11",
@@ -42,11 +55,13 @@ def _facts(
     *,
     entity: EntityFact | None = ENTITY,
     peers: tuple[UUID, ...] = (),
+    rule_data: RuleData | None = None,
 ) -> AnnotationFacts:
     return AnnotationFacts(
-        terms={"GO:0008150": CURRENT} if terms is None else terms,
+        terms={TERM: CURRENT} if terms is None else terms,
         entity=entity,
         duplicate_peer_ids=peers,
+        rule_data=rule_data,
     )
 
 
@@ -64,7 +79,7 @@ def test_identifiers_are_listed_in_field_order_with_their_locations() -> None:
         (occurrence.identifier, occurrence.location, occurrence.prefix)
         for occurrence in term_identifiers(annotation)
     ] == [
-        ("GO:0008150", ("annotation", "ontology_class_id"), "GO"),
+        (TERM, ("annotation", "ontology_class_id"), "GO"),
         (
             "CL:0000000",
             ("annotation", "annotation_extensions", 0, "extension_term"),
@@ -136,7 +151,7 @@ def test_each_term_problem_is_reported_at_its_identifier_with_details() -> None:
 
 def test_identifiers_without_a_fact_are_not_checked() -> None:
     """An identifier whose prefix no configured ontology owns is never an issue."""
-    annotation = _annotation(with_or_from=["UniProtKB:Q1"])
+    annotation = _annotation(evidence_type="ECO:0000353", with_or_from=["UniProtKB:Q1"])
 
     assert validate_semantics(annotation, _facts()) == ()
 
@@ -156,9 +171,13 @@ def test_duplicate_peers_are_reported_once_for_the_whole_annotation() -> None:
 
 
 def test_issues_from_every_check_are_returned_in_a_stable_order() -> None:
-    """Entity issues come first, then term issues in field order, then duplicates."""
+    """Entity issues come first, then term issues in field order, then duplicates.
+
+    The interacting taxon on an ordinary BP term also breaks GORULE:0000015, which
+    follows the catalog and duplicate checks.
+    """
     annotation = _annotation(interacting_taxon_id=["NCBITaxon:1"])
-    terms = {"GO:0008150": CURRENT, "NCBITaxon:1": TermFact(TermStatus.UNKNOWN)}
+    terms = {TERM: CURRENT, "NCBITaxon:1": TermFact(TermStatus.UNKNOWN)}
 
     issues = validate_semantics(annotation, _facts(terms, entity=None, peers=(PEER,)))
 
@@ -166,4 +185,65 @@ def test_issues_from_every_check_are_returned_in_a_stable_order() -> None:
         "unknown_entity",
         "unknown_term",
         "duplicate_annotation",
+        "gorule_0000015",
+    ]
+
+
+def test_a_missing_term_fact_suppresses_only_the_rules_that_need_it() -> None:
+    """An unknown term gets no closure rules, but IPI still needs a with value."""
+    annotation = _annotation(
+        ontology_class_id="GO:0004672",
+        relation="RO:0002327",
+        evidence_type="ECO:0000353",
+    )
+
+    issues = validate_semantics(
+        annotation, _facts({"GO:0004672": TermFact(TermStatus.UNKNOWN)})
+    )
+
+    assert [(issue["location"], issue["type"]) for issue in issues] == [
+        (("annotation", "ontology_class_id"), "unknown_term"),
+        (("annotation",), "gorule_0000018"),
+    ]
+
+
+def test_rules_compose_by_restriction() -> None:
+    """Rules 18 and 43 both report an IPI annotation on a complex.
+
+    The evidence usage constraint requires a PMID and, for a complex, a with
+    value. Neither rule excuses the other.
+    """
+    rule_data = RuleData(
+        databases=(DatabaseEntry("UniProtKB"),),
+        go_refs=(),
+        group_shorthands=("GO_Central",),
+        eco_usage_constraints=(
+            EcoUsageConstraint(
+                "ECO:0000353",
+                "PMID:[0-9]+",
+                WithPresence.CONDITIONAL,
+                WithPresenceCondition(
+                    EntityIsComplex(),
+                    when_true=WithPresence.MANDATORY,
+                    when_false=WithPresence.OPTIONAL,
+                ),
+            ),
+        ),
+        extension_constraints=(),
+    )
+    complex_entity = EntityFact(
+        "NCBITaxon:7955",
+        "GO:0032991",
+        type_checked_ancestors=frozenset({PROTEIN_CONTAINING_COMPLEX}),
+    )
+    annotation = _annotation(evidence_type="ECO:0000353", references=["DOI:10.1000/x"])
+
+    issues = validate_semantics(
+        annotation, _facts(entity=complex_entity, rule_data=rule_data)
+    )
+
+    assert [issue["type"] for issue in issues] == [
+        "gorule_0000018",
+        "gorule_0000043",
+        "gorule_0000043",
     ]

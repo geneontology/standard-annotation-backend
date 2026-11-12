@@ -174,3 +174,38 @@ def validated_annotation() -> Annotation:
             "annotation_properties": {"comment": ["excluded"]},
         }
     )
+
+
+@pytest.fixture
+def writable_annotation() -> Annotation:
+    """Create an annotation that passes every semantic check.
+
+    It passes against the reference data the integration tests seed: its
+    subject `UniProtKB:P12345` is made active by `active_annotation_subjects`, and
+    its terms, databases, group, and extension are in the default reference data.
+    Like `validated_annotation`, it repeats and reorders list values. Use
+    `validated_annotation` for tests that store annotations without validation.
+
+    Returns:
+        A validated IPI annotation to a biological process term.
+    """
+    return Annotation.model_validate(
+        {
+            "db_object_id": "UniProtKB:P12345",
+            "negation": None,
+            "relation": "RO:0002331",
+            "ontology_class_id": "GO:0006915",
+            "references": ["PMID:1", "PMID:1"],
+            "evidence_type": "ECO:0000353",
+            "with_or_from": ["UniProtKB:Q2", "UniProtKB:Q1", "UniProtKB:Q1"],
+            "annotation_date": "2026-09-09",
+            "assigned_by": "GO_Central",
+            "annotation_extensions": [
+                {
+                    "extension_relation": "BFO:0000050",
+                    "extension_term": "CL:0000000",
+                }
+            ],
+            "annotation_properties": {"comment": ["excluded"]},
+        }
+    )

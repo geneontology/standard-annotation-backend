@@ -78,6 +78,15 @@ tokens:
 just refresh authorization
 ```
 
+Annotation creates and updates are validated against the GO Rule data, every configured
+ontology, and the entity catalogs, so load them before writing annotations:
+
+```bash
+just refresh rules
+just refresh ontology
+just refresh entity
+```
+
 `just refresh KIND [SOURCE]` refreshes `authorization`, `rules`, `ontology`, `entity`,
 or `annotation` sources in a one-off container and prints one line per job. Omit
 `SOURCE` to refresh every configured source of that kind. Authorization and rules each

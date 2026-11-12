@@ -22,7 +22,7 @@ pytestmark = pytest.mark.usefixtures("active_annotation_subjects")
 VALID_ANNOTATION = {
     "db_object_id": "UniProtKB:P12345",
     "relation": "RO:0002331",
-    "ontology_class_id": "GO:0008150",
+    "ontology_class_id": "GO:0006915",
     "references": ["PMID:1"],
     "evidence_type": "ECO:0000314",
     "annotation_date": "2026-09-15",
@@ -56,7 +56,7 @@ def test_direct_annotation_mutations_record_successful_audit_events(
     updated = integration_api_client.patch(
         f"/annotations/{annotation_id}",
         headers={"If-Match": '"1"'},
-        json={"assigned_by": "Updated_Source"},
+        json={"assigned_by": "RGD"},
     )
     assert updated.status_code == status.HTTP_200_OK
 
@@ -115,7 +115,7 @@ def test_rejected_direct_mutations_do_not_record_successful_audit_events(
     stale = integration_api_client.patch(
         f"/annotations/{annotation_id}",
         headers={"If-Match": '"9"'},
-        json={"assigned_by": "Stale_Source"},
+        json={"assigned_by": "ZFIN"},
     )
 
     assert invalid.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT

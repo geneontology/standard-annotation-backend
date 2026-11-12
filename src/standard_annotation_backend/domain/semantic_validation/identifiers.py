@@ -11,6 +11,16 @@ from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.validation import ANNOTATION_ROOT
 
 
+def split_identifier(identifier: str) -> tuple[str, str]:
+    """Return an identifier's prefix and local identifier.
+
+    The prefix is the text before the first `:`, and the local identifier is
+    the rest, so `MGI:MGI:101757` splits into `MGI` and `MGI:101757`.
+    """
+    prefix, _, local_id = identifier.partition(":")
+    return prefix, local_id
+
+
 @dataclass(frozen=True, slots=True)
 class IdentifierOccurrence:
     """Locate one identifier in an annotation.
@@ -26,7 +36,12 @@ class IdentifierOccurrence:
     @property
     def prefix(self) -> str:
         """Return the text before the identifier's first `:`."""
-        return self.identifier.partition(":")[0]
+        return split_identifier(self.identifier)[0]
+
+    @property
+    def local_id(self) -> str:
+        """Return the text after the identifier's first `:`."""
+        return split_identifier(self.identifier)[1]
 
 
 def term_identifiers(annotation: Annotation) -> Iterator[IdentifierOccurrence]:
@@ -54,4 +69,22 @@ def term_identifiers(annotation: Annotation) -> Iterator[IdentifierOccurrence]:
     for index, taxon in enumerate(annotation.interacting_taxon_id or ()):
         yield IdentifierOccurrence(
             taxon, (ANNOTATION_ROOT, "interacting_taxon_id", index)
+        )
+
+
+def database_identifiers(annotation: Annotation) -> Iterator[IdentifierOccurrence]:
+    """Yield the identifiers GORULE:0000027 checks against `db-xrefs.yaml`.
+
+    These are `db_object_id`, each `with_or_from` value, and each extension
+    term, in that order.
+    """
+    yield IdentifierOccurrence(
+        annotation.db_object_id, (ANNOTATION_ROOT, "db_object_id")
+    )
+    for index, value in enumerate(annotation.with_or_from or ()):
+        yield IdentifierOccurrence(value, (ANNOTATION_ROOT, "with_or_from", index))
+    for index, extension in enumerate(annotation.annotation_extensions or ()):
+        yield IdentifierOccurrence(
+            extension.extension_term,
+            (ANNOTATION_ROOT, "annotation_extensions", index, "extension_term"),
         )

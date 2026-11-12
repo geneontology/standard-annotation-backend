@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from seeding import SeedTerm
 
 from standard_annotation_backend.domain.ontology import (
     GO_ONTOLOGY_KEY,
@@ -221,7 +222,12 @@ def test_closure_filter_combines_descendants_with_other_filters(
     reference_data: Callable[..., None],
 ) -> None:
     """The public filter combines descendants, pagination, and ordinary filters."""
-    reference_data("GO:1", "GO:2", "GO:3", "GO:4")
+    reference_data(
+        *(
+            SeedTerm(term_id, parents=("GO:0008150",))
+            for term_id in ("GO:1", "GO:2", "GO:3", "GO:4")
+        )
+    )
     direct_id = _create(
         integration_api_client,
         "UniProtKB:C1",

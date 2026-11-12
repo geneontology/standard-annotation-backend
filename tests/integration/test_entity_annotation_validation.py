@@ -60,7 +60,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
     integration_api_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Writes and acceptances whose resulting subject is not active are rejected.
 
@@ -72,8 +72,8 @@ def test_unknown_subject_returns_exact_error_without_writes(
     """
     client = integration_api_client
     imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    publish_catalog(imports, unit_of_work_factory, validated_annotation.db_object_id)
-    payload = validated_annotation.model_dump(mode="json")
+    publish_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
+    payload = writable_annotation.model_dump(mode="json")
     to_unknown = operation.endswith("_to_unknown")
     annotation_id = None
     if operation != "create" and operation != "accept_create":
@@ -102,7 +102,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
                     "patch": [
                         {"op": "replace", "path": "/db_object_id", "value": UNKNOWN_ID}
                         if to_unknown
-                        else {"op": "replace", "path": "/assigned_by", "value": "OTHER"}
+                        else {"op": "replace", "path": "/assigned_by", "value": "RGD"}
                     ],
                     "reason": "Review",
                 }
@@ -124,9 +124,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
         response = client.patch(
             f"/annotations/{annotation_id}",
             headers={"If-Match": '"1"'},
-            json={"db_object_id": UNKNOWN_ID}
-            if to_unknown
-            else {"assigned_by": "OTHER"},
+            json={"db_object_id": UNKNOWN_ID} if to_unknown else {"assigned_by": "RGD"},
         )
     else:
         response = client.post(f"{proposal_path}/accept")
@@ -144,7 +142,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
         assert proposal["reviewed_by"] is None
         # Publishing the subject makes the same proposal acceptable again.
         publish_catalog(
-            imports, unit_of_work_factory, validated_annotation.db_object_id, UNKNOWN_ID
+            imports, unit_of_work_factory, writable_annotation.db_object_id, UNKNOWN_ID
         )
         assert client.post(f"{proposal_path}/accept").status_code == status.HTTP_200_OK
 
@@ -154,17 +152,17 @@ def test_deletion_succeeds_after_subject_removal(
     proposal_delete: bool,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Direct and proposed deletion succeed after the subject is removed.
 
     The deleted annotation keeps its stored data and gains a new version.
     """
     imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    publish_catalog(imports, unit_of_work_factory, validated_annotation.db_object_id)
+    publish_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
     annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     created = annotations.create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="other-group",
         context=PROPOSER,
     )
@@ -186,14 +184,14 @@ def test_deletion_succeeds_after_subject_removal(
         assert record is not None
         assert (record.status, record.current_version) == ("deleted", 2)
         assert (
-            record.annotation_data["db_object_id"] == validated_annotation.db_object_id
+            record.annotation_data["db_object_id"] == writable_annotation.db_object_id
         )
 
 
 def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Only an exact active catalog identifier is accepted for a new annotation.
 
@@ -201,11 +199,9 @@ def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
     rejected, and rejected attempts write nothing.
     """
     imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    job = stage_catalog(
-        imports, unit_of_work_factory, validated_annotation.db_object_id
-    )
+    job = stage_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
     annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
-    payload = validated_annotation.model_dump(mode="json")
+    payload = writable_annotation.model_dump(mode="json")
     before = _counts(session_factory)
     with pytest.raises(InvalidAnnotationPayloadError) as staged:
         annotations.create(
@@ -218,7 +214,8 @@ def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
         annotations.create(
             payload={
                 **payload,
-                "db_object_id": validated_annotation.db_object_id.lower(),
+                "db_object_id": "UniProtKB:"
+                + writable_annotation.db_object_id.partition(":")[2].lower(),
             },
             owning_group_id="other-group",
             context=PROPOSER,

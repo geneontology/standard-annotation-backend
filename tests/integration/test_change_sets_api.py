@@ -21,7 +21,7 @@ CLOCK_TOLERANCE = timedelta(seconds=5)  # database and test clocks may differ
 ANNOTATION = {
     "db_object_id": "UniProtKB:P12345",
     "relation": "RO:0002331",
-    "ontology_class_id": "GO:0008150",
+    "ontology_class_id": "GO:0006915",
     "references": ["PMID:1"],
     "evidence_type": "ECO:0000314",
     "annotation_date": "2026-09-15",
@@ -314,7 +314,7 @@ def test_false_boolean_number_test_rejects_proposal_without_audit(
             "base_version": 1,
             "patch": [
                 {"op": "test", "path": "/negation", "value": 0},
-                {"op": "replace", "path": "/assigned_by", "value": "NEW"},
+                {"op": "replace", "path": "/assigned_by", "value": "RGD"},
             ],
             "reason": "Conditional correction",
         },
@@ -342,7 +342,7 @@ def test_update_accepts_implicit_or_explicit_json_patch_format(
     """Update proposals accept the supported format both explicitly and by default."""
     client = integration_api_client
     target = _create_annotation(client)
-    patch = [{"op": "replace", "path": "/assigned_by", "value": "NEW"}]
+    patch = [{"op": "replace", "path": "/assigned_by", "value": "RGD"}]
     response = client.post(
         "/change-sets",
         json={
@@ -359,7 +359,7 @@ def test_update_accepts_implicit_or_explicit_json_patch_format(
     assert response.json()["patch"] == patch
     preview = client.post(f"{response.headers['location']}/preview")
     assert preview.status_code == status.HTTP_200_OK
-    assert preview.json()["annotation"]["assigned_by"] == "NEW"
+    assert preview.json()["annotation"]["assigned_by"] == "RGD"
     assert preview.json()["can_accept"] is True
 
 

@@ -7,12 +7,13 @@ state, such as an imported annotation or a legacy duplicate peer, that the publi
 write paths would refuse to create.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
@@ -24,9 +25,13 @@ from standard_annotation_backend.domain.annotations import (
 )
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.ontology import SUBCLASS_PREDICATE
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     STORED_RULE_DATA,
+    DatabaseEntry,
+    ExtensionConstraint,
+    GoRefEntry,
     RuleData,
 )
 from standard_annotation_backend.persistence.annotation_data import (
@@ -39,8 +44,10 @@ from standard_annotation_backend.persistence.models import (
     AnnotationVersionRecord,
     JobRecord,
     OntologyAltIdRecord,
+    OntologyClosureRecord,
     OntologyMetadataRecord,
     OntologyTermRecord,
+    RetractedPublicationRecord,
     RulesSnapshotRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
@@ -52,12 +59,14 @@ from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job, job_from_record
 
 __all__ = [
+    "DEFAULT_RULE_DATA",
     "DEFAULT_TERMS",
     "SHIPPED_SOURCES",
     "SeedTerm",
     "create_job",
     "insert_annotation",
     "seed_reference_data",
+    "set_rule_data",
 ]
 
 
@@ -163,11 +172,35 @@ SHIPPED_SOURCES = RefreshSources(
 )
 """The shipped sources, whose ontologies every validated write needs."""
 
-DEFAULT_TERMS = (
+
+@dataclass(frozen=True, slots=True)
+class SeedTerm:
+    """Describe one term to store in a seeded ontology snapshot.
+
+    Attributes:
+        parents: For a GO term, its direct `rdfs:subClassOf` parents. They must
+            already be seeded, earlier in the same call or in an earlier call.
+        subsets: The term's subsets, such as `gocheck_do_not_annotate`.
+    """
+
+    term_id: str
+    obsolete: bool = False
+    replaced_by: tuple[str, ...] = ()
+    consider: tuple[str, ...] = ()
+    alt_ids: tuple[str, ...] = ()
+    parents: tuple[str, ...] = ()
+    subsets: tuple[str, ...] = ()
+
+
+DEFAULT_TERMS: tuple[str | SeedTerm, ...] = (
     "GO:0003674",
-    "GO:0005575",
     "GO:0008150",
-    "GO:0000002",
+    "GO:0005575",
+    SeedTerm("GO:0003824", parents=("GO:0003674",)),
+    SeedTerm("GO:0006915", parents=("GO:0008150",)),
+    SeedTerm("GO:0044419", parents=("GO:0008150",)),
+    SeedTerm("GO:0000002", parents=("GO:0008150",)),
+    SeedTerm("GO:0032991", parents=("GO:0005575",)),
     "CL:0000000",
     "CL:0000001",
     "CHEBI:1",
@@ -175,18 +208,58 @@ DEFAULT_TERMS = (
     "NCBITaxon:9606",
     "NCBITaxon:10090",
 )
-"""Current terms used by the annotation payloads of the integration tests."""
+"""Current terms used by the annotation payloads of the integration tests.
 
+The GO terms form a small hierarchy under the three roots. `GO:0006915` is an
+ordinary biological process term, `GO:0003824` a molecular function term,
+`GO:0044419` the term that allows interacting taxa, and `GO:0032991` the
+protein-containing complex term.
+"""
 
-@dataclass(frozen=True, slots=True)
-class SeedTerm:
-    """Describe one term to store in a seeded ontology snapshot."""
+_EXTENSION_ROOTS = ("GO:0003674", "GO:0008150", "GO:0005575")
 
-    term_id: str
-    obsolete: bool = False
-    replaced_by: tuple[str, ...] = ()
-    consider: tuple[str, ...] = ()
-    alt_ids: tuple[str, ...] = ()
+DEFAULT_RULE_DATA = RuleData(
+    databases=tuple(
+        DatabaseEntry(database)
+        for database in (
+            "CHEBI",
+            "CL",
+            "ComplexPortal",
+            "EMAPA",
+            "GO",
+            "MGI",
+            "NCBITaxon",
+            "PR",
+            "RGD",
+            "SGD",
+            "UBERON",
+            "UniProtKB",
+            "WB",
+            "Xenbase",
+            "ZFIN",
+        )
+    ),
+    go_refs=(GoRefEntry("GO_REF:0000015"), GoRefEntry("GO_REF:0000033")),
+    group_shorthands=("GO_Central", "MGI", "RGD", "SGD", "WB", "Xenbase", "ZFIN"),
+    eco_usage_constraints=(),
+    extension_constraints=(
+        ExtensionConstraint(
+            "BFO:0000050", ("CL", "EMAPA", "GO", "UBERON"), _EXTENSION_ROOTS
+        ),
+        ExtensionConstraint(
+            "BFO:0000066", ("CL", "EMAPA", "GO", "UBERON"), _EXTENSION_ROOTS
+        ),
+        ExtensionConstraint(
+            "RO:0002233", ("CHEBI", "GO", "MGI", "PR", "UniProtKB"), _EXTENSION_ROOTS
+        ),
+    ),
+)
+"""Permissive go-site data that the integration-test payloads satisfy.
+
+The databases have no identifier syntax, there are no evidence usage
+constraints, and the extension constraints have no cardinality, so only the
+prefixes, groups, and extension relations the tests use are restricted.
+"""
 
 
 def _succeeded_job(session: Session, job_type: str, source_key: str) -> UUID:
@@ -211,21 +284,55 @@ def _succeeded_job(session: Session, job_type: str, source_key: str) -> UUID:
     return job.job_id
 
 
+def _add_subclass_closure(session: Session, version_id: UUID, seed: SeedTerm) -> None:
+    """Store a new GO term's subclass closure: itself and every ancestor.
+
+    Each parent's own closure rows supply the ancestors, so parents must be
+    stored first.
+    """
+    depths = {seed.term_id: 0}
+    for parent in seed.parents:
+        rows = session.execute(
+            select(
+                OntologyClosureRecord.object_term_id, OntologyClosureRecord.depth
+            ).where(
+                OntologyClosureRecord.version_id == version_id,
+                OntologyClosureRecord.predicate_id == SUBCLASS_PREDICATE,
+                OntologyClosureRecord.subject_term_id == parent,
+            )
+        )
+        for ancestor, depth in rows:
+            depths[ancestor] = min(depths.get(ancestor, depth + 1), depth + 1)
+    session.add_all(
+        OntologyClosureRecord(
+            version_id=version_id,
+            subject_term_id=seed.term_id,
+            predicate_id=SUBCLASS_PREDICATE,
+            object_term_id=ancestor,
+            depth=depth,
+        )
+        for ancestor, depth in depths.items()
+    )
+    session.flush()
+
+
 def seed_reference_data(
     session_factory: sessionmaker[Session], *terms: str | SeedTerm
 ) -> None:
     """Make the reference data that validated writes need active, with `terms`.
 
-    Every ontology in the shipped sources gets an active snapshot, unless it
-    already has one, and so does the go-site rule data. Each term is added to the
-    snapshot of the ontology that owns its prefix, unless that snapshot already
-    has it; its alternative identifiers are added either way. Calling this again
-    adds more terms to the same snapshots.
+    Every ontology in the shipped sources gets an active snapshot, unless it already
+    has one, and so does the go-site rule data, which is `DEFAULT_RULE_DATA`. Each
+    term is added to the snapshot of the ontology that owns its prefix, unless that
+    snapshot already has it; its alternative identifiers are added either way.
+    Calling this again adds more terms to the same snapshots.
 
     Args:
         session_factory: Factory for sessions on the test database.
         terms: Term identifiers, which are stored as current terms, or
-            `SeedTerm`s for obsolete terms and alternative identifiers.
+            `SeedTerm`s for obsolete terms, alternative identifiers, GO
+            parents, and subsets. A new GO term also gets its
+            `rdfs:subClassOf` closure.
     """
     seeds = [SeedTerm(term) if isinstance(term, str) else term for term in terms]
     now = datetime.now(UTC)
@@ -282,7 +389,7 @@ def seed_reference_data(
                     obsolete=seed.obsolete,
                     replaced_by=list(seed.replaced_by),
                     consider=list(seed.consider),
-                    subsets=[],
+                    subsets=list(seed.subsets),
                 )
                 for seed in owned
                 if seed.term_id not in stored
@@ -298,6 +405,10 @@ def seed_reference_data(
                 for alt_id in seed.alt_ids
                 if alt_id not in stored_alt_ids
             )
+            if SUBCLASS_PREDICATE in definition.closure_predicates:
+                for seed in owned:
+                    if seed.term_id not in stored:
+                        _add_subclass_closure(session, snapshot.version_id, seed)
         if (
             session.scalar(
                 select(RulesSnapshotRecord).where(RulesSnapshotRecord.active.is_(True))
@@ -313,8 +424,41 @@ def seed_reference_data(
                     source_checksum="c" * 64,
                     fetched_at=now,
                     active=True,
-                    rule_data=STORED_RULE_DATA.dump(RuleData((), (), (), (), ())),
+                    rule_data=STORED_RULE_DATA.dump(DEFAULT_RULE_DATA),
                     retracted_publication_count=0,
                 )
             )
         session.commit()
+
+
+def set_rule_data(
+    session_factory: sessionmaker[Session],
+    rule_data: RuleData,
+    *,
+    retracted_pmids: Iterable[str] = (),
+) -> None:
+    """Replace the active go-site rule data and its retracted PMIDs.
+
+    Call it after `seed_reference_data`, which creates the active rules snapshot.
+
+    Args:
+        session_factory: Factory for sessions on the test database.
+        rule_data: The rule data to store.
+        retracted_pmids: PMIDs, such as `PMID:9`, to list as retracted.
+    """
+    pmids = sorted(set(retracted_pmids))
+    with session_factory.begin() as session:
+        snapshot = session.scalars(
+            select(RulesSnapshotRecord).where(RulesSnapshotRecord.active.is_(True))
+        ).one()
+        snapshot.rule_data = STORED_RULE_DATA.dump(rule_data)
+        snapshot.retracted_publication_count = len(pmids)
+        session.execute(
+            delete(RetractedPublicationRecord).where(
+                RetractedPublicationRecord.snapshot_id == snapshot.snapshot_id
+            )
+        )
+        session.add_all(
+            RetractedPublicationRecord(snapshot_id=snapshot.snapshot_id, pmid=pmid)
+            for pmid in pmids
+        )

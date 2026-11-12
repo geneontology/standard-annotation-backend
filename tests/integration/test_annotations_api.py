@@ -11,7 +11,7 @@ from standard_annotation_backend.domain.annotations import Annotation
 VALID_ANNOTATION = {
     "db_object_id": "UniProtKB:P12345",
     "relation": "RO:0002331",
-    "ontology_class_id": "GO:0008150",
+    "ontology_class_id": "GO:0006915",
     "references": ["PMID:1"],
     "evidence_type": "ECO:0000314",
     "annotation_date": "2026-09-11",

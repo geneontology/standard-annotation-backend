@@ -11,6 +11,7 @@ from enum import StrEnum
 from uuid import UUID
 
 from standard_annotation_backend.domain.errors import UnavailableError
+from standard_annotation_backend.domain.semantic_validation.rule_data import RuleData
 
 
 class TermStatus(StrEnum):
@@ -32,12 +33,18 @@ class TermFact:
         replaced_by: The terms the ontology names as replacements.
         consider: The terms the ontology suggests considering instead.
         primary_id: For an alternative identifier, the term it names.
+        subsets: The subsets the term belongs to.
+        checked_ancestors: The checked ancestors (see the `checked_ancestors`
+            module) the term is, or descends from by `rdfs:subClassOf`. Gathered
+            only for current GO terms.
     """
 
     status: TermStatus
     replaced_by: tuple[str, ...] = ()
     consider: tuple[str, ...] = ()
     primary_id: str | None = None
+    subsets: frozenset[str] = frozenset()
+    checked_ancestors: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,10 +54,13 @@ class EntityFact:
     Attributes:
         db_object_taxon_id: The entity's taxon, from its GPI record.
         db_object_type: The entity's type, from its GPI record.
+        type_checked_ancestors: The checked ancestors the entity's type falls under.
+            Empty unless the type is a GO term.
     """
 
     db_object_taxon_id: str
     db_object_type: str
+    type_checked_ancestors: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,11 +72,17 @@ class AnnotationFacts:
             Identifiers with other prefixes have no fact and are not checked.
         entity: The subject's entity, or `None` if no entity catalog lists it.
         duplicate_peer_ids: Other active annotations that duplicate this one.
+        rule_data: The active go-site rule data. `None` only when facts are built
+            by hand without it; rules that need it then do not fire.
+        retracted_pmids: The annotation's references that are listed as
+            retracted.
     """
 
     terms: Mapping[str, TermFact]
     entity: EntityFact | None
     duplicate_peer_ids: tuple[UUID, ...] = ()
+    rule_data: RuleData | None = None
+    retracted_pmids: frozenset[str] = frozenset()
 
 
 class ReferenceDataUnavailableError(UnavailableError):

@@ -55,8 +55,8 @@ def _valid_payload() -> dict[str, object]:
         "negation": None,
         "relation": "RO:0002331",
         "ontology_class_id": "GO:0008150",
-        "references": ["PMID:1", "PMID:2"],
-        "evidence_type": "ECO:0000314",
+        "references": ["PMID:1"],
+        "evidence_type": "ECO:0000353",
         "with_or_from": ["UniProtKB:Q1"],
         "interacting_taxon_id": ["NCBITaxon:9606"],
         "annotation_date": "2026-09-09",
@@ -254,7 +254,7 @@ class FakeValidationFacts:
     """
 
     def __init__(self) -> None:
-        self.entity: EntityFact | None = EntityFact("NCBITaxon:9606", "PR:000000001")
+        self.entity: EntityFact | None = EntityFact("NCBITaxon:7955", "PR:000000001")
 
     def gather(
         self,

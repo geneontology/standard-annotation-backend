@@ -56,11 +56,15 @@ def seed_active_subjects(
     """Return a helper that makes the given identifiers active in the entity catalog.
 
     The helper writes catalog rows directly, so it records no refresh audit events.
-    Each subject also gets a source record with taxon `NCBITaxon:9606` and type
-    `PR:000000001`, as a published catalog has.
+    Each subject also gets a source record, with type `PR:000000001` and taxon
+    `NCBITaxon:7955` unless the call names others, as a published catalog has.
     """
 
-    def seed(*identifiers: str) -> None:
+    def seed(
+        *identifiers: str,
+        db_object_type: str = "PR:000000001",
+        db_object_taxon_id: str = "NCBITaxon:7955",
+    ) -> None:
         now = datetime.now(UTC)
         with session_factory() as session:
             job_id, snapshot_id = uuid4(), uuid4()
@@ -119,12 +123,12 @@ def seed_active_subjects(
                         line_number=line_number,
                         entity={
                             "db_object_id": identifier,
-                            "db_object_type": "PR:000000001",
-                            "db_object_taxon_id": "NCBITaxon:9606",
+                            "db_object_type": db_object_type,
+                            "db_object_taxon_id": db_object_taxon_id,
                             "canonical_object_id": identifier,
                         },
-                        db_object_taxon_id="NCBITaxon:9606",
-                        db_object_type="PR:000000001",
+                        db_object_taxon_id=db_object_taxon_id,
+                        db_object_type=db_object_type,
                     )
                     for line_number, identifier in enumerate(identifiers, start=1)
                 ]

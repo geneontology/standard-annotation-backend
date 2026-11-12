@@ -7,7 +7,13 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 from refresh_helpers import TEST_SOURCES
-from seeding import SeedTerm, create_job, insert_annotation
+from seeding import (
+    DEFAULT_RULE_DATA,
+    SeedTerm,
+    create_job,
+    insert_annotation,
+    set_rule_data,
+)
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER
@@ -29,7 +35,7 @@ from standard_annotation_backend.services.annotation_service import AnnotationSe
 PAYLOAD = {
     "db_object_id": "UniProtKB:P12345",
     "relation": "RO:0002331",
-    "ontology_class_id": "GO:0008150",
+    "ontology_class_id": "GO:0006915",
     "references": ["PMID:1"],
     "evidence_type": "ECO:0000314",
     "annotation_date": "2026-11-11",
@@ -271,3 +277,35 @@ def test_preview_and_acceptance_report_the_same_semantic_issues(
         (issue["location"], issue["type"])
         for issue in accept.json()["error"]["details"]
     ] == expected
+
+
+def test_go_rule_issues_follow_catalog_issues_in_rule_order(
+    integration_api_client: TestClient,
+    active_annotation_subjects: None,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A create that breaks several GO Rules lists each, after its catalog issues."""
+    set_rule_data(session_factory, DEFAULT_RULE_DATA, retracted_pmids=("PMID:9",))
+
+    response = _create(
+        integration_api_client,
+        {
+            **PAYLOAD,
+            "db_object_id": "UniProtKB:UNKNOWN",
+            "negation": True,
+            "references": ["PMID:9"],
+            "annotation_extensions": [
+                {"extension_relation": "BFO:0000050", "extension_term": "CL:0000000"}
+            ],
+        },
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert [
+        (issue["location"], issue["type"])
+        for issue in response.json()["error"]["details"]
+    ] == [
+        (["annotation", "db_object_id"], "unknown_entity"),
+        (["annotation", "references", 0], "gorule_0000022"),
+        (["annotation"], "gorule_0000053"),
+    ]
