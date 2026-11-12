@@ -322,3 +322,22 @@ def test_a_replacement_the_schema_rejects_is_skipped_and_the_job_continues(
     assert job.result["annotation_replaced_count"] == 1
     assert _record(session_factory, rejected_id).current_version == 1
     assert _record(session_factory, replaced_id).ontology_class_id == CURRENT
+
+
+def test_a_job_with_nothing_to_scan_still_requires_reference_data(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+) -> None:
+    """A group with no annotations fails with `reference_data_unavailable` too."""
+    with session_factory.begin() as session:
+        session.execute(
+            update(OntologyMetadataRecord)
+            .where(OntologyMetadataRecord.ontology_key == "go")
+            .values(active=False)
+        )
+
+    job = _run(unit_of_work_factory, database_engine, group_key="ZFIN")
+
+    assert job.status is JobStatus.FAILED
+    assert job.progress["failure_code"] == "reference_data_unavailable"

@@ -201,7 +201,7 @@ class QcReportRunner:
                     job_id,
                     result=result.to_job_result(),
                     finalize=lambda unit_of_work: (
-                        unit_of_work.qc_reports.expire_findings_of_other_reports(
+                        unit_of_work.qc_reports.expire_findings_of_older_reports(
                             job_id, parameters
                         )
                     ),
@@ -211,7 +211,13 @@ class QcReportRunner:
         """Validate every active annotation of the scope, batch by batch."""
         checked = 0
         with_issues = 0
-        reference_data: list[ReferenceDataVersions] = []
+        # Resolved before the first batch, so a scope with no annotations still
+        # fails when reference data is missing, and records what it checked against.
+        with self._unit_of_work_factory() as unit_of_work:
+            snapshots = unit_of_work.validation_facts.active_snapshots(self._ontologies)
+            reference_data: list[ReferenceDataVersions] = [
+                unit_of_work.validation_facts.reference_versions(snapshots)
+            ]
         after: UUID | None = None
         while True:
             with self._unit_of_work_factory() as unit_of_work:
@@ -324,7 +330,8 @@ class QcReportSummary:
         annotations_checked: Annotations validated, in the visible groups.
         annotations_with_issues: Annotations given a finding, in the visible
             groups.
-        by_issue_type: The number of visible annotations with each issue type.
+        by_issue_type: The number of visible annotations with each issue type,
+            keyed by issue type value.
         by_group: The counts of each visible group.
         result: The stored result once the report has succeeded, otherwise
             `None`. While a report runs, its counts are those recorded so far.
@@ -334,7 +341,7 @@ class QcReportSummary:
     owning_group_id: str | None
     annotations_checked: int
     annotations_with_issues: int
-    by_issue_type: dict[IssueType, int] = field(default_factory=dict)
+    by_issue_type: dict[str, int] = field(default_factory=dict)
     by_group: dict[str, QcGroupCounts] = field(default_factory=dict)
     result: QcReportResult | None = None
 

@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, cast, delete, exists, select
+from sqlalchemy import Select, cast, delete, exists, literal, select, tuple_
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -129,36 +129,47 @@ class QcReportRepository:
             )
         self.session.flush()
 
-    def expire_findings_of_other_reports(
+    def expire_findings_of_older_reports(
         self, job_id: UUID, parameters: dict[str, object]
     ) -> None:
-        """Delete the findings of every other succeeded report of the same scope.
+        """Delete the findings of succeeded reports of the scope ordered before this one.
 
-        Call this in the transaction that marks `job_id` succeeded, so readers
-        always find the findings of exactly one completed report per scope.
+        Reports of a scope are ordered by completion time, then by job ID, the
+        same order `has_newer_report` uses, so a report's findings are deleted
+        exactly when a later report exists. Call this in the transaction that
+        marks `job_id` succeeded.
 
         Args:
-            job_id: The report that keeps its findings.
+            job_id: The report that just succeeded.
             parameters: Its job parameters, which name its scope.
         """
-        others = select(JobRecord.job_id).where(
-            JobRecord.job_type == JobType.ANNOTATION_QC_REPORT,
-            JobRecord.status == JobStatus.SUCCEEDED,
-            JobRecord.parameters == cast(parameters, JSONB),
-            JobRecord.job_id != job_id,
+        this = (
+            select(JobRecord.completed_at, JobRecord.job_id)
+            .where(JobRecord.job_id == job_id)
+            .subquery()
+        )
+        older = (
+            select(JobRecord.job_id)
+            .join(this, literal(True))
+            .where(
+                JobRecord.job_type == JobType.ANNOTATION_QC_REPORT,
+                JobRecord.status == JobStatus.SUCCEEDED,
+                JobRecord.parameters == cast(parameters, JSONB),
+                tuple_(JobRecord.completed_at, JobRecord.job_id)
+                < tuple_(this.c.completed_at, this.c.job_id),
+            )
         )
         self.session.execute(
-            delete(QcReportFindingRecord).where(
-                QcReportFindingRecord.job_id.in_(others)
-            )
+            delete(QcReportFindingRecord).where(QcReportFindingRecord.job_id.in_(older))
         )
 
     def has_newer_report(
         self, job_id: UUID, parameters: dict[str, object], completed_at: datetime
     ) -> bool:
-        """Return whether another report of the same scope succeeded after this one.
+        """Return whether a report of the same scope is ordered after this one.
 
-        Such a report has replaced this report's findings.
+        Reports are ordered by completion time, then by job ID. A later report
+        has replaced this report's findings.
         """
         return bool(
             self.session.scalar(
@@ -167,8 +178,11 @@ class QcReportRepository:
                         JobRecord.job_type == JobType.ANNOTATION_QC_REPORT,
                         JobRecord.status == JobStatus.SUCCEEDED,
                         JobRecord.parameters == cast(parameters, JSONB),
-                        JobRecord.job_id != job_id,
-                        JobRecord.completed_at > completed_at,
+                        tuple_(JobRecord.completed_at, JobRecord.job_id)
+                        > tuple_(
+                            literal(completed_at, JobRecord.completed_at.type),
+                            literal(job_id, JobRecord.job_id.type),
+                        ),
                     )
                 )
             )
@@ -200,10 +214,12 @@ class QcReportRepository:
             )
         }
 
-    def issue_counts(
-        self, job_id: UUID, owning_group_id: str | None
-    ) -> dict[IssueType, int]:
-        """Return the number of annotations with each issue type, in catalog order.
+    def issue_counts(self, job_id: UUID, owning_group_id: str | None) -> dict[str, int]:
+        """Return the number of annotations with each issue type.
+
+        Catalog types come first, in catalog order. Counts are kept permanently,
+        so a stored type no longer in the catalog is still returned, after them,
+        in alphabetical order.
 
         Args:
             job_id: The report.
@@ -217,14 +233,12 @@ class QcReportRepository:
             statement = statement.where(
                 QcReportIssueCountRecord.owning_group_id == owning_group_id
             )
-        totals: Counter[IssueType] = Counter()
+        totals: Counter[str] = Counter()
         for issue_type, count in self.session.execute(statement):
-            totals[IssueType(issue_type)] += count
-        return {
-            issue_type: totals[issue_type]
-            for issue_type in IssueType
-            if issue_type in totals
-        }
+            totals[issue_type] += count
+        catalog = [member.value for member in IssueType if member.value in totals]
+        others = sorted(set(totals) - set(catalog))
+        return {issue_type: totals[issue_type] for issue_type in catalog + others}
 
     def findings_page(
         self,

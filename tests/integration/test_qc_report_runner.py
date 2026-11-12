@@ -149,8 +149,8 @@ def test_only_annotations_with_issues_get_findings_and_counts_cover_all(
         assert counts["MGI"].annotations_checked == 3
         assert counts["RGD"].annotations_with_issues == 1
         assert uow.qc_reports.issue_counts(job.job_id, None) == {
-            IssueType.UNKNOWN_ENTITY: 1,
-            IssueType.DUPLICATE_ANNOTATION: 2,
+            "unknown_entity": 1,
+            "duplicate_annotation": 2,
         }
 
 
@@ -191,9 +191,7 @@ def test_a_structurally_invalid_stored_annotation_is_a_structural_finding(
 
     assert job.status is JobStatus.SUCCEEDED
     with unit_of_work_factory() as uow:
-        assert uow.qc_reports.issue_counts(job.job_id, None) == {
-            IssueType.STRUCTURAL: 1
-        }
+        assert uow.qc_reports.issue_counts(job.job_id, None) == {"structural": 1}
         (finding,) = uow.qc_reports.findings_page(
             job.job_id,
             owning_group_id=None,
@@ -302,3 +300,29 @@ def test_starting_twice_joins_the_queued_report_of_the_scope(
 
     assert again.job_id == first.job_id
     assert group.job_id != first.job_id
+
+
+def test_a_report_with_nothing_to_check_still_requires_reference_data(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+) -> None:
+    """An empty scope fails when GO is missing, and otherwise records its versions."""
+    empty = _run(unit_of_work_factory, database_engine, group_key="ZFIN")
+    assert empty.status is JobStatus.SUCCEEDED
+    assert empty.result is not None
+    assert empty.result["annotations_checked"] == 0
+    reference_data = empty.result["reference_data"]
+    assert isinstance(reference_data, list)
+    assert len(reference_data) == 1
+
+    with session_factory.begin() as session:
+        session.execute(
+            update(OntologyMetadataRecord)
+            .where(OntologyMetadataRecord.ontology_key == "go")
+            .values(active=False)
+        )
+    failed = _run(unit_of_work_factory, database_engine, group_key="ZFIN")
+
+    assert failed.status is JobStatus.FAILED
+    assert failed.progress["failure_code"] == "reference_data_unavailable"

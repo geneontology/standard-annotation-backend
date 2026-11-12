@@ -8,6 +8,7 @@ the current term at their end. A chain that ends at a term that is not current,
 leaves the ontology, or loops makes no replacement.
 """
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -91,6 +92,8 @@ def replaced_annotation(
 
     Every field the term checks cover is examined: `ontology_class_id`, each
     extension term, each `with_or_from` value, and each interacting taxon.
+    When a replacement repeats a value already in its list, only the first copy
+    is kept.
 
     Returns:
         The replaced annotation, or `None` when nothing would change.
@@ -100,14 +103,36 @@ def replaced_annotation(
             invalid, for example because a `replaced_by` value is malformed.
     """
     data = annotation.model_dump(mode="json")
+    changed_lists: set[str] = set()
     changed = False
     for occurrence in term_identifiers(annotation):
         target = replacement_for(occurrence.identifier, terms, ontology_of)
         if target is None:
             continue
-        _set_value(data, occurrence.location[1:], target)
+        path = occurrence.location[1:]
+        _set_value(data, path, target)
         changed = True
+        if len(path) > 1:
+            changed_lists.add(str(path[0]))
+    for name in changed_lists:
+        data[name] = _first_copies(data[name])
     return Annotation.model_validate(data) if changed else None
+
+
+def _first_copies(values: list[Any]) -> list[Any]:
+    """Return the list without repeated values, keeping each one's first position.
+
+    A replacement can turn one entry into a value the list already holds, such
+    as an alternative ID whose primary term is also listed.
+    """
+    seen: set[str] = set()
+    kept: list[Any] = []
+    for value in values:
+        key = json.dumps(value, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            kept.append(value)
+    return kept
 
 
 def _set_value(data: dict[str, Any], path: tuple[str | int, ...], value: str) -> None:

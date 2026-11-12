@@ -219,8 +219,9 @@ class QcReportResult:
         annotations_checked: Active annotations validated.
         annotations_with_issues: Annotations given a finding.
         reference_data: Every distinct set of reference data used, in the order
-            first used. Snapshots are resolved per batch, so a report that spans
-            a refresh lists more than one.
+            first used, starting with the set resolved when the report started.
+            Snapshots are resolved per batch, so a report that spans a refresh
+            lists more than one.
         sabe_version: The SABE release that ran the report.
         schema_version: The Standard Annotation schema package version.
     """

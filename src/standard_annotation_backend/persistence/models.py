@@ -381,7 +381,7 @@ class QcReportFindingRecord(Base):
     """Store one annotation's issues in one QC report.
 
     Rows are kept only for the most recent completed report of each scope;
-    `QcReportRepository.expire_findings_of_other_reports` deletes the rest.
+    `QcReportRepository.expire_findings_of_older_reports` deletes the rest.
     """
 
     __tablename__ = "qc_report_finding"

@@ -3,7 +3,8 @@
 Adds `term_replacement` to the job types the `job` table accepts, and renames the
 stored change source `ontology_refresh` to `term_replacement` on annotation
 versions and in audit event details. Downgrading reverses the rename and deletes
-term replacement jobs and their audit events.
+term replacement jobs and their job lifecycle audit events, keeping the
+`annotation.updated` events of the versions they wrote.
 
 Revision ID: 03a2094d9969
 Revises: 7954a08de314
@@ -54,7 +55,7 @@ def downgrade() -> None:
         "WHERE change_source = 'term_replacement'"
     )
     op.execute(
-        "DELETE FROM audit_event WHERE job_id IN "
+        "DELETE FROM audit_event WHERE action LIKE 'job.%' AND job_id IN "
         "(SELECT job_id FROM job WHERE job_type = 'term_replacement')"
     )
     op.execute("DELETE FROM job WHERE job_type = 'term_replacement'")

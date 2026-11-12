@@ -874,10 +874,7 @@ class QcReportResource(BaseModel):
                 "error": summary.job.error,
                 "annotations_checked": summary.annotations_checked,
                 "annotations_with_issues": summary.annotations_with_issues,
-                "by_issue_type": {
-                    issue_type.value: count
-                    for issue_type, count in summary.by_issue_type.items()
-                },
+                "by_issue_type": dict(summary.by_issue_type),
                 "by_group": {
                     group: {
                         "annotations_checked": counts.annotations_checked,

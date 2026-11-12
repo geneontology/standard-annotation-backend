@@ -155,3 +155,35 @@ def test_the_stored_result_round_trips() -> None:
     )
 
     assert STORED_TERM_REPLACEMENT_RESULT.load(result.to_job_result()) == result
+
+
+def test_a_replacement_already_in_its_list_leaves_one_copy() -> None:
+    """Entries that become equal keep the first one's place; other lists keep repeats."""
+    annotation = _annotation(
+        with_or_from=["CHEBI:0000001", "UniProtKB:Q1", "CHEBI:0000002"],
+        interacting_taxon_id=["NCBITaxon:3", "NCBITaxon:3"],
+        annotation_extensions=[
+            {"extension_relation": "BFO:0000050", "extension_term": "CL:0000002"},
+            {"extension_relation": "BFO:0000050", "extension_term": "CL:0000001"},
+            {"extension_relation": "BFO:0000066", "extension_term": "CL:0000001"},
+        ],
+    )
+    terms = {
+        "GO:0000001": CURRENT,
+        "CL:0000001": _alternate("CL:0000002"),
+        "CL:0000002": CURRENT,
+        "CHEBI:0000001": _obsolete("CHEBI:0000002"),
+        "CHEBI:0000002": CURRENT,
+        "NCBITaxon:3": CURRENT,
+    }
+
+    replaced = replaced_annotation(annotation, terms, ONTOLOGY_OF)
+
+    assert replaced is not None
+    assert replaced.with_or_from == ["CHEBI:0000002", "UniProtKB:Q1"]
+    assert replaced.interacting_taxon_id == ["NCBITaxon:3", "NCBITaxon:3"]
+    assert replaced.annotation_extensions is not None
+    assert [
+        (extension.extension_relation, extension.extension_term)
+        for extension in replaced.annotation_extensions
+    ] == [("BFO:0000050", "CL:0000002"), ("BFO:0000066", "CL:0000002")]
