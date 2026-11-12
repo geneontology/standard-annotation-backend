@@ -533,11 +533,18 @@ class AnnotationVersionPageResponse(PageResource[AnnotationVersionResource]):
 
 
 class ApiValidationIssue(BaseModel):
-    """Describe one invalid value in a request or annotation."""
+    """Describe one invalid value in a request or annotation.
+
+    `details` gives facts about the problem, such as an obsolete term's suggested
+    replacements or a duplicate's peers, and is omitted when there are none.
+    """
 
     location: tuple[str | int, ...]
     message: str
     type: str
+    details: dict[str, object] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ChangeSetPreviewResource(BaseModel):
@@ -555,7 +562,6 @@ class ChangeSetPreviewResource(BaseModel):
     annotation: dict[str, object] | None
     is_deleted: bool
     validation_errors: tuple[ApiValidationIssue, ...]
-    duplicate_peer_ids: tuple[UUID, ...]
     is_stale: bool
     can_accept: bool
 
@@ -607,12 +613,6 @@ class AcceptedChangeSetResource(BaseModel):
         return cls.model_validate(result, from_attributes=True)
 
 
-class DuplicateAnnotationDetails(BaseModel):
-    """List active annotations that conflict with a requested change."""
-
-    peer_ids: tuple[UUID, ...]
-
-
 class StaleAnnotationVersionDetails(BaseModel):
     """Explain that an annotation changed after the client last read it."""
 
@@ -631,10 +631,7 @@ class StaleChangeSetDetails(BaseModel):
 
 
 type ApiErrorDetails = (
-    list[ApiValidationIssue]
-    | DuplicateAnnotationDetails
-    | StaleAnnotationVersionDetails
-    | StaleChangeSetDetails
+    list[ApiValidationIssue] | StaleAnnotationVersionDetails | StaleChangeSetDetails
 )
 
 

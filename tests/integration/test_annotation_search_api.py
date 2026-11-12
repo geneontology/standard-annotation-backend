@@ -8,7 +8,9 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture(autouse=True)
-def active_search_subjects(seed_active_subjects: Callable[..., None]) -> None:
+def active_search_subjects(
+    seed_active_subjects: Callable[..., None], reference_data: Callable[..., None]
+) -> None:
     """Seed the exact subjects used by the successful search examples."""
     seed_active_subjects(
         "UniProtKB:P00001",

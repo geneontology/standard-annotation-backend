@@ -133,7 +133,7 @@ def refresh_rules(
     summary="Refresh ontologies",
     description=(
         "Refresh configured ontologies from their OBO sources, activating a new "
-        "snapshot and applying safe term replacements. Send {} to refresh every "
+        "snapshot. Send {} to refresh every "
         'configured ontology or {"source_key": "<key>"} for one. '
         f"{_SHARED_DESCRIPTION}"
     ),

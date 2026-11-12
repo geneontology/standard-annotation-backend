@@ -43,9 +43,6 @@ The report's counts still include every rejected record.
 MAX_REJECTION_REASON_LENGTH = 200
 """Maximum length, in characters, of the `reason` stored for one rejected record."""
 
-UNKNOWN_DB_OBJECT_ID = "unknown_db_object_id"
-"""Rejection code for an annotation whose subject is not an active entity."""
-
 
 class AnnotationManagementMode(StrEnum):
     """Name the source of truth for a group's annotations.
@@ -65,28 +62,13 @@ class AnnotationRejection:
 
     Attributes:
         line_number: One-based line number in the source file.
-        code: `syntax`, `field-count`, `validation`, or `unknown_db_object_id`.
+        code: `syntax`, `field-count`, or `validation`.
         reason: Short explanation, at most 200 characters.
     """
 
     line_number: Annotated[int, Field(ge=0)]
     code: str
     reason: str
-
-
-def unknown_subject_rejection(
-    line_number: int, db_object_id: str
-) -> AnnotationRejection:
-    """Return the rejection for an annotation whose subject is not an active entity.
-
-    Args:
-        line_number: GPAD line the annotation came from.
-        db_object_id: The annotation's subject, named in the reason.
-    """
-    reason = f"db_object_id {db_object_id} is not an active entity"
-    return AnnotationRejection(
-        line_number, UNKNOWN_DB_OBJECT_ID, reason[:MAX_REJECTION_REASON_LENGTH]
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,10 +93,8 @@ class RejectionReportBuilder:
     are kept, so a file with millions of bad rows uses little memory.
 
     Rejections may be added in any line order, and the report still lists the
-    lowest lines. Staging, for example, adds a batch's unreadable rows first and
-    its unknown-entity rejections after checking the whole batch against the
-    entity catalog, so a rejection on line 12 can arrive after one on line 4,900.
-    Rejections from the same line keep the order in which they were added.
+    lowest lines. Rejections from the same line keep the order in which they were
+    added.
     """
 
     def __init__(self) -> None:
@@ -265,7 +245,7 @@ class NoValidAnnotationsError(ValueError):
     """Report a GPAD file with no annotations that can be imported.
 
     Publishing it would delete the group's annotations and import nothing. That
-    usually means a wrong file or a missing entity catalog, so the refresh fails.
+    usually means a wrong file, so the refresh fails.
 
     Attributes:
         report: The records that were rejected.
@@ -280,8 +260,7 @@ class CutoverRejectedError(ValueError):
     """Report a cutover that rejected at least one record.
 
     A cutover publishes only when every record is imported. Staging raises this
-    for any rejected record, and publication raises it if a staged annotation's
-    subject is no longer an active entity.
+    when any record of a cutover's file is rejected.
 
     Attributes:
         report: The records that were rejected.

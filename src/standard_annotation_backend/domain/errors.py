@@ -17,17 +17,6 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class DuplicatePeers:
-    """Identify the active annotations a write would duplicate.
-
-    Attributes:
-        peer_ids: Identifiers of the conflicting annotations.
-    """
-
-    peer_ids: tuple[UUID, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class StaleVersion:
     """Describe an annotation whose current version differs from the expected one.
 
@@ -59,9 +48,7 @@ class StaleChangeSet:
     current_version: int
 
 
-type ErrorDetails = (
-    tuple[ValidationIssue, ...] | DuplicatePeers | StaleVersion | StaleChangeSet
-)
+type ErrorDetails = tuple[ValidationIssue, ...] | StaleVersion | StaleChangeSet
 """Typed details an error may attach to its response."""
 
 

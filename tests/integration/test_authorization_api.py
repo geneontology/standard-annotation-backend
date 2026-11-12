@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -47,7 +48,9 @@ CHANGE_SET_MISSING = {
 
 
 @pytest.fixture(autouse=True)
-def active_authorization_subjects(seed_active_subjects: Callable[..., None]) -> None:
+def active_authorization_subjects(
+    seed_active_subjects: Callable[..., None], reference_data: Callable[..., None]
+) -> None:
     """Seed subjects so authorized operations reach the ownership workflow."""
     seed_active_subjects(
         "UniProtKB:P12345",
@@ -128,7 +131,7 @@ def _seed(
                 "db_object_id": f"UniProtKB:{name}"
             }
             record = uow.annotations.create(
-                annotation=Annotation.model_validate(payload),
+                uow.annotations.prepare_create(Annotation.model_validate(payload)),
                 actor_id=creator,
                 owning_group_id=group,
             )
@@ -488,6 +491,13 @@ def test_hidden_change_sets_never_disclose_proposer_or_terminal_state(
         assert _snapshot(session_factory) == before
 
 
+def _duplicate_peer_ids(issues: list[dict[str, Any]]) -> list[str]:
+    """Return the peer IDs listed by the only issue, which must be a duplicate."""
+    (issue,) = issues
+    assert issue["type"] == "duplicate_annotation"
+    return issue["details"]["peer_ids"]
+
+
 @pytest.mark.parametrize("scope", ["self", "group"])
 def test_duplicate_conflicts_disclose_all_peer_ids(
     bearer_client: TestClient,
@@ -509,8 +519,8 @@ def test_duplicate_conflicts_disclose_all_peer_ids(
         headers=_headers(),
         json={"owning_group_id": "MGI", "annotation": payload},
     )
-    assert create.status_code == status.HTTP_409_CONFLICT
-    assert create.json()["error"]["details"]["peer_ids"] == [peer_id]
+    assert create.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert _duplicate_peer_ids(create.json()["error"]["details"]) == [peer_id]
     assert _snapshot(session_factory) == before
     proposed = bearer_client.post(
         "/change-sets",
@@ -528,14 +538,15 @@ def test_duplicate_conflicts_disclose_all_peer_ids(
         f"/change-sets/{proposal_id}/preview", headers=_headers()
     )
     assert preview.status_code == status.HTTP_200_OK
-    assert preview.json()["duplicate_peer_ids"] == [peer_id]
+    assert _duplicate_peer_ids(preview.json()["validation_errors"]) == [peer_id]
     assert preview.json()["can_accept"] is False
     before = _snapshot(session_factory)
     accepted = bearer_client.post(
         f"/change-sets/{proposal_id}/accept", headers=_headers()
     )
-    assert accepted.status_code == status.HTTP_409_CONFLICT
-    assert accepted.json()["error"]["details"]["peer_ids"] == [peer_id]
+    assert accepted.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert accepted.json()["error"]["code"] == "invalid_change_set"
+    assert _duplicate_peer_ids(accepted.json()["error"]["details"]) == [peer_id]
     assert _snapshot(session_factory) == before
 
 
@@ -544,9 +555,16 @@ def test_stored_preview_returns_all_duplicate_peer_ids(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    """Reading a saved preview returns every recorded duplicate peer ID."""
+    """Reading a saved preview returns every recorded duplicate peer ID.
+
+    The peers include an annotation outside the reader's scope.
+    """
     resources = _seed(unit_of_work_factory, validated_annotation, "read", "self")
     proposal_id = resources.creates["own"]
+    peer_ids = [
+        str(resources.annotations["foreign"]),
+        str(resources.annotations["own"]),
+    ]
     with unit_of_work_factory() as uow:
         uow.change_sets.record_preview(
             proposal_id,
@@ -554,19 +572,22 @@ def test_stored_preview_returns_all_duplicate_peer_ids(
                 "change_set_id": str(proposal_id),
                 "operation": "create",
                 "can_accept": False,
-                "duplicate_peer_ids": [
-                    str(resources.annotations["foreign"]),
-                    str(resources.annotations["own"]),
+                "validation_errors": [
+                    {
+                        "location": ["annotation"],
+                        "message": "Annotation duplicates other active annotations",
+                        "type": "duplicate_annotation",
+                        "details": {"peer_ids": peer_ids},
+                    }
                 ],
             },
         )
         uow.commit()
     response = bearer_client.get(f"/change-sets/{proposal_id}", headers=_headers())
     assert response.status_code == status.HTTP_200_OK
-    assert response.json()["preview"]["duplicate_peer_ids"] == [
-        str(resources.annotations["foreign"]),
-        str(resources.annotations["own"]),
-    ]
+    assert _duplicate_peer_ids(response.json()["preview"]["validation_errors"]) == (
+        peer_ids
+    )
     assert response.json()["preview"]["can_accept"] is False
 
 

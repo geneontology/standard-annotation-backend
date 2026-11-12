@@ -141,11 +141,7 @@ def test_publication_records_one_audit_event_and_a_durable_result(
         result.active_identifier_count,
         result.added_count,
     ) == (2, 2, 2)
-    assert (result.retained_count, result.removed_count, result.removal_impacts) == (
-        0,
-        0,
-        (),
-    )
+    assert (result.retained_count, result.removed_count) == (0, 0)
     assert result.source_key == "mgi"
     document = _document("mgi", "MGI:2", "MGI:1")
     assert (
@@ -214,7 +210,6 @@ def test_recovered_publication_reports_the_original_outcome(
         job, _document("mgi", "MGI:3", "MGI:4", "MGI:5"), ignore_progress
     )
     assert original.warnings == ("catalog warning",)
-    assert original.counts["removal_impact_count"] >= 1
     assert original.counts["removed_count"] == 2
     assert original.counts["added_count"] == 2
     recovered = service.recover(job)
@@ -224,13 +219,14 @@ def test_recovered_publication_reports_the_original_outcome(
     assert recovered.warnings == original.warnings
 
 
-def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
+def test_replacement_does_not_change_annotations(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
-    """Replacing a catalog reports sorted impacts and leaves annotations unchanged.
+    """Replacing a catalog leaves annotations on removed entities unchanged.
 
-    Each impact lists the non-deleted annotations on a removed entity.
+    The annotations' current state and full history are the same afterwards,
+    including a deleted annotation's.
     """
     service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
     old = publish_catalog(service, unit_of_work_factory, "MGI:z", "MGI:a", "MGI:keep")
@@ -288,13 +284,6 @@ def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
         1,
         2,
     )
-    assert outcome.result["removal_impacts"] == [
-        {
-            "db_object_id": "MGI:a",
-            "annotation_ids": [str(UUID(int=1)), str(UUID(int=2))],
-        },
-        {"db_object_id": "MGI:z", "annotation_ids": [str(UUID(int=3))]},
-    ]
     assert active_ids(session_factory) == ["MGI:keep", "MGI:new", "RGD:1"]
     assert stored_result(unit_of_work_factory, old) == old_result
     with session_factory() as session:

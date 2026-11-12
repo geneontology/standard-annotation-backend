@@ -17,23 +17,21 @@ from standard_annotation_backend.domain.stored_json import StoredDataError
 
 _REPORT = RejectionReport(
     issue_count=2,
-    by_code={"syntax": 1, "unknown_db_object_id": 1},
+    by_code={"syntax": 1, "validation": 1},
     issues=(
         AnnotationRejection(3, "syntax", "bad line"),
-        AnnotationRejection(
-            9, "unknown_db_object_id", "db_object_id X is not an active entity"
-        ),
+        AnnotationRejection(9, "validation", "evidence_type is not allowed"),
     ),
 )
 _REPORT_JSON = {
     "issue_count": 2,
-    "by_code": {"syntax": 1, "unknown_db_object_id": 1},
+    "by_code": {"syntax": 1, "validation": 1},
     "issues": [
         {"line_number": 3, "code": "syntax", "reason": "bad line"},
         {
             "line_number": 9,
-            "code": "unknown_db_object_id",
-            "reason": "db_object_id X is not an active entity",
+            "code": "validation",
+            "reason": "evidence_type is not allowed",
         },
     ],
 }

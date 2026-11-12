@@ -90,7 +90,6 @@ def test_create_read_preview_and_accept(integration_api_client: TestClient) -> N
     assert preview.status_code == status.HTTP_200_OK
     assert preview.json()["can_accept"] is True
     assert preview.json()["validation_errors"] == []
-    assert preview.json()["duplicate_peer_ids"] == []
     assert client.get(path).json()["preview"] == preview.json()
     assert client.get("/annotations").json()["total"] == 0
 
@@ -456,20 +455,28 @@ def test_stale_acceptance_commits_stale_state(
 def test_duplicate_acceptance_retains_proposal(
     integration_api_client: TestClient,
 ) -> None:
-    """Duplicate conflicts retain their established envelope and proposal state."""
+    """A duplicate is a semantic issue in the preview and at acceptance.
+
+    The failed acceptance leaves the proposal open for review.
+    """
     client = integration_api_client
     target = _create_annotation(client)
     proposal = _create_proposal(client)
     path = f"/change-sets/{proposal['change_set_id']}"
+    issue = {
+        "location": ["annotation"],
+        "message": "Annotation duplicates other active annotations",
+        "type": "duplicate_annotation",
+        "details": {"peer_ids": [target["annotation_id"]]},
+    }
     preview = client.post(f"{path}/preview")
     assert preview.status_code == status.HTTP_200_OK
-    assert preview.json()["duplicate_peer_ids"] == [target["annotation_id"]]
+    assert preview.json()["validation_errors"] == [issue]
+    assert preview.json()["can_accept"] is False
     response = client.post(f"{path}/accept")
-    assert response.status_code == status.HTTP_409_CONFLICT
-    assert response.json()["error"]["code"] == "duplicate_annotation"
-    assert response.json()["error"]["details"] == {
-        "peer_ids": [target["annotation_id"]]
-    }
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["error"]["code"] == "invalid_change_set"
+    assert response.json()["error"]["details"] == [issue]
     assert client.get(path).json()["state"] == "proposed"
 
 

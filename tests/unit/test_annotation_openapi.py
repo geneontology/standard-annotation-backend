@@ -133,7 +133,6 @@ def test_annotation_openapi_lists_allowed_evidence_terms_and_relations(
             "post",
             _openapi_statuses(
                 status.HTTP_201_CREATED,
-                status.HTTP_409_CONFLICT,
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
             ),
         ),
@@ -152,7 +151,6 @@ def test_annotation_openapi_lists_allowed_evidence_terms_and_relations(
             _openapi_statuses(
                 status.HTTP_200_OK,
                 status.HTTP_404_NOT_FOUND,
-                status.HTTP_409_CONFLICT,
                 status.HTTP_412_PRECONDITION_FAILED,
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 status.HTTP_428_PRECONDITION_REQUIRED,
@@ -261,22 +259,25 @@ def test_annotation_openapi_documents_success_response_headers(
 
 
 @pytest.mark.parametrize(
-    ("path", "method"),
+    ("path", "method", "invalid_code"),
     [
-        ("/annotations", "post"),
-        ("/annotations/{annotation_id}", "patch"),
-        ("/change-sets/{change_set_id}/accept", "post"),
+        ("/annotations", "post", "invalid_annotation"),
+        ("/annotations/{annotation_id}", "patch", "invalid_annotation"),
+        ("/change-sets/{change_set_id}/accept", "post", "invalid_change_set"),
     ],
 )
-def test_write_422_docs_list_validation_and_unknown_subject_codes(
-    client: TestClient, path: str, method: str
+def test_validated_writes_document_one_issue_code_and_missing_reference_data(
+    client: TestClient, path: str, method: str, invalid_code: str
 ) -> None:
-    """Write routes document `request_validation_error` and `unknown_db_object_id` for 422."""
+    """Validated writes report issues with one code, and 503 if data is missing."""
     responses = client.get("/openapi.json").json()["paths"][path][method]["responses"]
 
-    description = responses["422"]["description"]
-    assert "`request_validation_error`" in description
-    assert "`unknown_db_object_id`" in description
+    assert f"`{invalid_code}`" in responses["422"]["description"]
+    assert "`request_validation_error`" in responses["422"]["description"]
+    assert "unknown_db_object_id" not in responses["422"]["description"]
+    assert "`reference_data_unavailable`" in responses["503"]["description"]
+    assert "`credential_storage_unavailable`" in responses["503"]["description"]
+    assert "duplicate_annotation" not in responses.get("409", {}).get("description", "")
 
 
 def test_annotation_search_docs_list_query_errors_and_both_unavailable_causes(

@@ -13,7 +13,6 @@ from uuid import UUID
 
 from standard_annotation_backend.domain.annotation_management import (
     STORED_REJECTION_REPORT,
-    UNKNOWN_DB_OBJECT_ID,
     AnnotationImportConflictError,
     AnnotationManagementMode,
     AnnotationRefreshResult,
@@ -23,7 +22,6 @@ from standard_annotation_backend.domain.annotation_management import (
     NoValidAnnotationsError,
     RejectionReport,
     RejectionReportBuilder,
-    unknown_subject_rejection,
 )
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import (
@@ -206,8 +204,7 @@ class AnnotationRefreshService:
 
         Staging stores the annotations in separate tables until `_publish`
         replaces the group's annotations with them. Any staging left by an
-        earlier, interrupted attempt of the job is replaced. Annotations whose
-        `db_object_id` is not an active entity are rejected. Nothing is committed
+        earlier, interrupted attempt of the job is replaced. Nothing is committed
         when the document has an invalid header, yields no valid annotations, or
         is a cutover with any rejection.
 
@@ -237,21 +234,8 @@ class AnnotationRefreshService:
                             parsed.append(item)
                         else:
                             builder.add(item)
-                    known = imports.active_db_object_ids(
-                        {item.annotation.db_object_id for item in parsed}
-                    )
-                    accepted: list[ParsedAnnotation] = []
-                    for item in parsed:
-                        if item.annotation.db_object_id in known:
-                            accepted.append(item)
-                        else:
-                            builder.add(
-                                unknown_subject_rejection(
-                                    item.line_number, item.annotation.db_object_id
-                                )
-                            )
-                    imports.stage_annotations(job_id, accepted)
-                    staged += len(accepted)
+                    imports.stage_annotations(job_id, parsed)
+                    staged += len(parsed)
                 metadata = document.metadata
                 data_rows = document.data_rows
             report = builder.build()
@@ -281,19 +265,13 @@ class AnnotationRefreshService:
 
         A refresh can be skipped only when the group is `gpad_imported`, its last
         published import has the same `source_checksum` and was checked with the
-        installed schema package version, the group has no local changes since that
-        import, and that import rejected no annotations as `unknown_db_object_id`.
-        Local changes include edits, comments, and change sets; see
+        installed schema package version, and the group has no local changes since
+        that import. Local changes include edits, comments, and change sets; see
         `AnnotationImportRepository.has_local_changes`. A different schema version
-        can change which rows are accepted, and the entity catalog may have changed
-        even when the file has not, so either one requires a new import.
+        can change which rows are accepted, so it requires a new import.
 
         Returns:
             The skip result, or `None` when the file must be imported.
-
-        Raises:
-            StoredDataError: If the last import's stored rejection report is
-                malformed.
         """
         with self._unit_of_work_factory() as uow:
             imports = uow.annotation_imports
@@ -307,7 +285,6 @@ class AnnotationRefreshService:
                 last is None
                 or last.source_checksum != source_checksum
                 or last.schema_version != SCHEMA_PACKAGE_VERSION
-                or _has_unknown_subject_rejections(last.rejection_report)
                 or imports.has_local_changes(group_key, last.job_id)
             ):
                 return None
@@ -334,8 +311,6 @@ class AnnotationRefreshService:
             AnnotationImportConflictError: If the job does not exist, is not a
                 GPAD job, or has no staged import.
             GroupSabeManagedError: If the group is already SABE-managed.
-            CutoverRejectedError: If a cutover's staged subject is no longer an
-                active entity.
         """
         with self._unit_of_work_factory() as uow:
             existing = uow.annotation_imports.published_import(job_id)
@@ -357,16 +332,6 @@ class AnnotationRefreshService:
             )
             uow.commit()
             return result
-
-
-def _has_unknown_subject_rejections(stored_report: dict[str, object]) -> bool:
-    """Report whether a stored rejection report counts any unknown-entity rejection.
-
-    Raises:
-        StoredDataError: If the stored report is malformed.
-    """
-    report = STORED_REJECTION_REPORT.load(stored_report)
-    return report.by_code.get(UNKNOWN_DB_OBJECT_ID, 0) > 0
 
 
 def _import_result(record: AnnotationImportRecord) -> AnnotationRefreshResult:

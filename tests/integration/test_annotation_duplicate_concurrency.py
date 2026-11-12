@@ -1,4 +1,9 @@
-"""Test duplicate prevention when separate database transactions run concurrently."""
+"""Test duplicate detection when separate database transactions run concurrently.
+
+A mutation whose prepared write has duplicate peers stops, as a validated write
+would. The signature locks make the second of two conflicting writes wait for the
+first and then find it as a peer.
+"""
 
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -7,13 +12,14 @@ from time import monotonic
 from uuid import UUID
 
 import pytest
+from refresh_helpers import TEST_SOURCES
+from seeding import insert_annotation
 from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationStatus,
-    DuplicateAnnotationError,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.domain.auth import (
@@ -34,11 +40,10 @@ from standard_annotation_backend.services.annotation_service import AnnotationSe
 
 
 @pytest.fixture(autouse=True)
-def _active_subjects(seed_active_subjects: Callable[..., None]) -> None:
-    """Make the subjects these tests write active in the entity catalog.
-
-    Direct annotation writes require an active subject.
-    """
+def _active_subjects(
+    seed_active_subjects: Callable[..., None], reference_data: Callable[..., None]
+) -> None:
+    """Load the subjects and reference data these tests' service writes need."""
     seed_active_subjects(
         "UniProtKB:P12345",
         "UniProtKB:FIRST",
@@ -58,12 +63,18 @@ def _changed(annotation: Annotation, **changes: object) -> Annotation:
     return Annotation.model_validate(data)
 
 
+class _DuplicateFound(Exception):
+    """Stop a mutation whose prepared write has duplicate peers."""
+
+
 def _create(annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
-        AnnotationRepository(session).create(
-            annotation=annotation,
-            actor_id="concurrent-creator",
-            owning_group_id="group-1",
+        repository = AnnotationRepository(session)
+        prepared = repository.prepare_create(annotation)
+        if prepared.duplicate_peer_ids:
+            raise _DuplicateFound
+        repository.create(
+            prepared, actor_id="concurrent-creator", owning_group_id="group-1"
         )
 
     return mutate
@@ -71,12 +82,13 @@ def _create(annotation: Annotation) -> Mutation:
 
 def _update(annotation_id: UUID, annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
-        AnnotationRepository(session).update(
-            annotation_id,
-            annotation,
-            expected_version=1,
-            actor_id="concurrent-editor",
+        repository = AnnotationRepository(session)
+        prepared = repository.prepare_update(
+            annotation_id, annotation, expected_version=1
         )
+        if prepared.duplicate_peer_ids:
+            raise _DuplicateFound
+        repository.update(prepared, actor_id="concurrent-editor")
 
     return mutate
 
@@ -117,7 +129,7 @@ def _run_coordinated_mutations(
                 assert release.wait(GUARD_SECONDS), "second transaction not released"
             session.commit()
             return "success"
-        except DuplicateAnnotationError:
+        except _DuplicateFound:
             session.rollback()
             return "duplicate"
         except StaleAnnotationVersionError as error:
@@ -238,14 +250,15 @@ def test_distinct_record_updates_cannot_introduce_the_same_duplicate(
     validated_annotation: Annotation,
 ) -> None:
     with session_factory() as session:
-        repository = AnnotationRepository(session)
-        first = repository.create(
-            annotation=_changed(validated_annotation, db_object_id="UniProtKB:FIRST"),
+        first = insert_annotation(
+            session,
+            _changed(validated_annotation, db_object_id="UniProtKB:FIRST"),
             actor_id="seed",
             owning_group_id="group-1",
         )
-        second = repository.create(
-            annotation=_changed(validated_annotation, db_object_id="UniProtKB:SECOND"),
+        second = insert_annotation(
+            session,
+            _changed(validated_annotation, db_object_id="UniProtKB:SECOND"),
             actor_id="seed",
             owning_group_id="group-1",
         )
@@ -272,8 +285,8 @@ def test_same_record_update_race_rejects_the_stale_version(
     validated_annotation: Annotation,
 ) -> None:
     with session_factory() as session:
-        record = AnnotationRepository(session).create(
-            annotation=validated_annotation, actor_id="seed", owning_group_id="group-1"
+        record = insert_annotation(
+            session, validated_annotation, actor_id="seed", owning_group_id="group-1"
         )
         session.commit()
         annotation_id = record.annotation_id
@@ -309,8 +322,9 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
     validated_annotation: Annotation,
 ) -> None:
     with session_factory() as session:
-        record = AnnotationRepository(session).create(
-            annotation=validated_annotation,
+        record = insert_annotation(
+            session,
+            validated_annotation,
             actor_id="seed",
             owning_group_id="group-1",
         )
@@ -326,10 +340,13 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
             nonlocal writer_calls
             writer_calls += 1
             with session_factory() as writer:
-                AnnotationRepository(writer).update(
-                    annotation_id,
-                    _changed(validated_annotation, assigned_by="Concurrent"),
-                    expected_version=1,
+                repository = AnnotationRepository(writer)
+                repository.update(
+                    repository.prepare_update(
+                        annotation_id,
+                        _changed(validated_annotation, assigned_by="Concurrent"),
+                        expected_version=1,
+                    ),
                     actor_id="concurrent-editor",
                 )
                 writer.commit()
@@ -342,7 +359,9 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
         )
         return reader
 
-    service = AnnotationService(create_unit_of_work_factory(reader_session_factory))
+    service = AnnotationService(
+        create_unit_of_work_factory(reader_session_factory), TEST_SOURCES
+    )
     with pytest.raises(StaleAnnotationVersionError):
         service.patch(
             annotation_id,

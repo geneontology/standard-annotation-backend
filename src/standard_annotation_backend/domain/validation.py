@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from pydantic import ValidationError
 
@@ -20,12 +20,16 @@ class ValidationIssue(TypedDict):
     Attributes:
         location: Path to the invalid or missing value in the payload.
         message: Human-readable explanation of the failure.
-        type: Stable Pydantic identifier for the kind of failure.
+        type: Stable identifier for the kind of failure: Pydantic's for
+            structural issues, or a semantic issue type such as `unknown_term`.
+        details: JSON-compatible facts about the failure, such as an obsolete
+            term's suggested replacements. Absent when there are none.
     """
 
     location: tuple[str | int, ...]
     message: str
     type: str
+    details: NotRequired[dict[str, object]]
 
 
 @dataclass(frozen=True, slots=True)

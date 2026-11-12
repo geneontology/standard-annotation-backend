@@ -229,10 +229,10 @@ of `apply`.
 | Step | Authorization (`AuthorizationRefreshService`) | Rules (`RulesRefreshService`) | Ontology (`OntologyRefreshService`) | Entity (`EntityRefreshService`) | Annotation (`AnnotationRefreshService`) |
 |---|---|---|---|---|---|
 | `recover` | nothing to recover; the replacement is one transaction, and `apply` recognizes it as unchanged | this job's `rules_snapshot` row, if retention has kept it | stored `refresh_result` on this job's `ontology_metadata` row | stored publication result, or committed staging, which it publishes without fetching | stored publication result from this job's `annotation_import` row; unpublished staging is discarded and redone, not resumed |
-| unchanged check (inside `apply`) | most recent `authorization_refresh` row has the same type, locator, revision, and checksum | active `rules_snapshot` row has the same type, locator, and checksum, and already stores the rule data and PMIDs this release parses from the files; the commit is not compared | active `ontology_metadata` row has the same type, locator, revision, and checksum | active `entity_catalog_snapshot` has the same locator and checksum | ordinary refreshes only (a cutover never skips): the group is `gpad_imported`, its last published import has the same checksum and schema package version and no `unknown_db_object_id` rejections, and the group has no local changes |
+| unchanged check (inside `apply`) | most recent `authorization_refresh` row has the same type, locator, revision, and checksum | active `rules_snapshot` row has the same type, locator, and checksum, and already stores the rule data and PMIDs this release parses from the files; the commit is not compared | active `ontology_metadata` row has the same type, locator, revision, and checksum | active `entity_catalog_snapshot` has the same locator and checksum | ordinary refreshes only (a cutover never skips): the group is `gpad_imported`, its last published import has the same checksum and schema package version, and the group has no local changes |
 | `apply` | decode UTF-8, validate `users.yaml`, replace users and grants | unpack, decode, and validate all six files, check unchanged, then take the rules refresh lock, check unchanged again, store and activate the snapshot, and delete snapshots older than the one it replaced | take the ontology lock, check unchanged again, parse OBO, stage, activate | decode gzip and UTF-8, parse GPI, stage, publish | try the group lock, refuse a SABE-managed group, decode gzip and UTF-8, parse GPAD, stage, publish (replacing the group's annotations) |
-| Tables written | `sabe_user`, `sabe_group`, `authorization_assignment`, `authorization_refresh` | `rules_snapshot`, `retracted_publication` | `ontology_metadata`, `ontology_term`, `ontology_alt_id`, `ontology_closure`; `annotation` and its versions when terms are replaced | `entity_catalog_snapshot`, `entity_staging_record`, `entity_membership`, `entity_source_record` | `annotation_staging` (and its multivalued and duplicate-reference child tables), `annotation_import`, `group_annotation_management`; on publication, the group's `annotation` rows and dependents are deleted and replaced |
-| Audit action | `authorization.refreshed` | `rules.refreshed` | `ontology.refreshed`, plus `annotation.updated` per replaced term | `entity.refreshed` (`entity.retired` for retirement) | `annotation_refresh.published` or `annotation_cutover.published` |
+| Tables written | `sabe_user`, `sabe_group`, `authorization_assignment`, `authorization_refresh` | `rules_snapshot`, `retracted_publication` | `ontology_metadata`, `ontology_term`, `ontology_alt_id`, `ontology_closure` | `entity_catalog_snapshot`, `entity_staging_record`, `entity_membership`, `entity_source_record` | `annotation_staging` (and its multivalued and duplicate-reference child tables), `annotation_import`, `group_annotation_management`; on publication, the group's `annotation` rows and dependents are deleted and replaced |
+| Audit action | `authorization.refreshed` | `rules.refreshed` | `ontology.refreshed` | `entity.refreshed` (`entity.retired` for retirement) | `annotation_refresh.published` or `annotation_cutover.published` |
 | Kind-specific failure codes | `invalid_document` | `invalid_document` | `invalid_document`, `candidate_conflict` | `header`, `row_validation`, `catalog_collision`, `candidate_conflict` | `header`, `no_valid_annotations`, `cutover_rejected`, `group_sabe_managed` |
 | `discard_staging` (on failure) | none | none | none | deletes the job's staging rows | deletes the job's staging rows and unpublished `annotation_import` row |
 | `after_terminal` | nothing | nothing | prune old snapshot data | nothing | nothing |
@@ -262,11 +262,9 @@ Some details that matter when debugging:
 - **Ontology.** Staging and activation happen while the job holds the
   per-ontology lock (`ontology_refresh_lock`). If another process holds it,
   `apply` raises `OntologyRefreshBusyError`, a `RetryableRefreshError`, so the
-  job stays `running` and the run is retried. Activation also takes the exclusive annotation
-  system-update lock, because it may rewrite annotations. Pruning runs after
-  every finished ontology job: through `sabe.ontology.prune` under Celery, or
-  directly in the CLI process, where a busy lock or a pruning error is logged and
-  skipped.
+  job stays `running` and the run is retried. Pruning runs after every finished
+  ontology job: through `sabe.ontology.prune` under Celery, or directly in the
+  CLI process, where a busy lock or a pruning error is logged and skipped.
 - **Entity.** Staging and publication are separate transactions. If a worker
   stops between them, `recover` publishes the committed staging on the next run.
   Publication holds the per-source entity catalog lock. A "refresh all" request
@@ -277,9 +275,9 @@ Some details that matter when debugging:
 - **Annotation.** Publication replaces the target group's annotations, change
   sets, comments, and related audit events, and cannot be undone. Staging and
   publication are separate transactions. Publication takes the exclusive global
-  annotation-write lock, so annotation writes wait until it commits. Rows whose
-  `db_object_id` is not an active entity are rejected and reported; an ordinary
-  refresh publishes the rest, and a cutover fails on any rejection.
+  annotation-write lock, so annotation writes wait until it commits. Rows that
+  cannot be read or fail structural validation are rejected and reported; an
+  ordinary refresh publishes the rest, and a cutover fails on any rejection.
 
 ## Locks
 
@@ -291,7 +289,7 @@ Some details that matter when debugging:
 | Rules refresh lock | transaction advisory lock | `RulesRepository.activate` | concurrent activations, so refreshes of the same files store one snapshot |
 | Ontology refresh lock | session try-lock, one per ontology | ontology `apply` and `prune` | out-of-order activation, and pruning a snapshot that is being activated |
 | Entity catalog lock | transaction advisory lock, one per source | entity publish and retire | concurrent changes to one source's active catalog |
-| Annotation system-update lock | exclusive global annotation-write lock | ontology activation and annotation publication | ordinary annotation writes during term replacement or group replacement |
+| Annotation system-update lock | exclusive global annotation-write lock | annotation publication | ordinary annotation writes during group replacement |
 | Annotation group lock (`annotation_group_lock`) | session try-lock, one per group | annotation `apply`, after the document is fetched and found changed | two GPAD jobs for one group staging or publishing at once |
 
 The try-locks never wait. A process that cannot take one either returns (job

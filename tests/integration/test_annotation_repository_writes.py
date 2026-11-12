@@ -10,7 +10,6 @@ from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
     ChangeSource,
-    DuplicateAnnotationError,
 )
 from standard_annotation_backend.persistence.models import (
     JobRecord,
@@ -20,40 +19,10 @@ from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitO
 UnitOfWorkFactory = Callable[[], SqlAlchemyUnitOfWork]
 
 
-@pytest.fixture(autouse=True)
-def _active_subjects(seed_active_subjects: Callable[..., None]) -> None:
-    """Make the subjects these tests write active in the entity catalog.
-
-    Direct annotation writes require an active subject.
-    """
-    seed_active_subjects("UniProtKB:P12345", "UniProtKB:DISTINCT")
-
-
 def _changed(annotation: Annotation, **changes: object) -> Annotation:
     annotation_data = annotation.model_dump(mode="json")
     annotation_data.update(changes)
     return Annotation.model_validate(annotation_data)
-
-
-def _create_existing(
-    unit_of_work_factory: UnitOfWorkFactory,
-    annotation: Annotation,
-    *,
-    annotation_id: UUID | None = None,
-) -> UUID:
-
-    with unit_of_work_factory() as unit_of_work:
-        record = insert_annotation(
-            unit_of_work.annotations.session,
-            annotation=annotation,
-            actor_id="creator",
-            change_source=ChangeSource.API,
-            owning_group_id="group-1",
-            record_origin=AnnotationOrigin.DIRECT,
-            annotation_id=annotation_id,
-        )
-        unit_of_work.commit()
-        return record.annotation_id
 
 
 def _create_legacy_annotations(
@@ -85,108 +54,45 @@ def _create_legacy_annotations(
         unit_of_work.commit()
 
 
-def test_create_rejects_an_active_duplicate(
+def test_prepare_reports_every_active_peer_and_excludes_the_target(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    existing_id = _create_existing(unit_of_work_factory, validated_annotation)
+    """Prepared writes list all active duplicates, never the annotation itself.
 
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(DuplicateAnnotationError) as raised,
-    ):
-        unit_of_work.annotations.create(
-            annotation=validated_annotation,
-            actor_id="api-user",
-            owning_group_id="group-1",
-        )
-
-    assert raised.value.peer_ids == (existing_id,)
-
-
-def test_update_rejects_only_a_new_duplicate_peer(
-    unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
-) -> None:
+    An update of one of two imported duplicates reports the other; a create of the
+    same annotation reports both.
+    """
     first_id = UUID("00000000-0000-0000-0000-000000000001")
     second_id = UUID("00000000-0000-0000-0000-000000000002")
-    candidate_id = UUID("00000000-0000-0000-0000-000000000003")
     _create_legacy_annotations(
         unit_of_work_factory,
-        (
-            (first_id, validated_annotation),
-            (second_id, validated_annotation),
-        ),
-    )
-    _create_existing(
-        unit_of_work_factory,
-        _changed(validated_annotation, db_object_id="UniProtKB:DISTINCT"),
-        annotation_id=candidate_id,
+        ((first_id, validated_annotation), (second_id, validated_annotation)),
     )
 
     with unit_of_work_factory() as unit_of_work:
-        preserved = unit_of_work.annotations.update(
+        update = unit_of_work.annotations.prepare_update(
             first_id,
             _changed(validated_annotation, assigned_by="MGI"),
             expected_version=1,
-            actor_id="api-user",
         )
-        unit_of_work.commit()
-    assert preserved.current_version == 2
+        create = unit_of_work.annotations.prepare_create(validated_annotation)
 
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(DuplicateAnnotationError) as raised,
-    ):
-        unit_of_work.annotations.update(
-            candidate_id,
-            validated_annotation,
-            expected_version=1,
-            actor_id="api-user",
-        )
-    assert raised.value.peer_ids == (first_id, second_id)
+    assert update.duplicate_peer_ids == (second_id,)
+    assert create.duplicate_peer_ids == (first_id, second_id)
 
 
-def test_update_rejects_expansion_of_a_legacy_peer_set(
+def test_a_prepared_write_from_another_session_is_rejected(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
-    first_id = UUID("00000000-0000-0000-0000-000000000101")
-    existing_peer_id = UUID("00000000-0000-0000-0000-000000000102")
-    new_peer_id = UUID("00000000-0000-0000-0000-000000000103")
-    original = _changed(validated_annotation, references=["PMID:1"])
-    _create_legacy_annotations(
-        unit_of_work_factory,
-        (
-            (first_id, original),
-            (existing_peer_id, original),
-            (
-                new_peer_id,
-                _changed(validated_annotation, references=["PMID:2"]),
-            ),
-        ),
-    )
-
-    with (
-        unit_of_work_factory() as unit_of_work,
-        pytest.raises(DuplicateAnnotationError) as raised,
-    ):
-        unit_of_work.annotations.update(
-            first_id,
-            _changed(original, references=["PMID:1", "PMID:2"]),
-            expected_version=1,
-            actor_id="api-user",
-        )
-
-    assert raised.value.peer_ids == (new_peer_id,)
-    with unit_of_work_factory() as unit_of_work:
-        retained = unit_of_work.annotations.get(first_id)
-        versions = unit_of_work.annotations.list_versions_page(
-            first_id, limit=100, offset=0
-        ).items
-        assert retained is not None
-        assert retained.current_version == 1
-        assert retained.annotation_data["references"] == ["PMID:1"]
-        assert [(version.version, version.is_deleted) for version in versions] == [
-            (1, False)
-        ]
+    """A write must use a preparation made, with its locks, in the same session."""
+    with unit_of_work_factory() as preparing:
+        prepared = preparing.annotations.prepare_create(validated_annotation)
+        with (
+            unit_of_work_factory() as other,
+            pytest.raises(ValueError, match="its own session"),
+        ):
+            other.annotations.create(
+                prepared, actor_id="api-user", owning_group_id="group-1"
+            )

@@ -340,14 +340,15 @@ def test_patch_rejects_a_new_duplicate(integration_api_client: TestClient) -> No
         json={"db_object_id": "UniProtKB:P12345"},
     )
 
-    assert response.status_code == status.HTTP_409_CONFLICT
-    assert response.json() == {
-        "error": {
-            "code": "duplicate_annotation",
-            "message": "Annotation conflicts with active duplicates",
-            "details": {"peer_ids": [peer["annotation_id"]]},
-        }
-    }
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    error = response.json()["error"]
+    assert error["code"] == "invalid_annotation"
+    assert [
+        (issue["location"], issue["type"], issue["details"])
+        for issue in error["details"]
+    ] == [
+        (["annotation"], "duplicate_annotation", {"peer_ids": [peer["annotation_id"]]})
+    ]
 
 
 def test_patch_same_value_still_creates_a_version(

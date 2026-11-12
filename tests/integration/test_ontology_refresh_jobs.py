@@ -374,7 +374,10 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
     monkeypatch: pytest.MonkeyPatch,
     finalization_method: str,
 ) -> None:
-    """A finalization retry reuses the stored result without updating annotations again."""
+    """A finalization retry reuses the stored result without activating again.
+
+    The annotation keeps its terms, because activation changes no annotations.
+    """
     annotation_id = UUID("00000000-0000-0000-0000-000000000081")
     annotation = Annotation.model_validate(
         {
@@ -422,25 +425,12 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
     recovered = _load_job(unit_of_work_factory, job_id)
     assert recovered.status == JobStatus.SUCCEEDED.value
     assert recovered.result is not None
-    assert recovered.result["annotation_scan_count"] == 1
-    assert recovered.result["annotation_update_count"] == 1
-    assert recovered.result["findings"] == [
-        {
-            "annotation_id": str(annotation_id),
-            "code": "removed_term",
-            "conflicting_annotation_ids": [],
-            "field_paths": ["/annotation_extensions/0/extension_term"],
-            "ontology": "go",
-            "replacement_ids": [],
-            "term_id": "GO:9999999",
-        }
-    ]
     assert len(requests) == 2
     with unit_of_work_factory() as uow:
         record = uow.annotations.get(annotation_id)
         assert record is not None
-        assert record.current_version == 2
-        assert record.ontology_class_id == "GO:0000001"
+        assert record.current_version == 1
+        assert record.ontology_class_id == "GO:0000002"
     with session_factory() as session:
         assert (
             session.scalar(select(func.count()).select_from(OntologyMetadataRecord))

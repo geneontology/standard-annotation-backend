@@ -7,7 +7,6 @@ from time import monotonic
 from refresh_helpers import TEST_SOURCES
 from sqlalchemy import Engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
-from test_change_set_workflows import PROPOSER
 from test_entity_refresh_service import (
     active_ids,
     publish_catalog,
@@ -15,13 +14,11 @@ from test_entity_refresh_service import (
     stored_result,
 )
 
-from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.entities import EntityCatalogCollisionError
 from standard_annotation_backend.persistence.repositories.entities import (
     EntityRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.annotation_service import AnnotationService
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
@@ -51,33 +48,6 @@ def wait_for_lock(engine: Engine, backend_pid: int) -> None:
             ):
                 return
     raise AssertionError("second connection did not wait on a PostgreSQL lock")
-
-
-def wait_for_blocked_by(engine: Engine, holder_pid: int) -> None:
-    """Wait until another connection is waiting on a lock held by `holder_pid`.
-
-    Use this when the waiting connection belongs to a service and its process ID
-    is not available to the test.
-
-    Args:
-        engine: Engine used to query `pg_stat_activity` on a separate connection.
-        holder_pid: Process ID of the connection that holds the lock.
-
-    Raises:
-        AssertionError: If no connection waits on `holder_pid` before the timeout.
-    """
-    deadline = monotonic() + TIMEOUT
-    with engine.connect() as connection:
-        while monotonic() < deadline:
-            if connection.scalar(
-                text(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE :holder = ANY(pg_blocking_pids(pid))"
-                ),
-                {"holder": holder_pid},
-            ):
-                return
-    raise AssertionError("no connection waited on the lock holder")
 
 
 def test_same_source_publications_serialize_and_readers_see_complete_catalogs(
@@ -193,39 +163,3 @@ def test_cross_source_membership_race_has_one_complete_winner(
     )
     assert stored_result(unit_of_work_factory, jobs[winner]) is not None
     assert stored_result(unit_of_work_factory, jobs[loser]) is None
-
-
-def test_waiting_validation_resolves_the_replacement_of_a_retained_identifier(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-    validated_annotation: Annotation,
-) -> None:
-    """An annotation create that waits on a catalog replacement still succeeds.
-
-    When the replacement keeps the annotation's subject, the waiting create sees
-    the new catalog after it commits and creates version 1 of the annotation.
-    """
-    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    publish_catalog(service, unit_of_work_factory, "MGI:1")
-    replacement = stage_catalog(service, unit_of_work_factory, "MGI:1", "MGI:2")
-    annotations = AnnotationService(unit_of_work_factory)
-    payload = {**validated_annotation.model_dump(mode="json"), "db_object_id": "MGI:1"}
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        with unit_of_work_factory() as uow:
-            uow.entities.publish(replacement.job_id)
-            holder_pid = uow.entities.session.scalar(text("SELECT pg_backend_pid()"))
-            write = pool.submit(
-                annotations.create,
-                payload=payload,
-                owning_group_id="other-group",
-                context=PROPOSER,
-            )
-            wait_for_blocked_by(database_engine, holder_pid)
-            uow.commit()
-        created = write.result(TIMEOUT)
-
-    assert created.version == 1
-    assert created.annotation.db_object_id == "MGI:1"
-    assert active_ids(session_factory) == ["MGI:1", "MGI:2"]

@@ -15,7 +15,6 @@ from standard_annotation_backend.api.models import (
     ApiErrorDetails,
     ApiErrorResponse,
     ApiValidationIssue,
-    DuplicateAnnotationDetails,
     StaleAnnotationVersionDetails,
     StaleChangeSetDetails,
 )
@@ -26,7 +25,6 @@ from standard_annotation_backend.domain.auth import (
 from standard_annotation_backend.domain.errors import (
     BadRequestError,
     ConflictError,
-    DuplicatePeers,
     ErrorDetails,
     ForbiddenError,
     InternalServerError,
@@ -208,8 +206,6 @@ def _api_details(details: ErrorDetails | None) -> ApiErrorDetails | None:
     match details:
         case None:
             return None
-        case DuplicatePeers(peer_ids=peer_ids):
-            return DuplicateAnnotationDetails(peer_ids=peer_ids)
         case StaleVersion():
             return StaleAnnotationVersionDetails(
                 annotation_id=details.annotation_id,

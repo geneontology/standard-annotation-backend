@@ -148,25 +148,6 @@ class AuditService:
             details={"change_source": ChangeSource.API},
         )
 
-    def record_ontology_annotation_update(
-        self,
-        *,
-        actor_id: str,
-        job_id: UUID,
-        annotation_id: UUID,
-        annotation_version: int,
-    ) -> AuditEventRecord:
-        """Record an annotation update performed during ontology activation."""
-        return self._repository.record(
-            action=AuditAction.ANNOTATION_UPDATED,
-            actor_id=actor_id,
-            result=AuditResult.SUCCESS,
-            annotation_id=annotation_id,
-            annotation_version=annotation_version,
-            job_id=job_id,
-            details={"change_source": ChangeSource.ONTOLOGY_REFRESH},
-        )
-
     def record_ontology_refreshed(
         self,
         *,

@@ -204,9 +204,11 @@ def test_version_page_total_and_items_share_one_database_snapshot(
             writer_calls += 1
             with unit_of_work_factory() as writer:
                 writer.annotations.update(
-                    annotation_id,
-                    _changed(validated_annotation, assigned_by="MGI"),
-                    expected_version=1,
+                    writer.annotations.prepare_update(
+                        annotation_id,
+                        _changed(validated_annotation, assigned_by="MGI"),
+                        expected_version=1,
+                    ),
                     actor_id="concurrent-editor",
                     change_source=ChangeSource.API,
                 )

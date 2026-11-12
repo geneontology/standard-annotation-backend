@@ -7,10 +7,13 @@ state, such as an imported annotation or a legacy duplicate peer, that the publi
 write paths would refuse to create.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from pathlib import Path
+from uuid import UUID, uuid4
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
@@ -21,6 +24,11 @@ from standard_annotation_backend.domain.annotations import (
 )
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.refresh import RefreshKindName
+from standard_annotation_backend.domain.semantic_validation.rule_data import (
+    STORED_RULE_DATA,
+    RuleData,
+)
 from standard_annotation_backend.persistence.annotation_data import (
     prepare_annotation_for_persistence,
 )
@@ -29,12 +37,28 @@ from standard_annotation_backend.persistence.models import (
     AnnotationMultivaluedFieldValueRecord,
     AnnotationRecord,
     AnnotationVersionRecord,
+    JobRecord,
+    OntologyAltIdRecord,
+    OntologyMetadataRecord,
+    OntologyTermRecord,
+    RulesSnapshotRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.refresh.sources import (
+    RefreshSources,
+    load_sources_file,
+)
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job, job_from_record
 
-__all__ = ["create_job", "insert_annotation"]
+__all__ = [
+    "DEFAULT_TERMS",
+    "SHIPPED_SOURCES",
+    "SeedTerm",
+    "create_job",
+    "insert_annotation",
+    "seed_reference_data",
+]
 
 
 def insert_annotation(
@@ -132,3 +156,165 @@ def create_job(
         job = job_from_record(record)
         uow.commit()
     return job
+
+
+SHIPPED_SOURCES = RefreshSources(
+    load_sources_file(Path(__file__).parents[2] / "config" / "sources.yaml")
+)
+"""The shipped sources, whose ontologies every validated write needs."""
+
+DEFAULT_TERMS = (
+    "GO:0003674",
+    "GO:0005575",
+    "GO:0008150",
+    "GO:0000002",
+    "CL:0000000",
+    "CL:0000001",
+    "CHEBI:1",
+    "CHEBI:15422",
+    "NCBITaxon:9606",
+    "NCBITaxon:10090",
+)
+"""Current terms used by the annotation payloads of the integration tests."""
+
+
+@dataclass(frozen=True, slots=True)
+class SeedTerm:
+    """Describe one term to store in a seeded ontology snapshot."""
+
+    term_id: str
+    obsolete: bool = False
+    replaced_by: tuple[str, ...] = ()
+    consider: tuple[str, ...] = ()
+    alt_ids: tuple[str, ...] = ()
+
+
+def _succeeded_job(session: Session, job_type: str, source_key: str) -> UUID:
+    """Add a succeeded job that a seeded snapshot can belong to."""
+    now = datetime.now(UTC)
+    job = JobRecord(
+        job_id=uuid4(),
+        job_type=job_type,
+        status="succeeded",
+        requested_by="test-supplier",
+        parameters={"source_key": source_key},
+        progress={},
+        warnings=[],
+        created_at=now,
+        updated_at=now,
+        started_at=now,
+        completed_at=now,
+        result={},
+    )
+    session.add(job)
+    session.flush([job])
+    return job.job_id
+
+
+def seed_reference_data(
+    session_factory: sessionmaker[Session], *terms: str | SeedTerm
+) -> None:
+    """Make the reference data that validated writes need active, with `terms`.
+
+    Every ontology in the shipped sources gets an active snapshot, unless it
+    already has one, and so does the go-site rule data. Each term is added to the
+    snapshot of the ontology that owns its prefix, unless that snapshot already
+    has it; its alternative identifiers are added either way. Calling this again
+    adds more terms to the same snapshots.
+
+    Args:
+        session_factory: Factory for sessions on the test database.
+        terms: Term identifiers, which are stored as current terms, or
+            `SeedTerm`s for obsolete terms and alternative identifiers.
+    """
+    seeds = [SeedTerm(term) if isinstance(term, str) else term for term in terms]
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        for key in SHIPPED_SOURCES.keys(RefreshKindName.ONTOLOGY):
+            definition = SHIPPED_SOURCES.ontology_definition(key)
+            snapshot = session.scalar(
+                select(OntologyMetadataRecord).where(
+                    OntologyMetadataRecord.ontology_key == key,
+                    OntologyMetadataRecord.active.is_(True),
+                )
+            )
+            if snapshot is None:
+                snapshot = OntologyMetadataRecord(
+                    version_id=uuid4(),
+                    ontology_key=key,
+                    source_type="https",
+                    source_locator=f"https://example.org/{key}.obo",
+                    source_revision=None,
+                    source_checksum="b" * 64,
+                    document_version=None,
+                    loaded_predicates=list(definition.closure_predicates),
+                    identifier_prefixes=list(definition.identifier_prefixes),
+                    refresh_result=None,
+                    job_id=_succeeded_job(session, "ontology_refresh", key),
+                    fetched_at=now,
+                    active=True,
+                )
+                session.add(snapshot)
+                session.flush([snapshot])
+            stored = set(
+                session.scalars(
+                    select(OntologyTermRecord.term_id).where(
+                        OntologyTermRecord.version_id == snapshot.version_id
+                    )
+                )
+            )
+            stored_alt_ids = set(
+                session.scalars(
+                    select(OntologyAltIdRecord.alt_id).where(
+                        OntologyAltIdRecord.version_id == snapshot.version_id
+                    )
+                )
+            )
+            owned = [
+                seed
+                for seed in seeds
+                if seed.term_id.partition(":")[0] in definition.identifier_prefixes
+            ]
+            session.add_all(
+                OntologyTermRecord(
+                    version_id=snapshot.version_id,
+                    term_id=seed.term_id,
+                    obsolete=seed.obsolete,
+                    replaced_by=list(seed.replaced_by),
+                    consider=list(seed.consider),
+                    subsets=[],
+                )
+                for seed in owned
+                if seed.term_id not in stored
+            )
+            session.flush()
+            session.add_all(
+                OntologyAltIdRecord(
+                    version_id=snapshot.version_id,
+                    alt_id=alt_id,
+                    term_id=seed.term_id,
+                )
+                for seed in owned
+                for alt_id in seed.alt_ids
+                if alt_id not in stored_alt_ids
+            )
+        if (
+            session.scalar(
+                select(RulesSnapshotRecord).where(RulesSnapshotRecord.active.is_(True))
+            )
+            is None
+        ):
+            session.add(
+                RulesSnapshotRecord(
+                    job_id=_succeeded_job(session, "rules_refresh", "go-site"),
+                    source_type="github",
+                    source_locator="github:geneontology/go-site",
+                    source_revision="c" * 40,
+                    source_checksum="c" * 64,
+                    fetched_at=now,
+                    active=True,
+                    rule_data=STORED_RULE_DATA.dump(RuleData((), (), (), (), ())),
+                    retracted_publication_count=0,
+                )
+            )
+        session.commit()

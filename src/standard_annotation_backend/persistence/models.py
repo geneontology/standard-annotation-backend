@@ -481,10 +481,9 @@ class EntityMembershipRecord(Base):
 
     Annotations deliberately have no foreign key to this table. Replacing or
     retiring a catalog must be able to remove an identifier while existing
-    annotations and their version history stay unchanged. The rule that a new or
-    updated annotation's `db_object_id` must be active is enforced instead by
-    `EntityRepository.require_active`, which checks the identifier and locks its
-    row while the annotation is saved.
+    annotations and their version history stay unchanged. Semantic validation
+    reads whether an identifier is active when an annotation is written; no lock
+    holds it active until the write commits.
     """
 
     __tablename__ = "entity_membership"

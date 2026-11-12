@@ -1,7 +1,7 @@
 """Refresh ontologies from configured OBO sources and prune old snapshots.
 
-A refresh parses the OBO file, stages a complete inactive snapshot, and activates
-it while applying safe term replacements to annotations. Only one process at a
+A refresh parses the OBO file, stages a complete inactive snapshot, and then
+activates it. Activation changes no annotations. Only one process at a
 time may stage, activate, or prune snapshots of one ontology. Each ontology has
 a PostgreSQL advisory lock that a process takes only if it is free. A refresh
 that finds it held raises `OntologyRefreshBusyError`, and Celery retries the task
@@ -14,18 +14,11 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
-from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
-from standard_annotation_backend.domain.duplicate_policy import (
-    DuplicateKey,
-    duplicate_key,
-)
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
     STORED_ONTOLOGY_REFRESH_RESULT,
-    AnnotationReplacementProposal,
     OntologyDefinition,
     OntologyDocument,
-    OntologyFinding,
     OntologyParseError,
     OntologyRefreshResult,
     OntologySnapshot,
@@ -35,7 +28,6 @@ from standard_annotation_backend.domain.ontology import (
     compute_closure,
     missing_required_subsets,
     ontology_refresh_warnings,
-    propose_term_replacements,
 )
 from standard_annotation_backend.domain.refresh import (
     ProgressReporter,
@@ -306,154 +298,40 @@ class OntologyRefreshService:
     def _activate(
         self, definition: OntologyDefinition, *, job_id: UUID, actor_id: str
     ) -> OntologyRefreshResult:
-        """Activate a snapshot and apply replacements that do not create duplicates.
+        """Make a staged snapshot the active one and record the result.
 
-        Activation, annotation updates, audit events, and the stored result are
-        committed together.
+        Activation changes no annotations and takes no annotation lock, so
+        annotation writes continue while it runs. The activation, its stored
+        result, and its audit event are committed together.
 
         Raises:
             OntologyCandidateConflictError: If a snapshot staged after this job's
                 candidate is already active.
         """
         with self._unit_of_work_factory() as unit_of_work:
-            unit_of_work.annotations.acquire_exclusive_system_update_lock()
-            candidate, previous = unit_of_work.ontologies.lock_activation_state(job_id)
+            candidate, _previous = unit_of_work.ontologies.lock_activation_state(job_id)
             candidate_terms = _terms(
                 unit_of_work.ontologies.list_terms(candidate.version_id)
-            )
-            candidate_closure_count = unit_of_work.ontologies.closure_count(
-                candidate.version_id
             )
             version = _ontology_version(
                 candidate,
                 term_count=len(candidate_terms),
-                closure_count=candidate_closure_count,
+                closure_count=unit_of_work.ontologies.closure_count(
+                    candidate.version_id
+                ),
             )
             warnings = ontology_refresh_warnings(
                 candidate_terms, definition.identifier_prefixes
             )
             if candidate.active:
-                return OntologyRefreshResult(
-                    version,
-                    0,
-                    0,
-                    0,
-                    (),
-                    ontology_warnings=warnings,
-                )
-            previous_terms = (
-                {}
-                if previous is None
-                else _terms(unit_of_work.ontologies.list_terms(previous.version_id))
-            )
-            snapshot = _snapshot(candidate, candidate_terms)
-            records = unit_of_work.annotations.lock_all_active_for_system_update()
-            before = {
-                record.annotation_id: duplicate_key(
-                    Annotation.model_validate(record.annotation_data)
-                )
-                for record in records
-            }
-            proposals = {
-                record.annotation_id: propose_term_replacements(
-                    Annotation.model_validate(record.annotation_data),
-                    snapshot,
-                    previous_terms,
-                    definition,
-                )
-                for record in records
-            }
-            findings = [
-                replace(finding, annotation_id=annotation_id)
-                for annotation_id, proposal in proposals.items()
-                for finding in proposal.findings
-            ]
-            accepted = {
-                annotation_id
-                for annotation_id, proposal in proposals.items()
-                if proposal.changed_paths
-            }
-            proposed_keys = {
-                annotation_id: duplicate_key(proposal.annotation)
-                for annotation_id, proposal in proposals.items()
-                if proposal.changed_paths
-            }
-            before_pairs = _duplicate_pairs(before)
-            rejected: set[UUID] = set()
-            while True:
-                after = {
-                    annotation_id: (
-                        proposed_keys[annotation_id]
-                        if annotation_id in accepted
-                        else key
-                    )
-                    for annotation_id, key in before.items()
-                }
-                introduced = _duplicate_pairs(after) - before_pairs
-                newly_rejected = {
-                    annotation_id
-                    for pair in introduced
-                    for annotation_id in pair
-                    if annotation_id in accepted
-                }
-                if not newly_rejected:
-                    break
-                for annotation_id in sorted(newly_rejected):
-                    peers = tuple(
-                        sorted(
-                            peer
-                            for pair in introduced
-                            if annotation_id in pair
-                            for peer in pair
-                            if peer != annotation_id
-                        )
-                    )
-                    findings.extend(
-                        _duplicate_findings(
-                            annotation_id,
-                            proposals[annotation_id],
-                            peers,
-                            definition.key,
-                        )
-                    )
-                accepted.difference_update(newly_rejected)
-                rejected.update(newly_rejected)
-
-            records_by_id = {record.annotation_id: record for record in records}
-            audit = AuditService(unit_of_work.audit)
-            for annotation_id in sorted(accepted):
-                updated = unit_of_work.annotations.apply_system_update(
-                    records_by_id[annotation_id],
-                    proposals[annotation_id].annotation,
-                    actor_id=actor_id,
-                    change_source=ChangeSource.ONTOLOGY_REFRESH,
-                )
-                audit.record_ontology_annotation_update(
-                    actor_id=actor_id,
-                    job_id=job_id,
-                    annotation_id=annotation_id,
-                    annotation_version=updated.current_version,
-                )
-
+                return OntologyRefreshResult(version, ontology_warnings=warnings)
             activated = unit_of_work.ontologies.activate(candidate.version_id)
             version = replace(version, active=activated.active)
-            skipped_ids = rejected | {
-                finding.annotation_id
-                for finding in findings
-                if finding.annotation_id is not None
-            }
-            result = OntologyRefreshResult(
-                ontology_version=version,
-                annotation_scan_count=len(records),
-                annotation_update_count=len(accepted),
-                annotation_skip_count=len(skipped_ids - accepted),
-                findings=tuple(findings),
-                ontology_warnings=warnings,
-            )
+            result = OntologyRefreshResult(version, ontology_warnings=warnings)
             unit_of_work.ontologies.record_refresh_result(
                 candidate, result.to_job_result()
             )
-            audit.record_ontology_refreshed(
+            AuditService(unit_of_work.audit).record_ontology_refreshed(
                 actor_id=actor_id,
                 job_id=job_id,
                 details={
@@ -462,37 +340,11 @@ class OntologyRefreshService:
                     "source_revision": candidate.source_revision,
                     "term_count": version.term_count,
                     "closure_count": version.closure_count,
-                    "annotation_scan_count": result.annotation_scan_count,
-                    "annotation_update_count": result.annotation_update_count,
-                    "annotation_skip_count": result.annotation_skip_count,
                     "ontology_warning_count": len(result.ontology_warnings),
                 },
             )
             unit_of_work.commit()
         return result
-
-
-def _snapshot(
-    record: OntologyMetadataRecord,
-    terms: dict[str, OntologyTerm],
-) -> OntologySnapshot:
-    """Build the ontology snapshot needed to evaluate annotation replacements."""
-    document = OntologyDocument(
-        ontology_key=record.ontology_key,
-        content=b"",
-        source_type=record.source_type,
-        source_locator=record.source_locator,
-        source_revision=record.source_revision,
-        source_checksum=record.source_checksum,
-        fetched_at=record.fetched_at,
-    )
-    return OntologySnapshot(
-        document=document,
-        document_version=record.document_version,
-        closure_predicates=tuple(record.loaded_predicates),
-        terms=terms,
-        edges=(),
-    )
 
 
 def _terms(records: list[OntologyTermRecord]) -> dict[str, OntologyTerm]:
@@ -532,49 +384,6 @@ def _ontology_version(
     )
 
 
-def _duplicate_pairs(
-    keys: dict[UUID, DuplicateKey],
-) -> set[tuple[UUID, UUID]]:
-    """Return all duplicate annotation ID pairs in the supplied candidate state."""
-    indexed: dict[str, dict[str, list[UUID]]] = {}
-    for annotation_id, key in keys.items():
-        references = indexed.setdefault(key.signature, {})
-        for reference in set(key.references):
-            references.setdefault(reference, []).append(annotation_id)
-
-    pairs: set[tuple[UUID, UUID]] = set()
-    for references in indexed.values():
-        for identifiers in references.values():
-            ordered = sorted(identifiers)
-            pairs.update(
-                (first_id, second_id)
-                for index, first_id in enumerate(ordered)
-                for second_id in ordered[index + 1 :]
-            )
-    return pairs
-
-
-def _duplicate_findings(
-    annotation_id: UUID,
-    proposal: AnnotationReplacementProposal,
-    peer_ids: tuple[UUID, ...],
-    ontology_key: str,
-) -> tuple[OntologyFinding, ...]:
-    """Describe replacements rejected because they would create duplicates."""
-    return tuple(
-        OntologyFinding(
-            code="duplicate_conflict",
-            ontology_key=ontology_key,
-            term_id=replacement.term_id,
-            field_paths=replacement.field_paths,
-            replacement_ids=(replacement.replacement_id,),
-            annotation_id=annotation_id,
-            conflicting_annotation_ids=peer_ids,
-        )
-        for replacement in proposal.replacements
-    )
-
-
 def _ontology_document(key: str, document: SourceDocument) -> OntologyDocument:
     """Convert a fetched document into the ontology parser's input."""
     return OntologyDocument(
@@ -596,24 +405,13 @@ def _unchanged(document: OntologyDocument) -> RefreshOutcome:
 
 def _stored(stored: StoredOntologyRefresh) -> RefreshOutcome:
     """Build the job's outcome from a stored refresh result."""
-    finding_count = len(stored.findings)
     warning_count = len(stored.ontology_warnings)
-    warnings: list[str] = []
+    warnings: tuple[str, ...] = ()
     if warning_count:
         noun = "warning" if warning_count == 1 else "warnings"
-        warnings.append(
-            f"Ontology refresh completed with {warning_count} ontology {noun}"
-        )
-    if finding_count:
-        warnings.append(f"Ontology refresh completed with {finding_count} findings")
+        warnings = (f"Ontology refresh completed with {warning_count} ontology {noun}",)
     return RefreshOutcome(
         result=STORED_ONTOLOGY_REFRESH_RESULT.dump(stored),
-        counts={
-            "annotation_scan_count": stored.annotation_scan_count,
-            "annotation_update_count": stored.annotation_update_count,
-            "annotation_skip_count": stored.annotation_skip_count,
-            "finding_count": finding_count,
-            "ontology_warning_count": warning_count,
-        },
-        warnings=tuple(warnings),
+        counts={"ontology_warning_count": warning_count},
+        warnings=warnings,
     )

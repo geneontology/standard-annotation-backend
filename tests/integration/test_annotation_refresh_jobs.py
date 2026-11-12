@@ -153,22 +153,17 @@ def test_unchanged_file_is_skipped_and_cutover_never_skips(
     ("content", "job_type", "failure_code"),
     [
         (
-            gpad_bytes(gpad_row("UniProtKB:UNKNOWN")),
+            gpad_bytes("too\tfew"),
             JobType.ANNOTATION_REFRESH,
             "no_valid_annotations",
         ),
         (
-            gpad_bytes(gpad_row("UniProtKB:UNKNOWN")),
+            gpad_bytes("too\tfew"),
             JobType.ANNOTATION_CUTOVER,
             "no_valid_annotations",
         ),
         (
             gpad_bytes(gpad_row("UniProtKB:P12345"), "bad"),
-            JobType.ANNOTATION_CUTOVER,
-            "cutover_rejected",
-        ),
-        (
-            gpad_bytes(gpad_row("UniProtKB:P12345"), gpad_row("UniProtKB:UNKNOWN")),
             JobType.ANNOTATION_CUTOVER,
             "cutover_rejected",
         ),
@@ -179,7 +174,6 @@ def test_unchanged_file_is_skipped_and_cutover_never_skips(
         "refresh-no-valid",
         "cutover-no-valid",
         "cutover-unreadable-row",
-        "cutover-unknown-subject",
         "header",
         "invalid-gzip",
     ],

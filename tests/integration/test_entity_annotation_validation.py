@@ -1,31 +1,22 @@
-"""Verify that annotation writes require an active entity catalog subject.
-
-Also verify that catalog replacement waits for in-progress annotation writes.
-"""
-
-from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+"""Verify that annotation writes require an active entity catalog subject."""
 
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 from refresh_helpers import TEST_SOURCES
-from sqlalchemy import Engine, func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER, REVIEWER
-from test_entity_refresh_concurrency import TIMEOUT, wait_for_lock
-from test_entity_refresh_service import active_ids, publish_catalog, stage_catalog
+from test_entity_refresh_service import publish_catalog, stage_catalog
 
-from standard_annotation_backend.domain.annotations import Annotation
-from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    InvalidAnnotationPayloadError,
+)
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
     AuditEventRecord,
-    EntityMembershipRecord,
-)
-from standard_annotation_backend.persistence.repositories.entities import (
-    EntityRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_service import AnnotationService
@@ -35,19 +26,13 @@ from standard_annotation_backend.services.entity_refresh_service import (
 )
 
 UNKNOWN_ID = "UniProtKB:P99999"
-UNKNOWN_ERROR = {
-    "error": {
-        "code": "unknown_db_object_id",
-        "message": "Annotation db_object_id is not in the active entity catalog",
-        "details": [
-            {
-                "location": ["annotation", "db_object_id"],
-                "message": "Annotation db_object_id is not in the active entity catalog",
-                "type": "unknown_db_object_id",
-            }
-        ],
-    }
+UNKNOWN_ISSUE = {
+    "location": ["annotation", "db_object_id"],
+    "message": "db_object_id is not an active entity in any entity catalog",
+    "type": "unknown_entity",
 }
+
+pytestmark = pytest.mark.usefixtures("reference_data")
 
 
 def _counts(session_factory: sessionmaker[Session]) -> tuple[int, ...]:
@@ -80,8 +65,8 @@ def test_unknown_subject_returns_exact_error_without_writes(
     """Writes and acceptances whose resulting subject is not active are rejected.
 
     The subject is either removed from the catalog or changed by the write to an
-    identifier that was never in it. Each operation returns the unknown-subject
-    error and leaves annotations, versions, audit events, and the change set's
+    identifier that was never in it. Each operation returns only the
+    `unknown_entity` issue and leaves annotations, versions, audit events, and the change set's
     review state unchanged. Publishing the subject lets the same change set be
     accepted.
     """
@@ -146,7 +131,12 @@ def test_unknown_subject_returns_exact_error_without_writes(
     else:
         response = client.post(f"{proposal_path}/accept")
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
-    assert response.json() == UNKNOWN_ERROR
+    error = response.json()["error"]
+    expected_code = (
+        "invalid_change_set" if operation.startswith("accept") else "invalid_annotation"
+    )
+    assert error["code"] == expected_code
+    assert error["details"] == [UNKNOWN_ISSUE]
     assert _counts(session_factory) == before
     if proposal_path is not None:
         proposal = client.get(proposal_path).json()
@@ -172,13 +162,13 @@ def test_deletion_succeeds_after_subject_removal(
     """
     imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
     publish_catalog(imports, unit_of_work_factory, validated_annotation.db_object_id)
-    annotations = AnnotationService(unit_of_work_factory)
+    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     created = annotations.create(
         payload=validated_annotation.model_dump(mode="json"),
         owning_group_id="other-group",
         context=PROPOSER,
     )
-    changes = ChangeSetService(unit_of_work_factory)
+    changes = ChangeSetService(unit_of_work_factory, TEST_SOURCES)
     proposal = (
         changes.propose_delete(
             created.annotation_id, base_version=1, reason="Remove", context=PROPOSER
@@ -214,16 +204,17 @@ def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
     job = stage_catalog(
         imports, unit_of_work_factory, validated_annotation.db_object_id
     )
-    annotations = AnnotationService(unit_of_work_factory)
+    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     payload = validated_annotation.model_dump(mode="json")
     before = _counts(session_factory)
-    with pytest.raises(UnknownDbObjectIdError):
+    with pytest.raises(InvalidAnnotationPayloadError) as staged:
         annotations.create(
             payload=payload, owning_group_id="other-group", context=PROPOSER
         )
+    assert [issue["type"] for issue in staged.value.errors] == ["unknown_entity"]
     assert _counts(session_factory) == before
     assert imports.recover(job) is not None
-    with pytest.raises(UnknownDbObjectIdError):
+    with pytest.raises(InvalidAnnotationPayloadError) as cased:
         annotations.create(
             payload={
                 **payload,
@@ -232,81 +223,10 @@ def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
             owning_group_id="other-group",
             context=PROPOSER,
         )
+    assert [issue["type"] for issue in cased.value.errors] == ["unknown_entity"]
     assert (
         annotations.create(
             payload=payload, owning_group_id="other-group", context=PROPOSER
         ).version
         == 1
     )
-
-
-def test_annotation_write_and_catalog_removal_are_serialized(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-    validated_annotation: Annotation,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A catalog replacement waits for an in-progress annotation create to commit.
-
-    The replacement removes the subject only after the create commits, and later
-    updates to that annotation are rejected.
-    """
-    imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    publish_catalog(
-        imports, unit_of_work_factory, validated_annotation.db_object_id, "MGI:old"
-    )
-    replacement = stage_catalog(imports, unit_of_work_factory, "MGI:new1", "MGI:new2")
-    validated = Event()
-    release_write = Event()
-    publishing = Event()
-    pids: list[int] = []
-    require_active = EntityRepository.require_active
-
-    def hold_validation(
-        repository: EntityRepository, db_object_id: str
-    ) -> EntityMembershipRecord:
-        membership = require_active(repository, db_object_id)
-        validated.set()
-        assert release_write.wait(TIMEOUT)
-        return membership
-
-    def publish() -> None:
-        with session_factory() as session:
-            pids.append(session.scalar(text("SELECT pg_backend_pid()")))
-            publishing.set()
-            EntityRepository(session).publish(replacement.job_id)
-            session.commit()
-
-    monkeypatch.setattr(EntityRepository, "require_active", hold_validation)
-    annotations = AnnotationService(unit_of_work_factory)
-    payload = validated_annotation.model_dump(mode="json")
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        write = pool.submit(
-            annotations.create,
-            payload=payload,
-            owning_group_id="other-group",
-            context=PROPOSER,
-        )
-        try:
-            assert validated.wait(TIMEOUT)
-            publication = pool.submit(publish)
-            assert publishing.wait(TIMEOUT)
-            wait_for_lock(database_engine, pids[0])
-            assert active_ids(session_factory) == sorted(
-                [validated_annotation.db_object_id, "MGI:old"]
-            )
-            assert _counts(session_factory)[0] == 0
-        finally:
-            release_write.set()
-        created = write.result(TIMEOUT)
-        publication.result(TIMEOUT)
-    assert active_ids(session_factory) == ["MGI:new1", "MGI:new2"]
-    assert annotations.get(created.annotation_id, context=PROPOSER).version == 1
-    with pytest.raises(UnknownDbObjectIdError):
-        annotations.patch(
-            created.annotation_id,
-            changes={"assigned_by": "OTHER"},
-            expected_version=1,
-            context=PROPOSER,
-        )

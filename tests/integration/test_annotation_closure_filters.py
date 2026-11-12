@@ -218,8 +218,10 @@ def test_closure_filter_rejects_predicate_not_loaded_by_active_snapshot(
 def test_closure_filter_combines_descendants_with_other_filters(
     integration_api_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
+    reference_data: Callable[..., None],
 ) -> None:
     """The public filter combines descendants, pagination, and ordinary filters."""
+    reference_data("GO:1", "GO:2", "GO:3", "GO:4")
     direct_id = _create(
         integration_api_client,
         "UniProtKB:C1",

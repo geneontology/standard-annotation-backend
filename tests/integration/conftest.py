@@ -38,6 +38,7 @@ from standard_annotation_backend.persistence.database import (
 from standard_annotation_backend.persistence.models import (
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
+    EntitySourceRecord,
     JobRecord,
     SabeGroupRecord,
 )
@@ -55,6 +56,8 @@ def seed_active_subjects(
     """Return a helper that makes the given identifiers active in the entity catalog.
 
     The helper writes catalog rows directly, so it records no refresh audit events.
+    Each subject also gets a source record with taxon `NCBITaxon:9606` and type
+    `PR:000000001`, as a published catalog has.
     """
 
     def seed(*identifiers: str) -> None:
@@ -108,14 +111,56 @@ def seed_active_subjects(
                     for identifier in identifiers
                 ]
             )
+            session.flush()
+            session.add_all(
+                [
+                    EntitySourceRecord(
+                        db_object_id=identifier,
+                        line_number=line_number,
+                        entity={
+                            "db_object_id": identifier,
+                            "db_object_type": "PR:000000001",
+                            "db_object_taxon_id": "NCBITaxon:9606",
+                            "canonical_object_id": identifier,
+                        },
+                        db_object_taxon_id="NCBITaxon:9606",
+                        db_object_type="PR:000000001",
+                    )
+                    for line_number, identifier in enumerate(identifiers, start=1)
+                ]
+            )
             session.commit()
 
     return seed
 
 
 @pytest.fixture
-def active_annotation_subjects(seed_active_subjects: Callable[..., None]) -> None:
-    """Seed the subjects used by existing successful annotation workflow tests."""
+def reference_data(
+    session_factory: sessionmaker[Session],
+) -> Callable[..., None]:
+    """Load the reference data validated writes need, with the default terms.
+
+    Returns:
+        A helper that adds more terms, as identifiers or `SeedTerm`s, to the same
+        snapshots.
+    """
+    # Imported here because unit tests import this module without the
+    # integration directory on the import path.
+    from seeding import DEFAULT_TERMS, SeedTerm, seed_reference_data
+
+    seed_reference_data(session_factory, *DEFAULT_TERMS)
+
+    def add(*terms: str | SeedTerm) -> None:
+        seed_reference_data(session_factory, *terms)
+
+    return add
+
+
+@pytest.fixture
+def active_annotation_subjects(
+    seed_active_subjects: Callable[..., None], reference_data: Callable[..., None]
+) -> None:
+    """Seed the subjects and reference data used by successful write tests."""
     seed_active_subjects("UniProtKB:P12345", "UniProtKB:Q99999")
 
 

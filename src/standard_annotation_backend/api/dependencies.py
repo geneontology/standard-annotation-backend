@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import Depends, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
     RequestContext,
@@ -189,7 +190,7 @@ def get_annotation_service(
     Returns:
         A service configured to run annotation operations.
     """
-    return AnnotationService(unit_of_work_factory)
+    return AnnotationService(unit_of_work_factory, get_settings().sources)
 
 
 def get_change_set_service(
@@ -206,7 +207,7 @@ def get_change_set_service(
     Returns:
         Service configured to run change-set operations.
     """
-    return ChangeSetService(unit_of_work_factory)
+    return ChangeSetService(unit_of_work_factory, get_settings().sources)
 
 
 def get_comment_service(

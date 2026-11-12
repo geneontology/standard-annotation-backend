@@ -14,7 +14,6 @@ from uuid import UUID
 from go_standard_annotation_schema.datamodel import Entity
 from pydantic import Field
 
-from standard_annotation_backend.domain.errors import InvalidInputError
 from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     SourceProvenance,
@@ -59,25 +58,6 @@ class EntityCatalog:
     warnings: tuple[str, ...]
 
 
-class UnknownDbObjectIdError(InvalidInputError):
-    """Report a `db_object_id` that is not in the active entity catalog.
-
-    Attributes:
-        db_object_id: The identifier that is not in the catalog.
-    """
-
-    code = "unknown_db_object_id"
-    message = "Annotation db_object_id is not in the active entity catalog"
-
-    def __init__(self, db_object_id: str) -> None:
-        self.db_object_id = db_object_id
-        super().__init__()
-
-    def issue_location(self) -> tuple[str | int, ...]:
-        """Return the annotation's `db_object_id` field."""
-        return ("annotation", "db_object_id")
-
-
 class EntityCandidateConflictError(TerminalRefreshError):
     """Report staged catalog data that cannot be used for a job.
 
@@ -109,16 +89,8 @@ class EntityCatalogCollisionError(TerminalRefreshError):
 
 
 @dataclass(frozen=True, slots=True)
-class EntityRemovalImpact:
-    """Identify the existing annotations that reference a removed identifier."""
-
-    db_object_id: str
-    annotation_ids: tuple[UUID, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class EntityRefreshResult:
-    """Describe one committed catalog replacement and its removal impacts."""
+    """Describe one committed catalog replacement."""
 
     snapshot_id: UUID
     source_key: str
@@ -132,7 +104,6 @@ class EntityRefreshResult:
     retained_count: Annotated[int, Field(ge=0)]
     removed_count: Annotated[int, Field(ge=0)]
     warnings: tuple[str, ...]
-    removal_impacts: tuple[EntityRemovalImpact, ...]
 
     def to_job_result(self) -> dict[str, object]:
         """Return the result as a JSON-compatible dict for the job record.
@@ -166,28 +137,23 @@ class EntityCatalogRetirementResult:
         source_key: The retired source.
         retired: Whether an active catalog was retired.
         snapshot_id: The retired snapshot. `None` when nothing was retired.
-        removal_impacts: Every removed identifier with the active annotations
-            that still reference it. Empty when nothing was retired.
+        removed_count: How many identifiers the retirement removed.
     """
 
     source_key: str
     retired: bool
     snapshot_id: UUID | None = None
-    removal_impacts: tuple[EntityRemovalImpact, ...] = ()
+    removed_count: Annotated[int, Field(ge=0)] = 0
 
     def to_job_result(self) -> dict[str, object]:
         """Return the result as a JSON-compatible dict for the job record.
 
         A source with nothing to retire is recorded with only `source_key` and
-        `retired`. A retirement adds `removed_count` for clients; it is ignored
-        when the result is read.
+        `retired`.
         """
         if not self.retired:
             return {"source_key": self.source_key, "retired": False}
-        return {
-            **STORED_ENTITY_RETIREMENT_RESULT.dump(self),
-            "removed_count": len(self.removal_impacts),
-        }
+        return STORED_ENTITY_RETIREMENT_RESULT.dump(self)
 
 
 STORED_ENTITY_REFRESH_RESULT = StoredJson(

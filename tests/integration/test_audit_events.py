@@ -119,7 +119,7 @@ def test_rejected_direct_mutations_do_not_record_successful_audit_events(
     )
 
     assert invalid.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
-    assert duplicate.status_code == status.HTTP_409_CONFLICT
+    assert duplicate.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert stale.status_code == status.HTTP_412_PRECONDITION_FAILED
     events = _stored_audit_events(session_factory)
     assert [

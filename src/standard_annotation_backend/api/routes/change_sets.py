@@ -30,7 +30,6 @@ from standard_annotation_backend.api.models import (
 )
 from standard_annotation_backend.domain.annotations import (
     AnnotationNotFoundError,
-    DuplicateAnnotationError,
 )
 from standard_annotation_backend.domain.auth import RequestContext
 from standard_annotation_backend.domain.change_sets import (
@@ -39,7 +38,9 @@ from standard_annotation_backend.domain.change_sets import (
     InvalidChangeSetError,
     StaleChangeSetError,
 )
-from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
+from standard_annotation_backend.domain.semantic_validation.facts import (
+    ReferenceDataUnavailableError,
+)
 from standard_annotation_backend.services.change_set_service import ChangeSetService
 
 router = APIRouter(
@@ -124,8 +125,14 @@ def get_change_set(
 @router.post(
     "/{change_set_id}/preview",
     response_model=ChangeSetPreviewResource,
+    # Route-level entries replace the router's entries for the same status, so
+    # the bearer errors are listed again here.
     responses=error_responses(
-        ChangeSetNotFoundError, ChangeSetStateError, RequestValidationFailedError
+        *BEARER_ERRORS,
+        ChangeSetNotFoundError,
+        ChangeSetStateError,
+        RequestValidationFailedError,
+        ReferenceDataUnavailableError,
     ),
 )
 def preview_change_set(
@@ -142,14 +149,16 @@ def preview_change_set(
 @router.post(
     "/{change_set_id}/accept",
     response_model=AcceptedChangeSetResource,
+    # Route-level entries replace the router's entries for the same status, so
+    # the bearer errors are listed again here.
     responses=error_responses(
+        *BEARER_ERRORS,
         ChangeSetNotFoundError,
         ChangeSetStateError,
         StaleChangeSetError,
-        DuplicateAnnotationError,
         InvalidChangeSetError,
-        UnknownDbObjectIdError,
         RequestValidationFailedError,
+        ReferenceDataUnavailableError,
     ),
 )
 def accept_change_set(

@@ -169,7 +169,7 @@ class EntityRefreshService:
         )
         return RefreshOutcome(
             result=result.to_job_result(),
-            counts={"removed_count": len(result.removal_impacts)},
+            counts={"removed_count": result.removed_count},
         )
 
     def _stage(
@@ -210,7 +210,7 @@ class EntityRefreshService:
                     details={
                         "source_key": source_key,
                         "snapshot_id": str(result.snapshot_id),
-                        "removed_count": len(result.removal_impacts),
+                        "removed_count": result.removed_count,
                     },
                 )
             uow.commit()
@@ -317,7 +317,6 @@ def _published(result: EntityRefreshResult) -> RefreshOutcome:
             "retained_count": result.retained_count,
             "removed_count": result.removed_count,
             "warning_count": len(result.warnings),
-            "removal_impact_count": len(result.removal_impacts),
         },
         warnings=result.warnings,
     )
