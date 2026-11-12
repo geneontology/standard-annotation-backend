@@ -34,6 +34,7 @@ it owns.
 | Change-set preview | The same checks; `can_accept` is false if any issue exists |
 | Delete | Never checked |
 | GPAD import | Never checked |
+| Automatic replacement of obsolete terms | Same as an update; the annotation is skipped if the result would have issues |
 
 Every annotation version SABE writes, other than by import, passed semantic validation
 when it was written. The checks use the reference data active when they run, so a later
@@ -149,6 +150,22 @@ reference listed twice is allowed.
 
 Rule 13 is deferred, rules 04, 49, and 54 are for QC reporting only, and rules that do
 not apply to Standard Annotations, such as 09, 19, and 64, are not checked.
+
+## Automatic term replacement
+
+After every ontology activation, and after every GPAD publication for that group,
+SABE runs a `term_replacement` job. It replaces each identifier that is obsolete with
+exactly one `replaced_by`, or that is an alternative ID, with the current term at the
+end of its chain. It follows chains within the identifier's ontology, in every field
+the term checks cover. A chain that ends at a term that is not current, loops, or
+leaves the ontology is not followed. GO_REF alternative IDs are not replaced.
+
+Each replacement is written like a client update and must pass semantic validation.
+An annotation whose replaced result would have any issue, including becoming a
+duplicate, is left unchanged and keeps its issues. Replacement versions record the
+change source `term_replacement` and the requester of the job that triggered the
+replacement. They do not count as local changes when SABE decides whether a GPAD file
+must be imported again.
 
 ## Errors
 

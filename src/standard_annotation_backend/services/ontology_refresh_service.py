@@ -55,6 +55,9 @@ from standard_annotation_backend.persistence.unit_of_work import (
 from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
+from standard_annotation_backend.services.term_replacement_service import (
+    queue_term_replacement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,9 @@ class OntologyRefreshService:
         try_lock: Takes the per-ontology lock.
         enqueue_prune: Schedules pruning after a job finishes. `None` prunes in
             this process instead.
+        dispatch_replacement: Sends a queued term replacement job to a worker
+            after an activation commits. `None` leaves the job queued for the caller to
+            run.
     """
 
     def __init__(
@@ -84,11 +90,14 @@ class OntologyRefreshService:
         sources: RefreshSources,
         try_lock: AdvisoryTryLock,
         enqueue_prune: Callable[[str], None] | None,
+        *,
+        dispatch_replacement: Callable[[Job], None] | None = None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._sources = sources
         self._try_lock = try_lock
         self._enqueue_prune = enqueue_prune
+        self._dispatch_replacement = dispatch_replacement
 
     @property
     def name(self) -> RefreshKindName:
@@ -302,7 +311,8 @@ class OntologyRefreshService:
 
         Activation changes no annotations and takes no annotation lock, so
         annotation writes continue while it runs. The activation, its stored
-        result, and its audit event are committed together.
+        result, its audit event, and a queued term replacement job for all groups
+        are committed together; the job is then dispatched.
 
         Raises:
             OntologyCandidateConflictError: If a snapshot staged after this job's
@@ -326,6 +336,9 @@ class OntologyRefreshService:
             if candidate.active:
                 return OntologyRefreshResult(version, ontology_warnings=warnings)
             activated = unit_of_work.ontologies.activate(candidate.version_id)
+            replacement = queue_term_replacement(
+                unit_of_work, group_key=None, requested_by=actor_id
+            )
             version = replace(version, active=activated.active)
             result = OntologyRefreshResult(version, ontology_warnings=warnings)
             unit_of_work.ontologies.record_refresh_result(
@@ -344,7 +357,24 @@ class OntologyRefreshService:
                 },
             )
             unit_of_work.commit()
+        self._dispatch(replacement)
         return result
+
+    def _dispatch(self, job: Job) -> None:
+        """Send a replacement job to a worker, leaving it queued if sending fails.
+
+        The next trigger joins the queued job and sends it again.
+        """
+        if self._dispatch_replacement is None:
+            return
+        try:
+            self._dispatch_replacement(job)
+        except Exception as error:
+            logger.error(
+                "Term replacement dispatch failed: job_id=%s failure_type=%s",
+                job.job_id,
+                type(error).__name__,
+            )
 
 
 def _terms(records: list[OntologyTermRecord]) -> dict[str, OntologyTerm]:

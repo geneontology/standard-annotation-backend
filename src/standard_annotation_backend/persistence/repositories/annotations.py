@@ -322,6 +322,37 @@ class AnnotationRepository:
             offset=offset,
         )
 
+    def list_active_after(
+        self,
+        after: UUID | None,
+        *,
+        owning_group_id: str | None,
+        limit: int,
+    ) -> tuple[AnnotationRecord, ...]:
+        """Return the next active annotations in `annotation_id` order, without locks.
+
+        Args:
+            after: Return only annotations whose ID is greater; `None` starts at
+                the beginning.
+            owning_group_id: Return only this group's annotations; `None` returns
+                every group's.
+            limit: The most annotations to return.
+        """
+        statement = select(AnnotationRecord).where(
+            AnnotationRecord.status == AnnotationStatus.ACTIVE
+        )
+        if after is not None:
+            statement = statement.where(AnnotationRecord.annotation_id > after)
+        if owning_group_id is not None:
+            statement = statement.where(
+                AnnotationRecord.owning_group_id == owning_group_id
+            )
+        return tuple(
+            self.session.scalars(
+                statement.order_by(AnnotationRecord.annotation_id).limit(limit)
+            )
+        )
+
     def find_duplicate_peer_ids(
         self,
         duplicate_base_signature: str,

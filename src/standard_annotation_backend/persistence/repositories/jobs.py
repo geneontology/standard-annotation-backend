@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import cast, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.jobs import (
@@ -108,6 +109,32 @@ class JobRepository:
             )
             .order_by(JobRecord.created_at, JobRecord.job_id)
             .limit(1)
+        )
+
+    def lock_term_replacement_starts(self) -> None:
+        """Serialize creation of term replacement jobs until the transaction ends."""
+        acquire_transaction_lock(self.session, LockNamespace.TERM_REPLACEMENT_START)
+
+    def find_queued(
+        self, *, job_type: JobType, parameters: dict[str, object]
+    ) -> JobRecord | None:
+        """Lock and return the oldest queued job of a type with exactly these parameters.
+
+        The row stays locked until the transaction ends, so the job cannot start
+        until a trigger that joined it commits. A job that starts first is no
+        longer queued once its start commits, and is not returned.
+        """
+        return self.session.scalar(
+            select(JobRecord)
+            .where(
+                JobRecord.job_type == job_type,
+                JobRecord.status == JobStatus.QUEUED,
+                JobRecord.parameters == cast(parameters, JSONB),
+            )
+            .order_by(JobRecord.created_at, JobRecord.job_id)
+            .limit(1)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
 
     def get(self, job_id: UUID) -> JobRecord | None:

@@ -899,17 +899,18 @@ definitions and cross-references, so a malformed clause there cannot stop a publ
 file from loading. A refresh stages a complete snapshot of terms, their subsets,
 alternative identifiers, and closure rows, then activates it. Activation only switches
 which snapshot is active: it changes no annotations and does not block annotation
-writes. Annotations that use a term the new snapshot obsoletes keep it until they are
-updated, and semantic validation reports the term as obsolete on their next write. A
-closure row records the subject term, predicate, object term, and depth, where the
-subject is the more specific term and the object is the broader queried term. Complete
-term and closure data is kept only for the active snapshot, its newest successful
-predecessor, and candidates of unfinished jobs. Older snapshots keep their metadata,
-results, and audit events. A snapshot whose bulk data was pruned cannot become active or
-be used by operations that need terms or closure. Pruning and activation take the same
-per-ontology advisory lock, so cleanup cannot race with a refresh of that ontology.
-Pruning runs after each ontology job finishes (`sabe.ontology.prune`); a failure to
-schedule or run it leaves the job's status and result unchanged, and pruning is retried.
+writes. Each activation then queues a term replacement job for all groups, which
+replaces obsolete terms and alternative IDs wherever the result passes semantic
+validation. A closure row records the subject term, predicate, object term, and depth,
+where the subject is the more specific term and the object is the broader queried term.
+Complete term and closure data is kept only for the active snapshot, its newest
+successful predecessor, and candidates of unfinished jobs. Older snapshots keep their
+metadata, results, and audit events. A snapshot whose bulk data was pruned cannot become
+active or be used by operations that need terms or closure. Pruning and activation take
+the same per-ontology advisory lock, so cleanup cannot race with a refresh of that
+ontology. Pruning runs after each ontology job finishes (`sabe.ontology.prune`); a
+failure to schedule or run it leaves the job's status and result unchanged, and pruning
+is retried.
 
 **Entities.** An entity is an annotatable subject identified by `db_object_id`. Each
 configured GPI source supplies a complete catalog. An identifier can be active in only
@@ -928,7 +929,8 @@ replaces the group's complete annotation set. A cutover is the same replacement 
 by a permanent move to `sabe_managed`. The move is one-way and happens only when a
 cutover publishes. After it, SABE rejects refreshes and cutovers for that group with
 `group_sabe_managed`, and the schedule skips it. Cutovers start only from the
-global-admin API, never from the schedule or CLI.
+global-admin API, never from the schedule or CLI. Each publication queues a term
+replacement job for the group.
 
 Staging happens outside the global annotation-write lock. A row the reader cannot parse,
 or that fails structural validation, is rejected and reported with its line number, and
@@ -952,15 +954,15 @@ never skips as unchanged.
 An ordinary refresh skips as unchanged only when the file checksum matches the group's
 last published import, that import was validated with the running version of the
 `go-standard-annotation-schema` package, and nothing local has changed since: no
-annotation that is not an import from that job, no version above 1 (except automatic
-ontology term replacements, which are not local edits), no comment, and no change set
-for the group. The version condition imports an unchanged file again after a schema
-upgrade, because its rows may validate differently. Known limitations: when the file
-does change, the re-import restores any obsolete terms it contains until they are
-updated. After a schema upgrade, stored annotations that the new schema rejects cannot
-be loaded, which blocks reading them, until their group is imported again. SABE-managed
-groups are never re-imported, so such annotations in those groups must be corrected
-directly.
+annotation that is not an import from that job, no version above 1 (except versions
+written by the term replacement job, which are not local edits), no comment, and no
+change set for the group. The version condition imports an unchanged file again after a
+schema upgrade, because its rows may validate differently. When the file does change,
+the re-import restores any obsolete terms it contains, until the term replacement job
+that the publication queues replaces them. Known limitation: after a schema upgrade,
+stored annotations that the new schema rejects cannot be loaded, which blocks reading
+them, until their group is imported again. SABE-managed groups are never re-imported, so
+such annotations in those groups must be corrected directly.
 
 If a job is redelivered after publication committed, it returns the stored result
 without fetching. Interrupted staging is discarded and staged again. Removing a source

@@ -184,6 +184,7 @@ def build_runner(
     *,
     sources: RefreshSources = TEST_SOURCES,
     enqueue_prune: Callable[[str], None] | None = None,
+    dispatch_replacement: Callable[[Job], None] | None = None,
 ) -> RefreshRunner:
     """Build the production runner and kinds around fake fetchers."""
     return create_refresh_runner(
@@ -192,6 +193,7 @@ def build_runner(
         sources=sources,
         fetchers=fetchers,
         enqueue_prune=enqueue_prune,
+        dispatch_replacement=dispatch_replacement,
     ).runner
 
 

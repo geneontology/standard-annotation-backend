@@ -16,6 +16,7 @@ class JobType(StrEnum):
     ENTITY_RETIREMENT = "entity_retirement"
     ONTOLOGY_REFRESH = "ontology_refresh"
     RULES_REFRESH = "rules_refresh"
+    TERM_REPLACEMENT = "term_replacement"
 
 
 class JobStatus(StrEnum):

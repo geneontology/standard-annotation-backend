@@ -305,7 +305,7 @@ class JobRecord(Base):
         CheckConstraint(
             "job_type IN ('annotation_cutover', 'annotation_refresh', "
             "'authorization_refresh', 'entity_refresh', 'entity_retirement', "
-            "'ontology_refresh', 'rules_refresh')",
+            "'ontology_refresh', 'rules_refresh', 'term_replacement')",
             name="type_allowed",
         ),
         CheckConstraint(

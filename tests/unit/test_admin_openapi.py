@@ -97,6 +97,7 @@ def test_job_resource_documents_exact_fields_and_vocabulary(schema: dict) -> Non
         "entity_retirement",
         "ontology_refresh",
         "rules_refresh",
+        "term_replacement",
     ]
     assert schema["components"]["schemas"]["JobStatus"]["enum"] == [
         "queued",

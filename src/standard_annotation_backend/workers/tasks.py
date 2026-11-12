@@ -72,7 +72,9 @@ def prune_ontology_snapshots(task: Task, ontology_key: str) -> None:
     try:
         # `_enqueue_prune` is passed only so the runtime is built the same way
         # as for refresh tasks; pruning itself never enqueues another prune.
-        with worker_runtime(enqueue_prune=_enqueue_prune) as runtime:
+        with worker_runtime(
+            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
+        ) as runtime:
             # `prune` returns `False` only when another process holds the lock.
             # Raise so the retry below runs once that process has finished.
             if not runtime.ontology.prune(ontology_key):
@@ -122,7 +124,9 @@ def run_refresh(task: Task, job_id: str) -> None:
         durable_job_id = UUID(job_id)
         # The runtime is built per task so its database engine and HTTP client
         # are closed when the task ends.
-        with worker_runtime(enqueue_prune=_enqueue_prune) as runtime:
+        with worker_runtime(
+            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
+        ) as runtime:
             runtime.runner.run(durable_job_id)
     except Exception as error:
         failure_type = type(error).__name__
@@ -141,7 +145,9 @@ def run_entity_retirement(task: Task, job_id: str) -> None:
     failure_type: str | None = None
     try:
         durable_job_id = UUID(job_id)
-        with worker_runtime(enqueue_prune=_enqueue_prune) as runtime:
+        with worker_runtime(
+            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
+        ) as runtime:
             runtime.runner.run_retirement(durable_job_id)
     except Exception as error:
         failure_type = type(error).__name__
@@ -181,7 +187,9 @@ def schedule_refresh(task: Task, kind: str) -> None:
         return
     failure_type: str | None = None
     try:
-        with worker_runtime(enqueue_prune=_enqueue_prune) as runtime:
+        with worker_runtime(
+            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
+        ) as runtime:
             RefreshStartService(
                 runtime.unit_of_work_factory,
                 runtime.settings.sources,
@@ -191,6 +199,31 @@ def schedule_refresh(task: Task, kind: str) -> None:
         failure_type = type(error).__name__
     if failure_type is not None:
         _retry_safely(task, "scheduler", failure_type)
+
+
+@celery_app.task(bind=True, max_retries=None, name="sabe.term_replacement.run")
+def run_term_replacement(task: Task, job_id: str) -> None:
+    """Run one term replacement job.
+
+    A job whose scope is busy, and any unexpected error, is retried after 30
+    seconds like `run_refresh`; the job's committed replacements are kept.
+    """
+    failure_type: str | None = None
+    try:
+        durable_job_id = UUID(job_id)
+        with worker_runtime(
+            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
+        ) as runtime:
+            runtime.term_replacement.run(durable_job_id)
+    except Exception as error:
+        failure_type = type(error).__name__
+    if failure_type is not None:
+        _retry_safely(task, job_id, failure_type)
+
+
+def _dispatch_replacement(job: Job) -> None:
+    """Send a queued term replacement job to its Celery task."""
+    run_term_replacement.delay(str(job.job_id))
 
 
 def _enqueue_prune(ontology_key: str) -> None:

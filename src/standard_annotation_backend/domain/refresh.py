@@ -45,7 +45,9 @@ class RefreshKindName(StrEnum):
 class RefreshFailureCode(StrEnum):
     """List the codes recorded when a refresh job fails in a way retrying cannot fix.
 
-    The codes are fixed strings, so job records and logs never contain source
+    Term replacement jobs use the same codes: `invalid_parameters`, and
+    `reference_data_unavailable` when a configured ontology or the go-site rule
+    data has no active snapshot. The codes are fixed strings, so job records and logs never contain source
     URLs or content. Operators use them to tell retrieval, decoding, parsing,
     and publication failures apart.
     """
@@ -66,6 +68,7 @@ class RefreshFailureCode(StrEnum):
     NO_VALID_ANNOTATIONS = "no_valid_annotations"
     CUTOVER_REJECTED = "cutover_rejected"
     GROUP_SABE_MANAGED = "group_sabe_managed"
+    REFERENCE_DATA_UNAVAILABLE = "reference_data_unavailable"
 
 
 @dataclass(frozen=True, slots=True)

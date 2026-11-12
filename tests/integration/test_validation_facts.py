@@ -240,3 +240,28 @@ def test_go_facts_include_subsets_checked_ancestors_rule_data_and_retracted_pmid
     )
     assert facts.rule_data == rule_data
     assert facts.retracted_pmids == frozenset({"PMID:9"})
+
+
+def test_replacement_facts_follow_chains_to_terms_the_annotation_does_not_use(
+    unit_of_work_factory: UnitOfWorkFactory,
+    reference_data: Callable[..., None],
+) -> None:
+    """Facts include every term a chain reaches, and the snapshot IDs read."""
+    reference_data(
+        SeedTerm("GO:0000011", obsolete=True, replaced_by=("GO:0000012",)),
+        SeedTerm("GO:0000012", obsolete=True, replaced_by=("GO:0000013",)),
+        SeedTerm("GO:0000013", parents=("GO:0008150",)),
+    )
+    annotation = _annotation(ontology_class_id="GO:0000011")
+
+    with unit_of_work_factory() as uow:
+        facts = uow.validation_facts.replacement_facts([annotation], ONTOLOGIES)
+        go_version = uow.ontologies.get_active("go")
+        assert go_version is not None
+        go_version_id = go_version.version_id
+
+    assert facts.terms["GO:0000011"].replaced_by == ("GO:0000012",)
+    assert facts.terms["GO:0000012"].status is TermStatus.OBSOLETE
+    assert facts.terms["GO:0000013"].status is TermStatus.CURRENT
+    assert facts.snapshot_ids["go"] == go_version_id
+    assert set(facts.snapshot_ids) == set(ONTOLOGIES) | {"rules"}

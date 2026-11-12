@@ -415,7 +415,7 @@ def test_changed_file_is_imported(
     ] == [["PMID:2"]]
 
 
-def test_ontology_term_replacement_does_not_force_a_reimport(
+def test_term_replacement_versions_do_not_force_a_reimport(
     run: RunJob,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
@@ -435,7 +435,7 @@ def test_ontology_term_replacement_does_not_force_a_reimport(
                 expected_version=1,
             ),
             actor_id="system",
-            change_source=ChangeSource.ONTOLOGY_REFRESH,
+            change_source=ChangeSource.TERM_REPLACEMENT,
         )
         uow.commit()
 

@@ -53,7 +53,7 @@ from standard_annotation_backend.persistence.models import (
 from standard_annotation_backend.persistence.repositories.jobs import lock_job_record
 
 _GPAD_JOB_TYPES = frozenset({JobType.ANNOTATION_REFRESH, JobType.ANNOTATION_CUTOVER})
-_SYSTEM_CHANGE_SOURCES = (ChangeSource.ONTOLOGY_REFRESH,)
+_SYSTEM_CHANGE_SOURCES = (ChangeSource.TERM_REPLACEMENT,)
 """Version sources that are system maintenance rather than local edits."""
 _INSERT_BATCH_SIZE = 5_000
 
@@ -209,8 +209,8 @@ class AnnotationImportRepository:
         """Report whether the group has changed since `import_job_id` published.
 
         A local change is an annotation that the import did not publish, an edit
-        or soft delete, a comment, or a change set in any state. SABE's automatic
-        ontology term replacements are not local changes. This checks current
+        or soft delete, a comment, or a change set in any state. Versions written by
+        the term replacement job are not local changes. This checks current
         rows rather than timestamps, because a write's `created_at` is its
         transaction's start time, which can precede a publication it commits after.
         """
@@ -231,7 +231,7 @@ class AnnotationImportRepository:
             ),
             # Edits and soft deletes: imported annotations start at version 1,
             # so a later version means a change, unless SABE made it itself
-            # (such as an ontology term replacement).
+            # (such as a term replacement).
             select(AnnotationVersionRecord.annotation_id).where(
                 AnnotationVersionRecord.annotation_id.in_(group_annotations),
                 AnnotationVersionRecord.version > 1,

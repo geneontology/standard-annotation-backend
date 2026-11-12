@@ -20,6 +20,7 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
     EntityFact,
     ReferenceDataUnavailableError,
+    ReplacementFacts,
     TermFact,
     TermStatus,
 )
@@ -31,6 +32,7 @@ from standard_annotation_backend.domain.semantic_validation.rule_data import (
     STORED_RULE_DATA,
     RuleData,
 )
+from standard_annotation_backend.domain.term_replacement import replacement_step
 from standard_annotation_backend.persistence.models import (
     EntitySourceRecord,
     OntologyAltIdRecord,
@@ -178,6 +180,57 @@ class ValidationFactsRepository:
                 ),
             )
             for annotation, annotation_peers in zip(annotations, peers, strict=True)
+        )
+
+    def replacement_facts(
+        self,
+        annotations: Sequence[Annotation],
+        ontologies: Mapping[str, tuple[str, ...]],
+    ) -> ReplacementFacts:
+        """Return facts about the annotations' terms and their replacement chains.
+
+        The active snapshots are resolved once. Each identifier is read from the
+        snapshot of the ontology owning its prefix; then each obsolete term's only
+        replacement and each alternative ID's primary term is read too, until no
+        chain reaches a term not yet read.
+
+        Raises:
+            ReferenceDataUnavailableError: If a configured ontology or the go-site
+                rule data has no active snapshot.
+        """
+        snapshots = self._active_snapshots(ontologies)
+        version_by_prefix = {
+            prefix: snapshots.ontology_versions[key]
+            for key, prefixes in ontologies.items()
+            for prefix in prefixes
+        }
+        terms: dict[str, TermFact] = {}
+        pending = {
+            occurrence.identifier
+            for annotation in annotations
+            for occurrence in term_identifiers(annotation)
+            if occurrence.prefix in version_by_prefix
+        }
+        while pending:
+            wanted: dict[UUID, set[str]] = {}
+            for identifier in pending:
+                version_id = version_by_prefix[split_identifier(identifier)[0]]
+                wanted.setdefault(version_id, set()).add(identifier)
+            found = self._term_facts(wanted)
+            terms.update(found)
+            pending = {
+                following
+                for fact in found.values()
+                if (following := replacement_step(fact)) is not None
+                and split_identifier(following)[0] in version_by_prefix
+                and following not in terms
+            }
+        return ReplacementFacts(
+            terms=terms,
+            snapshot_ids={
+                **snapshots.ontology_versions,
+                RULES_REFERENCE_DATA: snapshots.rules_snapshot_id,
+            },
         )
 
     def _active_snapshots(

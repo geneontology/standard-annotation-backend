@@ -279,6 +279,33 @@ Some details that matter when debugging:
   cannot be read or fail structural validation are rejected and reported; an
   ordinary refresh publishes the rest, and a cutover fails on any rejection.
 
+## Term replacement jobs
+
+A `term_replacement` job replaces obsolete terms and alternative IDs in active
+annotations (see `docs/annotation-validation.md`). It is not a refresh kind: it
+fetches nothing, and `TermReplacementService` runs it instead of `RefreshRunner`.
+
+- **Triggers.** Every ontology activation queues a job for all groups
+  (parameters `{}`), and every annotation publication queues one for that group
+  (`{"group_key": ...}`). The job is created in the activation's or publication's
+  transaction, with the triggering job's requester, and is sent to
+  `sabe.term_replacement.run` after that transaction commits.
+- **Coalescing.** A trigger joins the scope's queued job if there is one; a running
+  job is never joined, because it may have read its facts before the change. If
+  sending a job fails, it stays queued, and the next trigger for its scope joins it
+  and sends it again.
+- **Running.** The job holds its own lock and its scope's lock; if another job of
+  the same scope is running, the task is retried and the job stays queued. It reads
+  active annotations in `annotation_id` order, 500 at a time, without locks, and
+  writes each changed annotation in its own transaction through the normal update
+  path. The result counts annotations scanned, replaced, skipped because of issues,
+  and skipped as stale, and lists the snapshot IDs read.
+- **Failures.** `invalid_parameters` for parameters other than `{}` or
+  `{"group_key": ...}`, and `reference_data_unavailable` when a configured ontology
+  or the go-site rule data has no active snapshot.
+- **The CLI.** `just refresh` runs the replacement jobs its refreshes queued once,
+  in its own process, after the refresh jobs finish, and prints a line for each.
+
 ## Locks
 
 | Lock | Kind of lock | Held by | Prevents |
@@ -291,6 +318,8 @@ Some details that matter when debugging:
 | Entity catalog lock | transaction advisory lock, one per source | entity publish and retire | concurrent changes to one source's active catalog |
 | Annotation system-update lock | exclusive global annotation-write lock | annotation publication | ordinary annotation writes during group replacement |
 | Annotation group lock (`annotation_group_lock`) | session try-lock, one per group | annotation `apply`, after the document is fetched and found changed | two GPAD jobs for one group staging or publishing at once |
+| Term replacement start lock | transaction advisory lock | `queue_term_replacement` | two triggers both creating a queued job |
+| Term replacement scope lock | session try-lock, one per scope | `TermReplacementService.run` | two jobs of one scope running at once |
 
 The try-locks never wait. A process that cannot take one either returns (job
 lock) or raises so the task is retried later (ontology lock and annotation group

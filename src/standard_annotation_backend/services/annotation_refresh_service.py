@@ -8,6 +8,8 @@ and move the group to `sabe_managed` permanently. One service runs both job type
 Staging and publication commit in separate transactions.
 """
 
+import logging
+from collections.abc import Callable
 from itertools import batched
 from uuid import UUID
 
@@ -53,8 +55,13 @@ from standard_annotation_backend.refresh.decoding import decode_source_text
 from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
+from standard_annotation_backend.services.term_replacement_service import (
+    queue_term_replacement,
+)
 
 _STAGING_BATCH_SIZE = 5_000
+
+logger = logging.getLogger(__name__)
 
 
 class AnnotationRefreshBusyError(RetryableRefreshError):
@@ -79,6 +86,9 @@ class AnnotationRefreshService:
         sources: Configured sources for every kind; maps a GPAD source to its
             group.
         try_lock: Takes the per-group lock.
+        dispatch_replacement: Sends a queued term replacement job to a worker
+            after a publication commits. `None` leaves the job queued for the caller to
+            run.
     """
 
     def __init__(
@@ -86,10 +96,13 @@ class AnnotationRefreshService:
         unit_of_work_factory: UnitOfWorkFactory,
         sources: RefreshSources,
         try_lock: AdvisoryTryLock,
+        *,
+        dispatch_replacement: Callable[[Job], None] | None = None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._sources = sources
         self._try_lock = try_lock
+        self._dispatch_replacement = dispatch_replacement
 
     @property
     def name(self) -> RefreshKindName:
@@ -304,8 +317,9 @@ class AnnotationRefreshService:
     def _publish(self, *, job_id: UUID, actor_id: str) -> AnnotationRefreshResult:
         """Publish a job's staged import with its audit event, then commit.
 
-        If the job already published, its stored result is returned and no
-        audit event is added.
+        A queued term replacement job for the group is committed with the
+        publication and then dispatched. If the job already published, its stored
+        result is returned and no audit event or replacement job is added.
 
         Raises:
             AnnotationImportConflictError: If the job does not exist, is not a
@@ -319,6 +333,9 @@ class AnnotationRefreshService:
             result = _import_result(
                 uow.annotation_imports.publish(job_id, actor_id=actor_id)
             )
+            replacement = queue_term_replacement(
+                uow, group_key=result.group_key, requested_by=actor_id
+            )
             AuditService(uow.audit).record_annotation_import_published(
                 is_cutover=result.is_cutover,
                 actor_id=actor_id,
@@ -331,7 +348,24 @@ class AnnotationRefreshService:
                 },
             )
             uow.commit()
-            return result
+        self._dispatch(replacement)
+        return result
+
+    def _dispatch(self, job: Job) -> None:
+        """Send a replacement job to a worker, leaving it queued if sending fails.
+
+        The next trigger joins the queued job and sends it again.
+        """
+        if self._dispatch_replacement is None:
+            return
+        try:
+            self._dispatch_replacement(job)
+        except Exception as error:
+            logger.error(
+                "Term replacement dispatch failed: job_id=%s failure_type=%s",
+                job.job_id,
+                type(error).__name__,
+            )
 
 
 def _import_result(record: AnnotationImportRecord) -> AnnotationRefreshResult:

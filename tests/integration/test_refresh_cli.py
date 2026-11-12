@@ -10,7 +10,6 @@ from annotation_refresh_helpers import gpad_bytes, gpad_row, seed_group_import
 from refresh_helpers import (
     TEST_SOURCES,
     FakeFetchers,
-    build_runner,
     rule_files,
     sources_with_entities,
 )
@@ -34,7 +33,8 @@ from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
-from standard_annotation_backend.services.job_service import JobService
+from standard_annotation_backend.services.job_service import Job, JobService
+from standard_annotation_backend.workers.runtime import create_refresh_runner
 
 USERS_YAML = b"""
 - accounts: {github: curator}
@@ -60,12 +60,22 @@ def use_runtime(
         fetchers = FakeFetchers(contents)
 
         @contextmanager
-        def runtime() -> Iterator[SimpleNamespace]:
+        def runtime(
+            *, dispatch_replacement: Callable[[Job], None] | None = None
+        ) -> Iterator[SimpleNamespace]:
+            components = create_refresh_runner(
+                engine=database_engine,
+                unit_of_work_factory=unit_of_work_factory,
+                sources=sources,
+                fetchers=fetchers,
+                dispatch_replacement=dispatch_replacement,
+            )
             yield SimpleNamespace(
                 unit_of_work_factory=unit_of_work_factory,
                 settings=SimpleNamespace(sources=sources),
                 jobs=JobService(unit_of_work_factory),
-                runner=build_runner(database_engine, unit_of_work_factory, fetchers),
+                runner=components.runner,
+                term_replacement=components.term_replacement,
             )
 
         monkeypatch.setattr(cli, "worker_runtime", runtime)
@@ -244,6 +254,7 @@ def test_cli_refreshes_rules_in_process(
 def test_cli_runs_an_annotation_refresh_in_process(
     use_runtime: InstallRuntime,
     seed_active_subjects: Callable[..., None],
+    reference_data: Callable[..., None],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`refresh annotation SOURCE` runs the GPAD refresh and reports success."""
@@ -304,3 +315,21 @@ def test_cli_refresh_all_says_when_every_annotation_group_is_sabe_managed(
         assert (
             session.scalar(select(func.count()).select_from(JobRecord)) == jobs_before
         )
+
+
+def test_cli_runs_the_queued_replacement_job_once_after_its_refreshes(
+    use_runtime: InstallRuntime,
+    seed_active_subjects: Callable[..., None],
+    reference_data: Callable[..., None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A publication's replacement job runs in-process and gets its own line."""
+    seed_active_subjects("UniProtKB:P12345")
+    use_runtime({"mgi-gpad": gpad_bytes(gpad_row("UniProtKB:P12345"))})
+
+    assert cli.main(["annotation", "mgi-gpad"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("annotation_refresh mgi-gpad succeeded")
+    assert len(lines) == 2
+    assert lines[1].startswith("term_replacement ")
+    assert " succeeded " in lines[1]

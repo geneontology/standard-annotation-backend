@@ -29,26 +29,31 @@ from standard_annotation_backend.services.authorization_refresh_service import (
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
-from standard_annotation_backend.services.job_service import JobService
+from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
 )
 from standard_annotation_backend.services.rules_refresh_service import (
     RulesRefreshService,
 )
+from standard_annotation_backend.services.term_replacement_service import (
+    TermReplacementService,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class RefreshComponents:
-    """Group the runner with the ontology service that callers use directly.
+    """Group the runner with the services that callers use directly.
 
     Attributes:
         ontology: The ontology service, whose `prune` the prune task calls.
         runner: Runs jobs of every kind.
+        term_replacement: Runs term replacement jobs.
     """
 
     ontology: OntologyRefreshService
     runner: RefreshRunner
+    term_replacement: TermReplacementService
 
 
 def create_refresh_runner(
@@ -58,6 +63,7 @@ def create_refresh_runner(
     sources: RefreshSources,
     fetchers: SourceFetcher,
     enqueue_prune: Callable[[str], None] | None = None,
+    dispatch_replacement: Callable[[Job], None] | None = None,
 ) -> RefreshComponents:
     """Build every refresh service and a runner that can run all of them.
 
@@ -68,6 +74,9 @@ def create_refresh_runner(
         fetchers: Fetches sources.
         enqueue_prune: Schedules ontology pruning after an ontology job finishes.
             `None` prunes in the calling process instead (used by the CLI).
+        dispatch_replacement: Sends a term replacement job, queued by an
+            ontology activation or an annotation publication, to a worker. `None`
+            leaves it queued for the caller (used by the CLI).
     """
     try_lock = bind_try_lock(engine)
     jobs = JobService(unit_of_work_factory)
@@ -75,11 +84,23 @@ def create_refresh_runner(
     rules = RulesRefreshService(unit_of_work_factory, sources)
     entity = EntityRefreshService(unit_of_work_factory, sources)
     ontology = OntologyRefreshService(
-        unit_of_work_factory, sources, try_lock, enqueue_prune
+        unit_of_work_factory,
+        sources,
+        try_lock,
+        enqueue_prune,
+        dispatch_replacement=dispatch_replacement,
     )
-    annotation = AnnotationRefreshService(unit_of_work_factory, sources, try_lock)
+    annotation = AnnotationRefreshService(
+        unit_of_work_factory,
+        sources,
+        try_lock,
+        dispatch_replacement=dispatch_replacement,
+    )
     return RefreshComponents(
         ontology=ontology,
+        term_replacement=TermReplacementService(
+            unit_of_work_factory, sources, try_lock
+        ),
         runner=RefreshRunner(
             try_lock=try_lock,
             jobs=jobs,
@@ -100,16 +121,21 @@ class WorkerRuntime:
     jobs: JobService
     ontology: OntologyRefreshService
     runner: RefreshRunner
+    term_replacement: TermReplacementService
 
 
 @contextmanager
 def worker_runtime(
-    *, enqueue_prune: Callable[[str], None] | None = None
+    *,
+    enqueue_prune: Callable[[str], None] | None = None,
+    dispatch_replacement: Callable[[Job], None] | None = None,
 ) -> Iterator[WorkerRuntime]:
     """Create a worker runtime and dispose its database engine afterward.
 
     Args:
         enqueue_prune: Schedules ontology pruning after an ontology job ends.
+            See `create_refresh_runner`.
+        dispatch_replacement: Sends queued term replacement jobs to a worker.
             See `create_refresh_runner`.
     """
     settings = get_settings()
@@ -129,6 +155,7 @@ def worker_runtime(
                 sources=settings.sources,
                 fetchers=fetchers,
                 enqueue_prune=enqueue_prune,
+                dispatch_replacement=dispatch_replacement,
             )
             yield WorkerRuntime(
                 settings=settings,
@@ -136,6 +163,7 @@ def worker_runtime(
                 jobs=JobService(unit_of_work_factory),
                 ontology=refresh.ontology,
                 runner=refresh.runner,
+                term_replacement=refresh.term_replacement,
             )
     finally:
         engine.dispose()
