@@ -36,7 +36,6 @@ from standard_annotation_backend.domain.jobs import (
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.qc_reports import (
     STORED_QC_REPORT_RESULT,
-    IssueType,
     QcFinding,
     QcGroupCounts,
     QcReportFindingsExpiredError,
@@ -44,6 +43,7 @@ from standard_annotation_backend.domain.qc_reports import (
     QcReportNotFoundError,
     QcReportResult,
     ReferenceDataVersions,
+    issue_types_of,
 )
 from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
@@ -241,19 +241,15 @@ class QcReportRunner:
                 creators = unit_of_work.annotations.creators(
                     [record.annotation_id for record in records]
                 )
-                issues = self._validator.check(
+                results = self._validator.check(
                     unit_of_work,
                     [
                         Candidate(record.annotation_data, record.annotation_id)
                         for record in records
                     ],
                     snapshots=snapshots,
+                    include_report_only=True,
                 )
-                issues_by_id = {
-                    record.annotation_id: found
-                    for record, found in zip(records, issues, strict=True)
-                    if found
-                }
                 findings = [
                     QcFinding(
                         annotation_id=record.annotation_id,
@@ -262,10 +258,11 @@ class QcReportRunner:
                         # Every annotation has a first version; the default
                         # only keeps the type a string.
                         created_by=creators.get(record.annotation_id, ""),
-                        issues=issues_by_id[record.annotation_id],
+                        issues=result.issues,
+                        issue_types=issue_types_of(result.stage, result.issues),
                     )
-                    for record in records
-                    if record.annotation_id in issues_by_id
+                    for record, result in zip(records, results, strict=True)
+                    if result.issues
                 ]
                 unit_of_work.qc_reports.record_batch(
                     job.job_id,
@@ -489,7 +486,7 @@ class QcReportService:
         context: AuthorizationContext,
         report_id: UUID,
         *,
-        issue_type: IssueType | None,
+        issue_type: str | None,
         owning_group_id: str | None,
         limit: int,
         offset: int,
@@ -588,4 +585,5 @@ def _finding(record: QcReportFindingRecord) -> QcFinding:
         owning_group_id=record.owning_group_id,
         created_by=record.created_by,
         issues=tuple(issues),
+        issue_types=tuple(record.issue_types),
     )

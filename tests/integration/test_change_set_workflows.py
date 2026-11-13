@@ -68,7 +68,8 @@ def _duplicate_peers(issues: Sequence[ValidationIssue]) -> set[UUID]:
     """Return the peer IDs of the `duplicate_annotation` issue, if there is one."""
     for issue in issues:
         if issue["type"] == "duplicate_annotation":
-            details = issue.get("details", {})
+            details = issue.get("details")
+            assert details is not None and "peer_ids" in details
             peer_ids = details["peer_ids"]
             assert isinstance(peer_ids, list)
             return {UUID(peer_id) for peer_id in peer_ids}

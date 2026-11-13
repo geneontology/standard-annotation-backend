@@ -7,6 +7,9 @@ report issues from those rules.
 """
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.semantic_validation.details import (
+    IssueDetails,
+)
 from standard_annotation_backend.domain.semantic_validation.evidence import (
     go_evidence_code,
 )
@@ -31,7 +34,7 @@ def gorule_issue(
     number: int,
     message: str,
     location: Location = WHOLE_ANNOTATION,
-    details: dict[str, object] | None = None,
+    details: IssueDetails | None = None,
 ) -> ValidationIssue:
     """Return an issue for one GO Rule.
 
@@ -39,7 +42,7 @@ def gorule_issue(
         number: The GO Rule number, such as 2 for GORULE:0000002.
         message: A short, stable explanation of the failure.
         location: Where the issue points; the whole annotation by default.
-        details: JSON-compatible facts that help fix the issue, if any.
+        details: Facts that help fix the issue, in the shape the rule declares.
 
     Returns:
         An issue whose type is `gorule_` and the seven-digit rule number.

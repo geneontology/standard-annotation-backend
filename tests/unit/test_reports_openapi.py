@@ -2,7 +2,7 @@
 
 import pytest
 
-from standard_annotation_backend.domain.qc_reports import IssueType
+from standard_annotation_backend.domain.qc_reports import ISSUE_TYPES
 from standard_annotation_backend.main import app
 
 START = "/reports/annotation-qc"
@@ -65,9 +65,9 @@ def test_the_issue_type_filter_is_an_enum_with_titles_and_links(schema: dict) ->
         option for option in issue_type["schema"]["anyOf"] if "enum" in option
     )
 
-    assert enum_schema["enum"] == [member.value for member in IssueType]
+    assert enum_schema["enum"] == [entry.issue_type for entry in ISSUE_TYPES]
     descriptions = enum_schema["x-enum-descriptions"]
-    assert len(descriptions) == len(IssueType)
+    assert len(descriptions) == len(ISSUE_TYPES)
     assert (
         "gorule-0000002.md" in descriptions[enum_schema["enum"].index("gorule_0000002")]
     )
@@ -93,3 +93,36 @@ def test_reports_are_listed_with_status_and_paging_parameters(schema: dict) -> N
     }
     item = schema["components"]["schemas"]["QcReportListItemResource"]
     assert "findings_available" in item["required"]
+
+
+def test_issue_details_are_published_as_named_shapes(schema: dict) -> None:
+    """Each rule's details shape is a named schema an issue's details may take."""
+    details = schema["components"]["schemas"]["ApiValidationIssue"]["properties"][
+        "details"
+    ]
+    referenced = {
+        option["$ref"].rsplit("/", 1)[-1]
+        for option in details["anyOf"]
+        if "$ref" in option
+    }
+
+    assert referenced == {
+        entry.details.__name__ for entry in ISSUE_TYPES if entry.details is not None
+    }
+    assert "type" in details["description"]
+
+
+def test_issue_type_descriptions_name_their_details_shape(schema: dict) -> None:
+    """A view can tell from the catalog which details shape each type sends."""
+    parameters = schema["paths"][FINDINGS]["get"]["parameters"]
+    issue_type = next(p for p in parameters if p["name"] == "issue_type")
+    enum_schema = next(o for o in issue_type["schema"]["anyOf"] if "enum" in o)
+    described = dict(
+        zip(enum_schema["enum"], enum_schema["x-enum-descriptions"], strict=True)
+    )
+
+    assert described["obsolete_term"] == (
+        "Term is obsolete (details: ObsoleteTermDetails)"
+    )
+    assert "PrimaryIdDetails" in described["gorule_0000030"]
+    assert "details" not in described["unknown_term"]

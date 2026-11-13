@@ -3,6 +3,9 @@
 from collections.abc import Iterator
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.semantic_validation.details import (
+    PrimaryIdDetails,
+)
 from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
 )
@@ -101,7 +104,7 @@ def gorule_0000030(
                 30,
                 "GO_REF reference is an alternative ID",
                 location,
-                {"primary_id": primary_by_alt_id[reference]},
+                PrimaryIdDetails(primary_id=primary_by_alt_id[reference]),
             )
         elif reference not in entries:
             yield gorule_issue(

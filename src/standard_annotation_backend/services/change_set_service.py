@@ -795,9 +795,10 @@ def _build_preview(
     annotation = validation.annotation
     issues = validation.errors
     if annotation is not None and record.operation != ChangeSetOperation.DELETE:
-        (issues,) = validator.check(
+        (checked,) = validator.check(
             unit_of_work, [Candidate(annotation, record.annotation_id)]
         )
+        issues = checked.issues
     current_version = None
     if record.annotation_id is not None:
         current_version = _current_target(

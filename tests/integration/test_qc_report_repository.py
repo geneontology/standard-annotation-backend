@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.qc_reports import (
-    IssueType,
     QcFinding,
     QcGroupCounts,
 )
@@ -36,6 +35,12 @@ def _finding(
         issues=tuple(
             {"location": ("annotation",), "message": "x", "type": issue_type}
             for issue_type in types
+        ),
+        issue_types=tuple(
+            dict.fromkeys(
+                "structural" if issue_type == "missing" else issue_type
+                for issue_type in types
+            )
         ),
     )
 
@@ -100,7 +105,7 @@ def test_batches_accumulate_counts_by_group_and_issue_type(
             report,
             owning_group_id="MGI",
             created_by="curator",
-            issue_type=IssueType.GORULE_0000055,
+            issue_type="gorule_0000055",
             limit=10,
             offset=0,
         )

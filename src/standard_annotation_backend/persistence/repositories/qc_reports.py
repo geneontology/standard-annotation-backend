@@ -25,7 +25,7 @@ from standard_annotation_backend.domain.jobs import (
     group_scope_parameters,
 )
 from standard_annotation_backend.domain.qc_reports import (
-    IssueType,
+    ISSUE_TYPES,
     QcFinding,
     QcGroupCounts,
 )
@@ -85,9 +85,7 @@ class QcReportRepository:
                         "annotation_version": finding.annotation_version,
                         "owning_group_id": finding.owning_group_id,
                         "created_by": finding.created_by,
-                        "issue_types": [
-                            issue_type.value for issue_type in finding.issue_types
-                        ],
+                        "issue_types": list(finding.issue_types),
                         "issues": [_json_issue(issue) for issue in finding.issues],
                     }
                     for finding in findings
@@ -117,7 +115,7 @@ class QcReportRepository:
                 )
             )
         issue_counts = Counter(
-            (finding.owning_group_id, issue_type.value)
+            (finding.owning_group_id, issue_type)
             for finding in findings
             for issue_type in finding.issue_types
         )
@@ -300,10 +298,10 @@ class QcReportRepository:
     def issue_counts(self, job_id: UUID, owning_group_id: str | None) -> dict[str, int]:
         """Return the number of annotations in a report with each issue type.
 
-        Types that `IssueType` defines come first, in the order it defines them.
-        Counts are kept for every report, even after its findings are deleted, so
-        a type that an earlier SABE release recorded and `IssueType` no longer
-        defines is still returned, after them, in alphabetical order.
+        Types in the issue-type catalog (`ISSUE_TYPES`) come first, in catalog
+        order. Counts are kept for every report, even after its findings are
+        deleted, so a type that an earlier SABE release recorded and the catalog no
+        longer lists is still returned, after them, in alphabetical order.
 
         Args:
             job_id: The report's job ID.
@@ -320,7 +318,9 @@ class QcReportRepository:
         totals: Counter[str] = Counter()
         for issue_type, count in self.session.execute(statement):
             totals[issue_type] += count
-        catalog = [member.value for member in IssueType if member.value in totals]
+        catalog = [
+            entry.issue_type for entry in ISSUE_TYPES if entry.issue_type in totals
+        ]
         others = sorted(set(totals) - set(catalog))
         return {issue_type: totals[issue_type] for issue_type in catalog + others}
 
@@ -330,7 +330,7 @@ class QcReportRepository:
         *,
         owning_group_id: str | None,
         created_by: str | None,
-        issue_type: IssueType | None,
+        issue_type: str | None,
         limit: int,
         offset: int,
     ) -> Page[QcReportFindingRecord]:
@@ -356,7 +356,7 @@ class QcReportRepository:
         if issue_type is not None:
             statement = statement.where(
                 QcReportFindingRecord.issue_types.contains(
-                    cast([issue_type.value], ARRAY(Text))
+                    cast([issue_type], ARRAY(Text))
                 )
             )
         return load_page(

@@ -7,9 +7,8 @@ The report's counts by group and by issue type are kept permanently, but its
 findings are deleted when a newer report with the same scope completes.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
@@ -20,130 +19,77 @@ from standard_annotation_backend.domain.errors import (
     GoneError,
     NotFoundError,
 )
+from standard_annotation_backend.domain.semantic_validation.rules import RULES
 from standard_annotation_backend.domain.stored_json import StoredJson
-from standard_annotation_backend.domain.validation import ValidationIssue
+from standard_annotation_backend.domain.validation import (
+    ValidationIssue,
+    ValidationStage,
+)
 
 type Count = Annotated[int, Field(ge=0)]
 
-_GO_RULE_URL = (
-    "https://github.com/geneontology/go-site/blob/master/metadata/rules/{rule}.md"
+STRUCTURAL = "structural"
+"""The issue type a report counts every structural issue under."""
+
+
+@dataclass(frozen=True, slots=True)
+class IssueTypeEntry:
+    """Describe one issue type a QC report counts.
+
+    Attributes:
+        issue_type: The stable name, such as `obsolete_term` or `structural`.
+        title: A stable, human-readable title.
+        link: The go-site page of a GO Rule; `None` for other types.
+        details: The `TypedDict` the issues' `details` follow, if any.
+    """
+
+    issue_type: str
+    title: str
+    link: str | None = None
+    details: type | None = None
+
+
+ISSUE_TYPES: tuple[IssueTypeEntry, ...] = (
+    IssueTypeEntry(STRUCTURAL, "Annotation fails the Standard Annotation schema"),
+    *(
+        IssueTypeEntry(rule.issue_type, rule.title, rule.link, rule.details)
+        for rule in RULES
+    ),
 )
+"""Every issue type a report counts: `structural`, then each rule in `RULES` order.
+
+Issues from semantic validation keep their rule's type. Every issue from structural
+validation counts as `structural`, whatever its Pydantic type.
+"""
+
+_CATALOGED = frozenset(entry.issue_type for entry in ISSUE_TYPES)
 
 
-class IssueType(StrEnum):
-    """Name every kind of issue a QC report counts.
+def issue_types_of(
+    stage: ValidationStage, issues: Iterable[ValidationIssue]
+) -> tuple[str, ...]:
+    """Return the issue types a report counts for one annotation's issues.
 
-    Issues from semantic validation, which checks an annotation against reference
-    data, other annotations, and GO Rules, keep their own type. Every issue from
-    schema validation counts as `structural`, whatever its Pydantic type.
+    Args:
+        stage: The validation stage that produced the issues.
+        issues: The annotation's issues.
+
+    Returns:
+        `("structural",)` for a structural failure. Otherwise each distinct
+        issue type, in `ISSUE_TYPES` order.
+
+    Raises:
+        ValueError: If a semantic issue type is not in `ISSUE_TYPES`. Every rule
+            is registered, so this is a programming error; the report fails
+            instead of storing a wrong count.
     """
-
-    UNKNOWN_ENTITY = "unknown_entity"
-    UNKNOWN_TERM = "unknown_term"
-    OBSOLETE_TERM = "obsolete_term"
-    ALTERNATE_TERM_ID = "alternate_term_id"
-    DUPLICATE_ANNOTATION = "duplicate_annotation"
-    STRUCTURAL = "structural"
-    GORULE_0000002 = "gorule_0000002"
-    GORULE_0000005 = "gorule_0000005"
-    GORULE_0000006 = "gorule_0000006"
-    GORULE_0000007 = "gorule_0000007"
-    GORULE_0000008 = "gorule_0000008"
-    GORULE_0000011 = "gorule_0000011"
-    GORULE_0000015 = "gorule_0000015"
-    GORULE_0000016 = "gorule_0000016"
-    GORULE_0000017 = "gorule_0000017"
-    GORULE_0000018 = "gorule_0000018"
-    GORULE_0000022 = "gorule_0000022"
-    GORULE_0000027 = "gorule_0000027"
-    GORULE_0000030 = "gorule_0000030"
-    GORULE_0000033 = "gorule_0000033"
-    GORULE_0000037 = "gorule_0000037"
-    GORULE_0000039 = "gorule_0000039"
-    GORULE_0000042 = "gorule_0000042"
-    GORULE_0000043 = "gorule_0000043"
-    GORULE_0000046 = "gorule_0000046"
-    GORULE_0000050 = "gorule_0000050"
-    GORULE_0000053 = "gorule_0000053"
-    GORULE_0000055 = "gorule_0000055"
-    GORULE_0000058 = "gorule_0000058"
-    GORULE_0000061 = "gorule_0000061"
-    GORULE_0000063 = "gorule_0000063"
-    GORULE_0000065 = "gorule_0000065"
-
-
-# GO Rule titles follow the rule's go-site page.
-_TITLES: Mapping[IssueType, str] = {
-    IssueType.UNKNOWN_ENTITY: "Subject is not an active entity",
-    IssueType.UNKNOWN_TERM: "Identifier is not a term of its ontology",
-    IssueType.OBSOLETE_TERM: "Term is obsolete",
-    IssueType.ALTERNATE_TERM_ID: "Identifier is an alternative ID",
-    IssueType.DUPLICATE_ANNOTATION: "Annotation duplicates other annotations",
-    IssueType.STRUCTURAL: "Annotation fails the Standard Annotation schema",
-    IssueType.GORULE_0000002: (
-        "No NOT annotations to GO:0005488 binding or GO:0005515 protein binding"
-    ),
-    IssueType.GORULE_0000005: (
-        "IEA, ISS, ISO, ISM, ISA, IBA, RCA not allowed for direct binding or "
-        "protein binding"
-    ),
-    IssueType.GORULE_0000006: "IEP and HEP only for Biological Process terms",
-    IssueType.GORULE_0000007: (
-        "IPI should not be used with GO:0003824 catalytic activity or descendants"
-    ),
-    IssueType.GORULE_0000008: "No annotations to uninformative high-level terms",
-    IssueType.GORULE_0000011: "ND only on root terms, and root terms only with ND",
-    IssueType.GORULE_0000015: "Dual species taxon check",
-    IssueType.GORULE_0000016: "IC annotations require a With/From GO ID",
-    IssueType.GORULE_0000017: "IDA annotations must not have a With/From entry",
-    IssueType.GORULE_0000018: "IPI annotations require a With/From entry",
-    IssueType.GORULE_0000022: "Filter annotations to retracted publications",
-    IssueType.GORULE_0000027: "Each identifier in GAF is valid",
-    IssueType.GORULE_0000030: "Only valid GO_REFs are allowed",
-    IssueType.GORULE_0000033: "Only public reference IDs (PMID, DOI, GO_REF)",
-    IssueType.GORULE_0000037: "IBA only assigned_by GO_Central with GO_REF:0000033",
-    IssueType.GORULE_0000039: (
-        "Protein complexes cannot be annotated to GO:0032991 or descendants"
-    ),
-    IssueType.GORULE_0000042: "IKR evidence requires a NOT qualifier",
-    IssueType.GORULE_0000043: (
-        "Check for valid combination of evidence code, with/from rules and GO_REF"
-    ),
-    IssueType.GORULE_0000046: (
-        "With/from must equal the gene product for self-binding terms"
-    ),
-    IssueType.GORULE_0000050: "ISS, ISA, ISO should not be self-referential",
-    IssueType.GORULE_0000053: "NOT annotations should not have extensions",
-    IssueType.GORULE_0000055: "References should have only one ID per ID space",
-    IssueType.GORULE_0000058: "Extensions conform to extensions-constraints.yaml",
-    IssueType.GORULE_0000061: "Allowed gene product to term relations",
-    IssueType.GORULE_0000063: "ISS/ISA/ISO evidence requires a with/from gene product",
-    IssueType.GORULE_0000065: "Annotations to obsoletion candidates produce a warning",
-}
-
-
-def issue_type_title(issue_type: IssueType) -> str:
-    """Return the stable, human-readable title of an issue type."""
-    return _TITLES[issue_type]
-
-
-def issue_type_link(issue_type: IssueType) -> str | None:
-    """Return the go-site page of a GO Rule issue type, or `None` for other types."""
-    if not issue_type.startswith("gorule_"):
-        return None
-    return _GO_RULE_URL.format(rule=issue_type.value.replace("_", "-"))
-
-
-def issue_type_of(issue: ValidationIssue) -> IssueType:
-    """Return the issue type a report counts an issue under.
-
-    Every semantic issue type is a member of `IssueType`. Any other type comes
-    from schema validation and is counted as `structural`.
-    """
-    try:
-        return IssueType(issue["type"])
-    except ValueError:
-        return IssueType.STRUCTURAL
+    if stage is ValidationStage.STRUCTURAL:
+        return (STRUCTURAL,)
+    found = {issue["type"] for issue in issues}
+    unknown = sorted(found - _CATALOGED)
+    if unknown:
+        raise ValueError(f"Issue types not in the catalog: {', '.join(unknown)}")
+    return tuple(entry.issue_type for entry in ISSUE_TYPES if entry.issue_type in found)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +104,9 @@ class QcFinding:
             authorization has `self` scope sees only findings for annotations
             they created.
         issues: Every issue, in the format write responses use.
+        issue_types: Each issue type the report counts the finding under, once,
+            in catalog order when recorded. A stored finding keeps the types it
+            was recorded with.
     """
 
     annotation_id: UUID
@@ -165,12 +114,7 @@ class QcFinding:
     owning_group_id: str
     created_by: str
     issues: tuple[ValidationIssue, ...]
-
-    @property
-    def issue_types(self) -> tuple[IssueType, ...]:
-        """Return each issue type the finding has, once, in `IssueType` order."""
-        found = {issue_type_of(issue) for issue in self.issues}
-        return tuple(issue_type for issue_type in IssueType if issue_type in found)
+    issue_types: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,7 +12,7 @@ from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, WithJsonSchema
 
 from standard_annotation_backend.api.dependencies import PageLimit, PageOffset
 from standard_annotation_backend.api.examples import CHANGE_SET_PROPOSAL_EXAMPLES
@@ -32,11 +32,13 @@ from standard_annotation_backend.domain.change_sets import (
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.qc_reports import (
+    ISSUE_TYPES,
     STORED_QC_REPORT_RESULT,
-    IssueType,
+    IssueTypeEntry,
     QcFinding,
-    issue_type_link,
-    issue_type_title,
+)
+from standard_annotation_backend.domain.semantic_validation.details import (
+    IssueDetails,
 )
 from standard_annotation_backend.domain.tokens import TokenMetadata
 from standard_annotation_backend.refresh.sources import SourceKey
@@ -557,8 +559,15 @@ class ApiValidationIssue(BaseModel):
     location: tuple[str | int, ...]
     message: str
     type: str
-    details: dict[str, object] | None = Field(
-        default=None, exclude_if=lambda value: value is None
+    details: IssueDetails | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Facts that help fix the problem. The issue's `type` decides which "
+            "shape they have; the issue-type catalog of the QC report findings "
+            "route names the shape for each type. Absent when there are none, "
+            "and always absent for request issues."
+        ),
     )
 
 
@@ -753,22 +762,37 @@ class QcReportRequest(BaseModel):
     ] = None
 
 
-def _issue_type_description(issue_type: IssueType) -> str:
-    """Return an issue type's title, followed by its GO Rule link if it has one."""
-    link = issue_type_link(issue_type)
-    title = issue_type_title(issue_type)
-    return title if link is None else f"{title} ({link})"
+_PARTIAL_DETAILS = {"gorule_0000030": "only for an alternative GO_REF"}
+"""Issue types that send details for only some of their issues."""
+
+
+def _issue_type_description(entry: IssueTypeEntry) -> str:
+    """Return an issue type's title, GO Rule link, and details shape, if any."""
+    notes = [] if entry.link is None else [entry.link]
+    if entry.details is not None:
+        shape = f"details: {entry.details.__name__}"
+        when = _PARTIAL_DETAILS.get(entry.issue_type)
+        notes.append(shape if when is None else f"{shape}, {when}")
+    return entry.title if not notes else f"{entry.title} ({'; '.join(notes)})"
+
+
+def _cataloged_issue_type(value: str) -> str:
+    """Return `value` if it is an issue type a QC report counts."""
+    if value not in {entry.issue_type for entry in ISSUE_TYPES}:
+        raise ValueError("Unknown issue type")
+    return value
 
 
 IssueTypeParameter = Annotated[
-    IssueType,
+    str,
+    AfterValidator(_cataloged_issue_type),
     WithJsonSchema(
         {
             "type": "string",
             "title": "IssueType",
-            "enum": [member.value for member in IssueType],
+            "enum": [entry.issue_type for entry in ISSUE_TYPES],
             "x-enum-descriptions": [
-                _issue_type_description(member) for member in IssueType
+                _issue_type_description(entry) for entry in ISSUE_TYPES
             ],
             "description": (
                 "An issue type a QC report counts. `structural` covers every "

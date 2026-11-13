@@ -19,6 +19,9 @@ from standard_annotation_backend.domain.semantic_validation.checked_ancestors im
     SELF_BINDING_TERMS,
     VIRION_COMPONENT,
 )
+from standard_annotation_backend.domain.semantic_validation.details import (
+    AllowedRelationsDetails,
+)
 from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
 )
@@ -255,7 +258,7 @@ def gorule_0000061(
             61,
             "Relation is not allowed for the term's branch",
             (ANNOTATION_ROOT, "relation"),
-            {"allowed_relations": sorted(allowed)},
+            AllowedRelationsDetails(allowed_relations=sorted(allowed)),
         )
 
 
