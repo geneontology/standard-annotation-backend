@@ -126,3 +126,17 @@ def test_issue_type_descriptions_name_their_details_shape(schema: dict) -> None:
     )
     assert "PrimaryIdDetails" in described["gorule_0000030"]
     assert "details" not in described["unknown_term"]
+
+
+def test_go_rule_titles_describe_what_sabe_checks(schema: dict) -> None:
+    """A write-blocking GO Rule is not described as a warning."""
+    parameters = schema["paths"][FINDINGS]["get"]["parameters"]
+    issue_type = next(p for p in parameters if p["name"] == "issue_type")
+    enum_schema = next(o for o in issue_type["schema"]["anyOf"] if "enum" in o)
+    described = dict(
+        zip(enum_schema["enum"], enum_schema["x-enum-descriptions"], strict=True)
+    )
+
+    assert described["gorule_0000065"].startswith(
+        "No annotations to obsoletion candidate terms ("
+    )

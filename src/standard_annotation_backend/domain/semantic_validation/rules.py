@@ -80,8 +80,8 @@ class Rule:
 
     Attributes:
         issue_type: The stable name of the issue type, such as `obsolete_term`.
-        title: A stable, human-readable title. A GO Rule's title follows its
-            go-site page.
+        title: A stable, human-readable title. A GO Rule's title states what
+            SABE checks; the go-site page at `link` has the rule's full text.
         check: Returns the rule's issues. Every issue has `issue_type` as its type.
         details: The `TypedDict` from `semantic_validation.details` that the
             issues' `details` follow, or `None` when they never have details. A
@@ -146,17 +146,23 @@ RULES: tuple[Rule, ...] = (
     _go_rule(6, "IEP and HEP only for Biological Process terms", gorule_0000006),
     _go_rule(
         7,
-        "IPI should not be used with GO:0003824 catalytic activity or descendants",
+        "IPI not allowed for GO:0003824 catalytic activity or descendants",
         gorule_0000007,
     ),
     _go_rule(8, "No annotations to uninformative high-level terms", gorule_0000008),
     _go_rule(11, "ND only on root terms, and root terms only with ND", gorule_0000011),
-    _go_rule(15, "Dual species taxon check", gorule_0000015),
+    _go_rule(
+        15,
+        "Interacting taxa only on multi-organism terms, never the entity's own taxon",
+        gorule_0000015,
+    ),
     _go_rule(16, "IC annotations require a With/From GO ID", gorule_0000016),
     _go_rule(17, "IDA annotations must not have a With/From entry", gorule_0000017),
     _go_rule(18, "IPI annotations require a With/From entry", gorule_0000018),
-    _go_rule(22, "Filter annotations to retracted publications", gorule_0000022),
-    _go_rule(27, "Each identifier in GAF is valid", gorule_0000027),
+    _go_rule(22, "No references to retracted publications", gorule_0000022),
+    _go_rule(
+        27, "Identifiers and assigned_by must match go-site metadata", gorule_0000027
+    ),
     _go_rule(30, "Only valid GO_REFs are allowed", gorule_0000030, PrimaryIdDetails),
     _go_rule(33, "Only public reference IDs (PMID, DOI, GO_REF)", gorule_0000033),
     _go_rule(37, "IBA only assigned_by GO_Central with GO_REF:0000033", gorule_0000037),
@@ -168,7 +174,7 @@ RULES: tuple[Rule, ...] = (
     _go_rule(42, "IKR evidence requires a NOT qualifier", gorule_0000042),
     _go_rule(
         43,
-        "Check for valid combination of evidence code, with/from rules and GO_REF",
+        "Evidence, references, and with/from must follow evidence usage constraints",
         gorule_0000043,
     ),
     _go_rule(
@@ -176,22 +182,20 @@ RULES: tuple[Rule, ...] = (
         "With/from must equal the gene product for self-binding terms",
         gorule_0000046,
     ),
-    _go_rule(50, "ISS, ISA, ISO should not be self-referential", gorule_0000050),
-    _go_rule(53, "NOT annotations should not have extensions", gorule_0000053),
-    _go_rule(55, "References should have only one ID per ID space", gorule_0000055),
+    _go_rule(50, "ISS, ISA, ISO must not be self-referential", gorule_0000050),
+    _go_rule(53, "NOT annotations must not have extensions", gorule_0000053),
+    _go_rule(55, "References must have only one ID per ID space", gorule_0000055),
     _go_rule(58, "Extensions conform to extensions-constraints.yaml", gorule_0000058),
     _go_rule(
         61,
-        "Allowed gene product to term relations",
+        "Relation must be allowed for the term's branch",
         gorule_0000061,
         AllowedRelationsDetails,
     ),
     _go_rule(
         63, "ISS/ISA/ISO evidence requires a with/from gene product", gorule_0000063
     ),
-    _go_rule(
-        65, "Annotations to obsoletion candidates produce a warning", gorule_0000065
-    ),
+    _go_rule(65, "No annotations to obsoletion candidate terms", gorule_0000065),
 )
 """Every semantic rule, in the order its issues are reported."""
 
