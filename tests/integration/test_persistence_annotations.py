@@ -1,10 +1,11 @@
 """Tests for storing, changing, and deleting annotations in PostgreSQL."""
 
 from collections.abc import Callable
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from seeding import insert_annotation
+from seeding import insert_annotation, unvalidated_create, unvalidated_update
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
@@ -21,6 +22,10 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationStatus,
     ChangeSource,
 )
+from standard_annotation_backend.domain.duplicate_policy import (
+    DuplicateKey,
+    duplicate_key,
+)
 from standard_annotation_backend.persistence.annotation_data import (
     prepare_annotation_for_persistence,
 )
@@ -31,6 +36,9 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationRepository,
+)
+from standard_annotation_backend.persistence.repositories.annotations import (
+    PeerQuery,
 )
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -57,7 +65,7 @@ def _create_annotation(
 ) -> UUID:
     with unit_of_work_factory() as unit_of_work:
         record = unit_of_work.annotations.create(
-            unit_of_work.annotations.prepare_create(annotation),
+            unvalidated_create(unit_of_work.annotations, annotation),
             actor_id="creator",
             owning_group_id="group-1",
         )
@@ -85,8 +93,6 @@ def test_direct_create_stores_current_version_and_derived_values(
     validated_annotation: Annotation,
 ) -> None:
     """A created annotation is readable, versioned, searchable, and a duplicate peer."""
-    persistence_data = prepare_annotation_for_persistence(validated_annotation)
-
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
 
     with unit_of_work_factory() as unit_of_work:
@@ -110,10 +116,10 @@ def test_direct_create_stores_current_version_and_derived_values(
                 criteria, OwnershipScope(), limit=10, offset=0
             )
             assert [record.annotation_id for record in found.items] == [annotation_id]
-        assert repository.find_duplicate_peer_ids(
-            persistence_data.duplicate_base_signature,
-            [persistence_data.canonical_references[0]],
-        ) == (annotation_id,)
+        key = duplicate_key(validated_annotation)
+        assert repository.duplicate_peers(
+            [PeerQuery(DuplicateKey(key.signature, key.references[:1]))]
+        ) == ((annotation_id,),)
 
 
 def test_imported_duplicate_peers_coexist_and_find_each_other(
@@ -121,10 +127,15 @@ def test_imported_duplicate_peers_coexist_and_find_each_other(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
+    """Imported duplicates coexist, and each is the other's only peer.
+
+    A query never lists the annotation it excludes, so a stored annotation is
+    not its own duplicate, and several queries in one call each get their own
+    answer.
+    """
     job_id = _create_source_job(session_factory)
     first_id = uuid4()
     second_id = uuid4()
-    persistence_data = prepare_annotation_for_persistence(validated_annotation)
 
     for annotation_id in (first_id, second_id):
         with unit_of_work_factory() as unit_of_work:
@@ -140,17 +151,32 @@ def test_imported_duplicate_peers_coexist_and_find_each_other(
             )
             unit_of_work.commit()
 
+    key = duplicate_key(validated_annotation)
     with unit_of_work_factory() as unit_of_work:
-        assert unit_of_work.annotations.find_duplicate_peer_ids(
-            persistence_data.duplicate_base_signature,
-            persistence_data.canonical_references,
-            exclude_annotation_id=first_id,
-        ) == (second_id,)
-        assert unit_of_work.annotations.find_duplicate_peer_ids(
-            persistence_data.duplicate_base_signature,
-            [persistence_data.canonical_references[0]],
-            exclude_annotation_id=second_id,
-        ) == (first_id,)
+        assert unit_of_work.annotations.duplicate_peers(
+            [
+                PeerQuery(key, exclude_id=first_id),
+                PeerQuery(
+                    DuplicateKey(key.signature, key.references[:1]),
+                    exclude_id=second_id,
+                ),
+                PeerQuery(key),
+            ]
+        ) == ((second_id,), (first_id,), tuple(sorted((first_id, second_id))))
+
+
+def test_an_annotation_without_references_has_no_duplicate_peers(
+    unit_of_work_factory: UnitOfWorkFactory,
+    validated_annotation: Annotation,
+) -> None:
+    """Duplicates must share a reference, so a key with none has no peers."""
+    _create_annotation(unit_of_work_factory, validated_annotation)
+    signature = duplicate_key(validated_annotation).signature
+
+    with unit_of_work_factory() as unit_of_work:
+        assert unit_of_work.annotations.duplicate_peers(
+            [PeerQuery(DuplicateKey(signature, ()))]
+        ) == ((),)
 
 
 def test_update_appends_version_and_replaces_current_derived_values(
@@ -167,10 +193,12 @@ def test_update_appends_version_and_replaces_current_derived_values(
         interacting_taxon_id=None,
     )
     changed_persistence_data = prepare_annotation_for_persistence(changed)
+    changed_key = duplicate_key(changed)
 
     with unit_of_work_factory() as unit_of_work:
         record = unit_of_work.annotations.update(
-            unit_of_work.annotations.prepare_update(
+            unvalidated_update(
+                unit_of_work.annotations,
                 annotation_id,
                 changed,
                 expected_version=1,
@@ -214,9 +242,9 @@ def test_update_appends_version_and_replaces_current_derived_values(
             matching_ids(AnnotationFilter(interacting_taxon_id=("NCBITaxon:9606",)))
             == []
         )
-        assert repository.find_duplicate_peer_ids(
-            changed_persistence_data.duplicate_base_signature, ["PMID:99"]
-        ) == (annotation_id,)
+        assert repository.duplicate_peers(
+            [PeerQuery(DuplicateKey(changed_key.signature, ("PMID:99",)))]
+        ) == ((annotation_id,),)
 
     assert version_snapshots == (
         (
@@ -262,7 +290,8 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
 
         with unit_of_work_factory() as unit_of_work:
             unit_of_work.annotations.update(
-                unit_of_work.annotations.prepare_update(
+                unvalidated_update(
+                    unit_of_work.annotations,
                     annotation_id,
                     intervening,
                     expected_version=1,
@@ -279,7 +308,8 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
 
             with pytest.raises(DBAPIError, match="lock timeout"):
                 AnnotationRepository(retained_session).update(
-                    AnnotationRepository(retained_session).prepare_update(
+                    unvalidated_update(
+                        AnnotationRepository(retained_session),
                         annotation_id,
                         candidate,
                         expected_version=2,
@@ -318,7 +348,8 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
 
         with unit_of_work_factory() as unit_of_work:
             unit_of_work.annotations.update(
-                unit_of_work.annotations.prepare_update(
+                unvalidated_update(
+                    unit_of_work.annotations,
                     annotation_id,
                     intervening,
                     expected_version=1,
@@ -347,7 +378,6 @@ def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
     validated_annotation: Annotation,
 ) -> None:
     """A deleted annotation leaves search and duplicate checks but keeps its history."""
-    persistence_data = prepare_annotation_for_persistence(validated_annotation)
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
 
     with unit_of_work_factory() as unit_of_work:
@@ -382,13 +412,9 @@ def test_soft_delete_hides_current_retains_history_and_clears_derived_values(
             offset=0,
         )
         assert found.total == 0
-        assert (
-            repository.find_duplicate_peer_ids(
-                persistence_data.duplicate_base_signature,
-                persistence_data.canonical_references,
-            )
-            == ()
-        )
+        assert repository.duplicate_peers(
+            [PeerQuery(duplicate_key(validated_annotation))]
+        ) == ((),)
 
     assert [(version, is_deleted) for version, is_deleted, _ in version_snapshots] == [
         (1, False),
@@ -423,7 +449,8 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
     with unit_of_work_factory() as unit_of_work:
         with pytest.raises(AnnotationDeletedError):
             unit_of_work.annotations.update(
-                unit_of_work.annotations.prepare_update(
+                unvalidated_update(
+                    unit_of_work.annotations,
                     annotation_id,
                     validated_annotation,
                     expected_version=2,
@@ -443,7 +470,8 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
     with unit_of_work_factory() as unit_of_work:
         with pytest.raises(AnnotationNotFoundError):
             unit_of_work.annotations.update(
-                unit_of_work.annotations.prepare_update(
+                unvalidated_update(
+                    unit_of_work.annotations,
                     missing_id,
                     validated_annotation,
                     expected_version=1,
@@ -467,7 +495,7 @@ def test_unit_of_work_rolls_back_without_explicit_commit(
     """Changes made in a unit of work that is never committed are not saved."""
     with unit_of_work_factory() as unit_of_work:
         annotation_id = unit_of_work.annotations.create(
-            unit_of_work.annotations.prepare_create(validated_annotation),
+            unvalidated_create(unit_of_work.annotations, validated_annotation),
             actor_id="creator",
             owning_group_id="group-1",
         ).annotation_id
@@ -478,3 +506,24 @@ def test_unit_of_work_rolls_back_without_explicit_commit(
         assert (
             repository.list_versions_page(annotation_id, limit=100, offset=0).total == 0
         )
+
+
+def test_create_and_update_refuse_an_annotation_that_was_only_locked(
+    unit_of_work_factory: UnitOfWorkFactory,
+    validated_annotation: Annotation,
+) -> None:
+    """A write cannot skip validation: a value that was only locked is refused."""
+    annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
+
+    with unit_of_work_factory() as unit_of_work:
+        repository = unit_of_work.annotations
+        locked_create: Any = repository.lock_for_create(validated_annotation)
+        with pytest.raises(TypeError):
+            repository.create(
+                locked_create, actor_id="creator", owning_group_id="group-1"
+            )
+        locked_update: Any = repository.lock_for_update(
+            annotation_id, validated_annotation, expected_version=1
+        )
+        with pytest.raises(TypeError):
+            repository.update(locked_update, actor_id="editor")

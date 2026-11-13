@@ -313,3 +313,54 @@ def test_go_rule_issues_follow_catalog_issues_in_rule_order(
         (["annotation", "references", 0], "gorule_0000022"),
         (["annotation"], "gorule_0000053"),
     ]
+
+
+@pytest.mark.parametrize("missing", ["ontology", "rules"])
+def test_structural_issues_are_reported_without_loaded_reference_data(
+    integration_api_client: TestClient,
+    active_annotation_subjects: None,
+    session_factory: sessionmaker[Session],
+    missing: str,
+) -> None:
+    """Structural issues need no reference data, so they are reported, not a 503.
+
+    A patch that clears a required field gets `invalid_annotation`, and a
+    preview of a proposal whose patch removes a required field lists that
+    field's issue.
+    """
+    client = integration_api_client
+    created = _create(client, PAYLOAD)
+    proposal = client.post(
+        "/change-sets",
+        json={
+            "operation": "update",
+            "annotation_id": created.json()["annotation_id"],
+            "base_version": 1,
+            "patch": [{"op": "remove", "path": "/db_object_id"}],
+            "reason": "Review",
+        },
+    )
+    with session_factory.begin() as session:
+        if missing == "rules":
+            session.execute(update(RulesSnapshotRecord).values(active=False))
+        else:
+            session.execute(
+                update(OntologyMetadataRecord)
+                .where(OntologyMetadataRecord.ontology_key == "chebi")
+                .values(active=False)
+            )
+
+    patch = client.patch(
+        f"/annotations/{created.json()['annotation_id']}",
+        json={"relation": None},
+        headers={"If-Match": '"1"'},
+    )
+    preview = client.post(f"/change-sets/{proposal.json()['change_set_id']}/preview")
+
+    assert patch.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert patch.json()["error"]["code"] == "invalid_annotation"
+    assert patch.json()["error"]["details"][0]["location"] == ["annotation", "relation"]
+    assert preview.status_code == status.HTTP_200_OK
+    assert [issue["location"] for issue in preview.json()["validation_errors"]] == [
+        ["annotation", "db_object_id"]
+    ]

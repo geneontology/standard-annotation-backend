@@ -24,6 +24,10 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
     EntityFact,
 )
+from standard_annotation_backend.persistence.repositories.annotations import (
+    ValidatedCreate,
+    ValidatedUpdate,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh.sources import (
     RefreshSources,
@@ -122,7 +126,7 @@ def _current_record(
 
 
 @dataclass(frozen=True, slots=True)
-class FakePreparedWrite:
+class FakeLockedWrite:
     annotation: Annotation
     duplicate_peer_ids: tuple[UUID, ...] = ()
 
@@ -134,17 +138,17 @@ class FakeAnnotationRepository:
         self.current_record = current_record
         self.last_annotation: Annotation | None = None
 
-    def prepare_create(self, annotation: Annotation) -> FakePreparedWrite:
-        return FakePreparedWrite(annotation)
+    def lock_for_create(self, annotation: Annotation) -> FakeLockedWrite:
+        return FakeLockedWrite(annotation)
 
     def create(
         self,
-        prepared: FakePreparedWrite,
+        validated: ValidatedCreate,
         *,
         actor_id: str,
         owning_group_id: str,
     ) -> CurrentRecord:
-        annotation = prepared.annotation
+        annotation = cast(FakeLockedWrite, validated.locked).annotation
         self.last_annotation = annotation
         self.current_record = _current_record(
             annotation_data=annotation.model_dump(mode="json")
@@ -165,20 +169,20 @@ class FakeAnnotationRepository:
             return None
         return self.current_record
 
-    def prepare_update(
+    def lock_for_update(
         self,
         annotation_id: UUID,
         annotation: Annotation,
         *,
         expected_version: int,
-    ) -> FakePreparedWrite:
+    ) -> FakeLockedWrite:
         assert self.current_record is not None
         assert self.current_record.annotation_id == annotation_id
-        return FakePreparedWrite(annotation)
+        return FakeLockedWrite(annotation)
 
-    def update(self, prepared: FakePreparedWrite, *, actor_id: str) -> CurrentRecord:
+    def update(self, validated: ValidatedUpdate, *, actor_id: str) -> CurrentRecord:
         assert self.current_record is not None
-        annotation = prepared.annotation
+        annotation = cast(FakeLockedWrite, validated.locked).annotation
         self.last_annotation = annotation
         self.current_record.annotation_data = annotation.model_dump(mode="json")
         self.current_record.current_version += 1

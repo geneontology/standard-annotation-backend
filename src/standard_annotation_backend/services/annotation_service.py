@@ -14,7 +14,6 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationVersionNotFoundError,
     ChangeSource,
     EmptyAnnotationPatchError,
-    InvalidAnnotationPayloadError,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.domain.audit import AuditAction
@@ -28,20 +27,21 @@ from standard_annotation_backend.domain.ontology import (
     GO_ONTOLOGY_KEY,
     OntologyCatalog,
 )
-from standard_annotation_backend.domain.validation import validate_annotation
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
 )
 from standard_annotation_backend.persistence.repositories import AuditRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.annotation_validator import (
+    AnnotationValidator,
+)
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.resource_authorization import (
     load_authorized_annotation,
     ownership_scope,
 )
-from standard_annotation_backend.services.semantic_validator import SemanticValidator
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +105,7 @@ class AnnotationService:
         self, unit_of_work_factory: UnitOfWorkFactory, ontologies: OntologyCatalog
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
-        self._validator = SemanticValidator(ontologies)
+        self._validator = AnnotationValidator(ontologies)
 
     def create(
         self,
@@ -138,16 +138,10 @@ class AnnotationService:
             owning_group_id,
             action=PermissionAction.ANNOTATION_CREATE,
         )
-        annotation = _validated_annotation(payload)
         with self._unit_of_work_factory() as unit_of_work:
-            prepared = unit_of_work.annotations.prepare_create(annotation)
-            issues = self._validator.issues(
-                unit_of_work, annotation, prepared.duplicate_peer_ids
-            )
-            if issues:
-                raise InvalidAnnotationPayloadError(issues)
+            validated = self._validator.prepare_create(unit_of_work, payload)
             record = unit_of_work.annotations.create(
-                prepared,
+                validated,
                 actor_id=context.actor_id,
                 owning_group_id=group,
             )
@@ -239,17 +233,14 @@ class AnnotationService:
 
             merged = current.annotation_data.copy()
             merged.update(changes)
-            annotation = _validated_annotation(merged)
-            prepared = unit_of_work.annotations.prepare_update(
-                annotation_id, annotation, expected_version=expected_version
+            validated = self._validator.prepare_update(
+                unit_of_work,
+                annotation_id,
+                merged,
+                expected_version=expected_version,
             )
-            issues = self._validator.issues(
-                unit_of_work, annotation, prepared.duplicate_peer_ids
-            )
-            if issues:
-                raise InvalidAnnotationPayloadError(issues)
             updated = unit_of_work.annotations.update(
-                prepared, actor_id=context.actor_id
+                validated, actor_id=context.actor_id
             )
             result = _current_annotation(updated)
             _record_annotation_audit(
@@ -445,14 +436,6 @@ def _record_annotation_audit(
         annotation_id=annotation.annotation_id,
         annotation_version=annotation.version,
     )
-
-
-def _validated_annotation(payload: object) -> Annotation:
-    validation = validate_annotation(payload)
-    if validation.errors:
-        raise InvalidAnnotationPayloadError(validation.errors)
-    assert validation.annotation is not None
-    return validation.annotation
 
 
 def _current_annotation(record: AnnotationRecord) -> CurrentAnnotation:

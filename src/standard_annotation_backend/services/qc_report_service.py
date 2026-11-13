@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
 
-from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
     AuthorizationContext,
@@ -26,7 +25,6 @@ from standard_annotation_backend.domain.auth import (
     PermissionDeniedError,
     authorize_role,
 )
-from standard_annotation_backend.domain.duplicate_policy import duplicate_key
 from standard_annotation_backend.domain.jobs import (
     TERMINAL_JOB_STATUSES,
     JobNotFoundError,
@@ -52,12 +50,8 @@ from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_V
 from standard_annotation_backend.domain.semantic_validation.facts import (
     ReferenceDataUnavailableError,
 )
-from standard_annotation_backend.domain.semantic_validation.rules import (
-    validate_semantics,
-)
 from standard_annotation_backend.domain.validation import (
     ValidationIssue,
-    validate_annotation,
 )
 from standard_annotation_backend.persistence.locks import AdvisoryTryLock, LockNamespace
 from standard_annotation_backend.persistence.models import (
@@ -67,6 +61,10 @@ from standard_annotation_backend.persistence.models import (
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
+)
+from standard_annotation_backend.services.annotation_validator import (
+    AnnotationValidator,
+    Candidate,
 )
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import (
@@ -154,6 +152,7 @@ class QcReportRunner:
         self._try_lock = try_lock
         self._jobs = JobService(unit_of_work_factory)
         self._ontologies = ontologies
+        self._validator = AnnotationValidator(ontologies)
 
     def run(self, job_id: UUID) -> None:
         """Run one QC report to completion or failure.
@@ -242,32 +241,19 @@ class QcReportRunner:
                 creators = unit_of_work.annotations.creators(
                     [record.annotation_id for record in records]
                 )
-                issues_by_id: dict[UUID, tuple[ValidationIssue, ...]] = {}
-                valid: list[tuple[UUID, Annotation]] = []
-                for record in records:
-                    validation = validate_annotation(record.annotation_data)
-                    if validation.annotation is None:
-                        issues_by_id[record.annotation_id] = validation.errors
-                    else:
-                        valid.append((record.annotation_id, validation.annotation))
-                peers = unit_of_work.annotations.duplicate_peers_for(
-                    {
-                        annotation_id: duplicate_key(annotation)
-                        for annotation_id, annotation in valid
-                    }
-                )
-                facts = unit_of_work.validation_facts.gather(
-                    [annotation for _, annotation in valid],
-                    [peers[annotation_id] for annotation_id, _ in valid],
-                    self._ontologies,
+                issues = self._validator.check(
+                    unit_of_work,
+                    [
+                        Candidate(record.annotation_data, record.annotation_id)
+                        for record in records
+                    ],
                     snapshots=snapshots,
                 )
-                for (annotation_id, annotation), annotation_facts in zip(
-                    valid, facts, strict=True
-                ):
-                    issues = validate_semantics(annotation, annotation_facts)
-                    if issues:
-                        issues_by_id[annotation_id] = issues
+                issues_by_id = {
+                    record.annotation_id: found
+                    for record, found in zip(records, issues, strict=True)
+                    if found
+                }
                 findings = [
                     QcFinding(
                         annotation_id=record.annotation_id,

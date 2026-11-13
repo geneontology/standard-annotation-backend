@@ -5,6 +5,9 @@ take no locks and enforce no entity-catalog, duplicate, or authorization checks.
 Use them only in tests whose subject is something else and that need a starting
 state, such as an imported annotation or a legacy duplicate peer, that the public
 write paths would refuse to create.
+
+`unvalidated_create` and `unvalidated_update` are the exception: they take the
+write locks, but skip validation, for tests that write through the repository.
 """
 
 from collections.abc import Iterable
@@ -50,6 +53,11 @@ from standard_annotation_backend.persistence.models import (
     RetractedPublicationRecord,
     RulesSnapshotRecord,
 )
+from standard_annotation_backend.persistence.repositories import AnnotationRepository
+from standard_annotation_backend.persistence.repositories.annotations import (
+    ValidatedCreate,
+    ValidatedUpdate,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh.sources import (
     RefreshSources,
@@ -67,6 +75,8 @@ __all__ = [
     "insert_annotation",
     "seed_reference_data",
     "set_rule_data",
+    "unvalidated_create",
+    "unvalidated_update",
 ]
 
 
@@ -462,3 +472,33 @@ def set_rule_data(
             RetractedPublicationRecord(snapshot_id=snapshot.snapshot_id, pmid=pmid)
             for pmid in pmids
         )
+
+
+def unvalidated_create(
+    repository: AnnotationRepository, annotation: Annotation
+) -> ValidatedCreate:
+    """Lock a new annotation for `create` without validating it.
+
+    Use it only where validation is not the subject and would refuse the
+    starting state, for example a duplicate or a test without reference data.
+    """
+    return ValidatedCreate(repository.lock_for_create(annotation))
+
+
+def unvalidated_update(
+    repository: AnnotationRepository,
+    annotation_id: UUID,
+    annotation: Annotation,
+    *,
+    expected_version: int,
+) -> ValidatedUpdate:
+    """Lock an annotation and its replacement for `update` without validating it.
+
+    Raises the same not-found, deleted, and stale-version errors as
+    `AnnotationRepository.lock_for_update`.
+    """
+    return ValidatedUpdate(
+        repository.lock_for_update(
+            annotation_id, annotation, expected_version=expected_version
+        )
+    )

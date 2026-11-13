@@ -14,6 +14,7 @@ from refresh_helpers import (
     start_job,
 )
 from seeding import create_job as queue_job
+from seeding import unvalidated_create, unvalidated_update
 from sqlalchemy import ColumnElement, Engine, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -338,13 +339,14 @@ def _apply_local_change(
     with unit_of_work_factory() as uow:
         if change == "direct_create":
             uow.annotations.create(
-                uow.annotations.prepare_create(_annotation("UniProtKB:Q99999")),
+                unvalidated_create(uow.annotations, _annotation("UniProtKB:Q99999")),
                 actor_id="curator",
                 owning_group_id=GROUP,
             )
         elif change == "edit":
             uow.annotations.update(
-                uow.annotations.prepare_update(
+                unvalidated_update(
+                    uow.annotations,
                     imported,
                     _annotation("UniProtKB:Q99999"),
                     expected_version=1,
@@ -427,7 +429,8 @@ def test_term_replacement_versions_do_not_force_a_reimport(
     [imported] = annotations_of(session_factory)
     with unit_of_work_factory() as uow:
         uow.annotations.update(
-            uow.annotations.prepare_update(
+            unvalidated_update(
+                uow.annotations,
                 imported.annotation_id,
                 _annotation("UniProtKB:P12345").model_copy(
                     update={"ontology_class_id": "GO:0003674"}
@@ -506,7 +509,8 @@ def test_refresh_replaces_only_the_target_groups_annotations_and_history(
     soft_deleted = seed_annotation("UniProtKB:Q99999")
     with unit_of_work_factory() as uow:
         uow.annotations.update(
-            uow.annotations.prepare_update(
+            unvalidated_update(
+                uow.annotations,
                 edited,
                 _annotation("UniProtKB:Q99999"),
                 expected_version=1,

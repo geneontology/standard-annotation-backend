@@ -147,11 +147,15 @@ never semantically checked. Both stages report through one error, `invalid_annot
 [annotation validation guide](docs/annotation-validation.md) describes the checks, issue
 types, and errors.
 
-Facts are gathered by a repository and every check is a pure domain function, so the
-same checks serve direct writes, change-set preview, and change-set acceptance. Checks
-use the reference data active when they run; nothing holds it active until the write
-commits, so a refresh can give stored annotations issues at any time. SABE does not
-store structurally invalid annotations; draft or quarantine storage for invalid
+One service, the annotation validator, runs both stages for every caller: direct
+writes, change-set preview and acceptance, term replacement, and QC reports. Facts are
+gathered by a repository and every check is a pure domain function. A write must lock
+the annotation, have the validator check it while the locks are held, and pass the
+validator's result to the repository, which refuses to write anything else. Previews
+and QC reports use the same checks without locks, so their answers are advisory.
+Checks use the reference data active when they run; nothing holds it active until the
+write commits, so a refresh can give stored annotations issues at any time. SABE does
+not store structurally invalid annotations; draft or quarantine storage for invalid
 annotations is not part of the design.
 
 ## Data Store and Versioning
