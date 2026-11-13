@@ -1,83 +1,63 @@
-"""Verify the QC report issue catalog, findings, and stored results.
-
-Each GO Rule's tests in `tests/unit/gorules` also verify that the catalog lists the
-rule's issue type.
-"""
+"""Verify the QC report issue catalog, issue classification, and stored results."""
 
 from uuid import UUID
 
 import pytest
 
 from standard_annotation_backend.domain.qc_reports import (
+    ISSUE_TYPES,
     STORED_QC_REPORT_RESULT,
     EntityCatalogUse,
-    IssueType,
     OntologySnapshotUse,
-    QcFinding,
     QcReportResult,
     ReferenceDataVersions,
-    issue_type_link,
-    issue_type_of,
-    issue_type_title,
+    issue_types_of,
+)
+from standard_annotation_backend.domain.semantic_validation.rules import RULES
+from standard_annotation_backend.domain.validation import (
+    ValidationIssue,
+    ValidationStage,
 )
 
 
-@pytest.mark.parametrize("issue_type", list(IssueType))
-def test_every_issue_type_has_a_title(issue_type: IssueType) -> None:
-    """Each issue type has a stable, non-blank title."""
-    assert issue_type_title(issue_type).strip()
+def _issue(issue_type: str) -> ValidationIssue:
+    return ValidationIssue(location=("annotation",), message="x", type=issue_type)
 
 
-def test_go_rules_link_to_their_rule_and_other_types_do_not() -> None:
-    """A GO Rule links to its go-site page; catalog issue types have no link."""
-    assert issue_type_link(IssueType.GORULE_0000002) == (
-        "https://github.com/geneontology/go-site/blob/master/metadata/rules/"
-        "gorule-0000002.md"
-    )
-    assert issue_type_link(IssueType.UNKNOWN_TERM) is None
+def test_the_catalog_lists_structural_then_every_rule_in_order() -> None:
+    """Reports count structural issues and each rule's type, in rule order."""
+    assert [entry.issue_type for entry in ISSUE_TYPES] == [
+        "structural",
+        *(rule.issue_type for rule in RULES),
+    ]
+    assert all(entry.title.strip() for entry in ISSUE_TYPES)
 
 
-def test_structural_issues_share_one_issue_type() -> None:
-    """A Pydantic issue type is reported as `structural`; semantic types keep theirs."""
-    assert (
-        issue_type_of({"location": ("annotation",), "message": "x", "type": "missing"})
-        is IssueType.STRUCTURAL
-    )
-    assert (
-        issue_type_of(
-            {"location": ("annotation",), "message": "x", "type": "unknown_entity"}
-        )
-        is IssueType.UNKNOWN_ENTITY
-    )
+def test_structural_issues_count_once_as_structural() -> None:
+    """Every issue of a structural failure counts as `structural`, once."""
+    issues = [_issue("missing"), _issue("string_type"), _issue("missing")]
+
+    assert issue_types_of(ValidationStage.STRUCTURAL, issues) == ("structural",)
 
 
-def test_a_finding_lists_each_issue_type_once() -> None:
-    """Repeated issue types on one annotation appear once, in catalog order."""
-    finding = QcFinding(
-        annotation_id=UUID(int=1),
-        annotation_version=2,
-        owning_group_id="MGI",
-        created_by="curator",
-        issues=(
-            {
-                "location": ("annotation", "references", 0),
-                "message": "x",
-                "type": "gorule_0000055",
-            },
-            {
-                "location": ("annotation", "db_object_id"),
-                "message": "x",
-                "type": "unknown_entity",
-            },
-            {
-                "location": ("annotation", "references", 1),
-                "message": "x",
-                "type": "gorule_0000055",
-            },
-        ),
+def test_semantic_types_count_once_each_in_catalog_order() -> None:
+    """Repeated semantic types appear once, in catalog order."""
+    issues = [
+        _issue("gorule_0000055"),
+        _issue("unknown_entity"),
+        _issue("gorule_0000055"),
+    ]
+
+    assert issue_types_of(ValidationStage.SEMANTIC, issues) == (
+        "unknown_entity",
+        "gorule_0000055",
     )
 
-    assert finding.issue_types == (IssueType.UNKNOWN_ENTITY, IssueType.GORULE_0000055)
+
+def test_an_unregistered_semantic_type_is_an_error() -> None:
+    """A semantic issue type missing from the catalog is never counted silently."""
+    with pytest.raises(ValueError, match="missing"):
+        issue_types_of(ValidationStage.SEMANTIC, [_issue("missing")])
 
 
 def test_the_stored_result_round_trips() -> None:

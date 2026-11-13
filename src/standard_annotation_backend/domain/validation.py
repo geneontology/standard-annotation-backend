@@ -2,11 +2,15 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import NotRequired, TypedDict
 
 from pydantic import ValidationError
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.semantic_validation.details import (
+    IssueDetails,
+)
 
 
 class ValidationIssue(TypedDict):
@@ -22,14 +26,29 @@ class ValidationIssue(TypedDict):
         message: Human-readable explanation of the failure.
         type: Stable identifier for the kind of failure: Pydantic's for
             structural issues, or a semantic issue type such as `unknown_term`.
-        details: JSON-compatible facts about the failure, such as an obsolete
-            term's suggested replacements. Absent when there are none.
+        details: Facts that help fix the failure, such as an obsolete term's
+            suggested replacements, in one of the shapes in
+            `semantic_validation.details`. Absent when there are none.
     """
 
     location: tuple[str | int, ...]
     message: str
     type: str
-    details: NotRequired[dict[str, object]]
+    details: NotRequired[IssueDetails]
+
+
+class ValidationStage(StrEnum):
+    """Name the stage of validation that produced an annotation's issues.
+
+    Structural validation checks the annotation against the Standard Annotation
+    schema. Semantic validation checks a structurally valid annotation against
+    reference data, other annotations, and GO Rules. An annotation that fails the
+    structural stage is not checked semantically, so its issues all come from one
+    stage.
+    """
+
+    STRUCTURAL = "structural"
+    SEMANTIC = "semantic"
 
 
 @dataclass(frozen=True, slots=True)

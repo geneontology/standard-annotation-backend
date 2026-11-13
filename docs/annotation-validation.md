@@ -66,7 +66,7 @@ SABE reads the GO Rules as follows:
 | Rule | An issue when |
 |---|---|
 | 02 | `negation` is true and the term is directly `GO:0005488` or `GO:0005515`. |
-| 05 | The term is directly `GO:0005488` or `GO:0005515` and the evidence is IEA, ISS, ISO, ISM, ISA, or IBA. This follows the rule body; the title also lists RCA, and that question is raised upstream. |
+| 05 | The term is directly `GO:0005488` or `GO:0005515` and the evidence is IEA, ISS, ISO, ISM, ISA, IBA, or RCA. |
 | 06 | The evidence is IEP or HEP and the term is not under the BP root. |
 | 07 | The evidence is IPI and the term is under `GO:0003824`. |
 | 08 | The term is in subset `gocheck_do_not_annotate`. |
@@ -211,14 +211,19 @@ ran. Each issue has a `location`, a `type`, a `message`, and sometimes `details`
 |---|---|---|
 | `unknown_entity` | `("annotation", "db_object_id")` | — |
 | `unknown_term` | the identifier | — |
-| `obsolete_term` | the identifier | `replaced_by`, `consider` |
-| `alternate_term_id` | the identifier | `primary_id` |
-| `duplicate_annotation` | `("annotation",)` | `peer_ids` |
-| `gorule_NNNNNNN` (the seven-digit rule number) | the identifier the rule is about, or `("annotation",)` | only GORULE:0000030 for an alternative GO_REF (`primary_id`) and GORULE:0000061 (`allowed_relations`) |
+| `obsolete_term` | the identifier | `ObsoleteTermDetails`: `replaced_by`, `consider` |
+| `alternate_term_id` | the identifier | `PrimaryIdDetails`: `primary_id` |
+| `duplicate_annotation` | `("annotation",)` | `DuplicatePeersDetails`: `peer_ids` |
+| `gorule_NNNNNNN` (the seven-digit rule number) | the identifier the rule is about, or `("annotation",)` | only GORULE:0000030 for an alternative GO_REF (`PrimaryIdDetails`) and GORULE:0000061 (`AllowedRelationsDetails`: `allowed_relations`) |
 
-Issues are listed in a stable order: the entity check; the term checks for
-`ontology_class_id`, extension terms, `with_or_from`, and interacting taxa, in that
-order; the duplicate check; then GO Rules by number.
+Issues are listed in a stable order: the entity check; unknown terms, then obsolete
+terms, then alternative IDs, each in field order (`ontology_class_id`, extension
+terms, `with_or_from`, interacting taxa); the duplicate check; then GO Rules by
+number.
+
+The OpenAPI document publishes each details shape as a named schema, and the
+`issue_type` parameter of the QC report findings route lists every issue type with
+its title, GO Rule link, and details shape.
 
 Structural issue types are Pydantic's.
 

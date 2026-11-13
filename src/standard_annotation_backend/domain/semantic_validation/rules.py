@@ -1,18 +1,35 @@
-"""Check an annotation against the facts read about it.
+"""Register every semantic rule and run them against an annotation's facts.
 
-Each check takes an annotation and its facts and returns the issues it finds,
-without reading anything else. `validate_semantics` runs every check in a fixed
-order, so the same annotation and facts always give the same issues in the same
-order. The entity, term, and duplicate checks come first, then the GO Rules in
-rule-number order.
+A rule pairs one issue type with the check that reports it. Each check takes an
+annotation and its facts and returns the issues it finds, without reading anything
+else. `RULES` lists every rule once, in the order its issues are reported: the
+entity check, the term checks (unknown, obsolete, then alternative identifiers), the
+duplicate check, then the GO Rules in rule-number order. The same annotation and
+facts therefore always give the same issues in the same order.
+
+The QC report issue catalog and the API's list of issue types are built from
+`RULES`, so a rule's issue type, title, and details shape are declared only here.
 """
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.semantic_validation.checks import (
+    check_alternate_term_ids,
+    check_duplicates,
+    check_entity,
+    check_obsolete_terms,
+    check_unknown_terms,
+)
+from standard_annotation_backend.domain.semantic_validation.details import (
+    AllowedRelationsDetails,
+    DuplicatePeersDetails,
+    ObsoleteTermDetails,
+    PrimaryIdDetails,
+)
 from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
-    TermStatus,
 )
 from standard_annotation_backend.domain.semantic_validation.gorules.metadata import (
     gorule_0000027,
@@ -46,133 +63,172 @@ from standard_annotation_backend.domain.semantic_validation.gorules.terms import
     gorule_0000061,
     gorule_0000065,
 )
-from standard_annotation_backend.domain.semantic_validation.identifiers import (
-    term_identifiers,
-)
-from standard_annotation_backend.domain.validation import (
-    ANNOTATION_ROOT,
-    ValidationIssue,
-)
+from standard_annotation_backend.domain.validation import ValidationIssue
 
 type SemanticCheck = Callable[[Annotation, AnnotationFacts], Iterable[ValidationIssue]]
 """A function that returns the issues it finds in an annotation, given its facts."""
 
-
-def check_entity(
-    annotation: Annotation, facts: AnnotationFacts
-) -> Iterator[ValidationIssue]:
-    """Report a `db_object_id` that no entity catalog lists as active."""
-    if facts.entity is None:
-        yield ValidationIssue(
-            location=(ANNOTATION_ROOT, "db_object_id"),
-            message="db_object_id is not an active entity in any entity catalog",
-            type="unknown_entity",
-        )
-
-
-def check_terms(
-    annotation: Annotation, facts: AnnotationFacts
-) -> Iterator[ValidationIssue]:
-    """Report each identifier that is not a current term of the ontology owning it.
-
-    Identifiers whose prefix no configured ontology owns have no fact and are not
-    checked.
-    """
-    for occurrence in term_identifiers(annotation):
-        fact = facts.terms.get(occurrence.identifier)
-        if fact is None or fact.status is TermStatus.CURRENT:
-            continue
-        if fact.status is TermStatus.OBSOLETE:
-            yield ValidationIssue(
-                location=occurrence.location,
-                message="Term is obsolete",
-                type="obsolete_term",
-                details={
-                    "replaced_by": list(fact.replaced_by),
-                    "consider": list(fact.consider),
-                },
-            )
-        elif fact.status is TermStatus.ALTERNATE:
-            yield ValidationIssue(
-                location=occurrence.location,
-                message="Identifier is an alternative ID; use its primary term",
-                type="alternate_term_id",
-                details={"primary_id": fact.primary_id},
-            )
-        else:
-            yield ValidationIssue(
-                location=occurrence.location,
-                message="Identifier is not a term of the ontology that owns its prefix",
-                type="unknown_term",
-            )
-
-
-def check_duplicates(
-    annotation: Annotation, facts: AnnotationFacts
-) -> Iterator[ValidationIssue]:
-    """Report the other active annotations that duplicate this one.
-
-    The rules in `duplicate_policy` decide which annotations are duplicates. The
-    issue lists every one of them, including annotations that already duplicated
-    this one before the current write, so updating one of two existing duplicates
-    is reported too.
-    """
-    if facts.duplicate_peer_ids:
-        yield ValidationIssue(
-            location=(ANNOTATION_ROOT,),
-            message="Annotation duplicates other active annotations",
-            type="duplicate_annotation",
-            details={"peer_ids": [str(peer) for peer in facts.duplicate_peer_ids]},
-        )
-
-
-GO_RULES: tuple[SemanticCheck, ...] = (
-    gorule_0000002,
-    gorule_0000005,
-    gorule_0000006,
-    gorule_0000007,
-    gorule_0000008,
-    gorule_0000011,
-    gorule_0000015,
-    gorule_0000016,
-    gorule_0000017,
-    gorule_0000018,
-    gorule_0000022,
-    gorule_0000027,
-    gorule_0000030,
-    gorule_0000033,
-    gorule_0000037,
-    gorule_0000039,
-    gorule_0000042,
-    gorule_0000043,
-    gorule_0000046,
-    gorule_0000050,
-    gorule_0000053,
-    gorule_0000055,
-    gorule_0000058,
-    gorule_0000061,
-    gorule_0000063,
-    gorule_0000065,
+_GO_RULE_URL = (
+    "https://github.com/geneontology/go-site/blob/master/metadata/rules/"
+    "gorule-{number:07d}.md"
 )
-"""Every write-blocking GO Rule, in rule-number order.
 
-A write-blocking rule is one SABE can check using only one annotation and the
-reference data, so SABE rejects any write that breaks it.
-"""
 
-SEMANTIC_CHECKS: tuple[SemanticCheck, ...] = (
-    check_entity,
-    check_terms,
-    check_duplicates,
-    *GO_RULES,
+@dataclass(frozen=True, slots=True)
+class Rule:
+    """Declare one issue type and the check that reports it.
+
+    Attributes:
+        issue_type: The stable name of the issue type, such as `obsolete_term`.
+        title: A stable, human-readable title. A GO Rule's title states what
+            SABE checks; the go-site page at `link` has the rule's full text.
+        check: Returns the rule's issues. Every issue has `issue_type` as its type.
+        details: The `TypedDict` from `semantic_validation.details` that the
+            issues' `details` follow, or `None` when they never have details. A
+            rule may send details for only some of its issues.
+        blocks_writes: Whether an annotation with this issue cannot be written.
+            A rule that does not block writes runs only in QC reports.
+        link: The go-site page of a GO Rule; `None` for other rules.
+    """
+
+    issue_type: str
+    title: str
+    check: SemanticCheck
+    details: type | None = None
+    blocks_writes: bool = True
+    link: str | None = None
+
+
+def _go_rule(
+    number: int, title: str, check: SemanticCheck, details: type | None = None
+) -> Rule:
+    """Return the rule for a GO Rule, named and linked by its number."""
+    return Rule(
+        issue_type=f"gorule_{number:07d}",
+        title=title,
+        check=check,
+        details=details,
+        link=_GO_RULE_URL.format(number=number),
+    )
+
+
+RULES: tuple[Rule, ...] = (
+    Rule("unknown_entity", "Subject is not an active entity", check_entity),
+    Rule(
+        "unknown_term", "Identifier is not a term of its ontology", check_unknown_terms
+    ),
+    Rule(
+        "obsolete_term", "Term is obsolete", check_obsolete_terms, ObsoleteTermDetails
+    ),
+    Rule(
+        "alternate_term_id",
+        "Identifier is an alternative ID",
+        check_alternate_term_ids,
+        PrimaryIdDetails,
+    ),
+    Rule(
+        "duplicate_annotation",
+        "Annotation duplicates other annotations",
+        check_duplicates,
+        DuplicatePeersDetails,
+    ),
+    _go_rule(
+        2,
+        "No NOT annotations to GO:0005488 binding or GO:0005515 protein binding",
+        gorule_0000002,
+    ),
+    _go_rule(
+        5,
+        "IEA, ISS, ISO, ISM, ISA, IBA, RCA not allowed for direct binding or "
+        "protein binding",
+        gorule_0000005,
+    ),
+    _go_rule(6, "IEP and HEP only for Biological Process terms", gorule_0000006),
+    _go_rule(
+        7,
+        "IPI not allowed for GO:0003824 catalytic activity or descendants",
+        gorule_0000007,
+    ),
+    _go_rule(8, "No annotations to uninformative high-level terms", gorule_0000008),
+    _go_rule(11, "ND only on root terms, and root terms only with ND", gorule_0000011),
+    _go_rule(
+        15,
+        "Interacting taxa only on multi-organism terms, never the entity's own taxon",
+        gorule_0000015,
+    ),
+    _go_rule(16, "IC annotations require a With/From GO ID", gorule_0000016),
+    _go_rule(17, "IDA annotations must not have a With/From entry", gorule_0000017),
+    _go_rule(18, "IPI annotations require a With/From entry", gorule_0000018),
+    _go_rule(22, "No references to retracted publications", gorule_0000022),
+    _go_rule(
+        27, "Identifiers and assigned_by must match go-site metadata", gorule_0000027
+    ),
+    _go_rule(30, "Only valid GO_REFs are allowed", gorule_0000030, PrimaryIdDetails),
+    _go_rule(33, "Only public reference IDs (PMID, DOI, GO_REF)", gorule_0000033),
+    _go_rule(37, "IBA only assigned_by GO_Central with GO_REF:0000033", gorule_0000037),
+    _go_rule(
+        39,
+        "Protein complexes cannot be annotated to GO:0032991 or descendants",
+        gorule_0000039,
+    ),
+    _go_rule(42, "IKR evidence requires a NOT qualifier", gorule_0000042),
+    _go_rule(
+        43,
+        "Evidence, references, and with/from must follow evidence usage constraints",
+        gorule_0000043,
+    ),
+    _go_rule(
+        46,
+        "With/from must equal the gene product for self-binding terms",
+        gorule_0000046,
+    ),
+    _go_rule(50, "ISS, ISA, ISO must not be self-referential", gorule_0000050),
+    _go_rule(53, "NOT annotations must not have extensions", gorule_0000053),
+    _go_rule(55, "References must have only one ID per ID space", gorule_0000055),
+    _go_rule(58, "Extensions conform to extensions-constraints.yaml", gorule_0000058),
+    _go_rule(
+        61,
+        "Relation must be allowed for the term's branch",
+        gorule_0000061,
+        AllowedRelationsDetails,
+    ),
+    _go_rule(
+        63, "ISS/ISA/ISO evidence requires a with/from gene product", gorule_0000063
+    ),
+    _go_rule(65, "No annotations to obsoletion candidate terms", gorule_0000065),
 )
-"""Every semantic check, in the order its issues are reported."""
+"""Every semantic rule, in the order its issues are reported."""
 
 
 def validate_semantics(
-    annotation: Annotation, facts: AnnotationFacts
+    annotation: Annotation,
+    facts: AnnotationFacts,
+    *,
+    include_report_only: bool = False,
 ) -> tuple[ValidationIssue, ...]:
-    """Run every semantic check and return all of their issues in order."""
-    return tuple(
-        issue for check in SEMANTIC_CHECKS for issue in check(annotation, facts)
-    )
+    """Run the rules in `RULES` order and return all of their issues.
+
+    Args:
+        annotation: A structurally valid annotation.
+        facts: The facts gathered about it.
+        include_report_only: Also run rules that do not block writes. QC reports
+            set this; writes and change-set previews do not.
+
+    Returns:
+        Every issue, in `RULES` order.
+
+    Raises:
+        ValueError: If a check reports an issue type other than its rule's. This
+            is a programming error, not an invalid annotation.
+    """
+    issues: list[ValidationIssue] = []
+    for rule in RULES:
+        if not (rule.blocks_writes or include_report_only):
+            continue
+        for issue in rule.check(annotation, facts):
+            if issue["type"] != rule.issue_type:
+                raise ValueError(
+                    f"Rule {rule.issue_type} reported an issue of type {issue['type']}"
+                )
+            issues.append(issue)
+    return tuple(issues)

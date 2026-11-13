@@ -6,8 +6,9 @@ its rule examines, so a failing assertion points at that rule.
 
 from collections.abc import Iterable, Mapping
 
+from pydantic import TypeAdapter
+
 from standard_annotation_backend.domain.annotations import Annotation
-from standard_annotation_backend.domain.qc_reports import issue_type_of
 from standard_annotation_backend.domain.schema_artifacts import load_evidence_codes
 from standard_annotation_backend.domain.semantic_validation.checked_ancestors import (
     BP_ROOT,
@@ -23,6 +24,7 @@ from standard_annotation_backend.domain.semantic_validation.rule_data import (
     RuleData,
 )
 from standard_annotation_backend.domain.semantic_validation.rules import (
+    RULES,
     SemanticCheck,
     validate_semantics,
 )
@@ -89,20 +91,28 @@ def facts(
 
 
 def go_rule(issue_type: str) -> SemanticCheck:
-    """Return a check that reports one GO Rule's issues from full validation.
+    """Return a check that reports one rule's issues from full validation.
 
     The check runs `validate_semantics`, the validation that annotation writes and
-    QC reports use, and keeps the issues a QC report counts under `issue_type`. A
-    rule's tests therefore pass only if the validator runs the rule and the QC
-    report issue catalog lists the rule's issue type.
+    QC reports use, and keeps the issues of `issue_type`. A rule's tests therefore
+    pass only if the rule is registered and the validator runs it. Details, when
+    an issue has them, must have exactly the fields of the shape the rule
+    declares; a rule that declares no shape never sends details.
     """
+    (rule,) = [rule for rule in RULES if rule.issue_type == issue_type]
 
     def check(subject: Annotation, facts: AnnotationFacts) -> list[ValidationIssue]:
-        return [
+        issues = [
             issue
-            for issue in validate_semantics(subject, facts)
-            if issue_type_of(issue) == issue_type
+            for issue in validate_semantics(subject, facts, include_report_only=True)
+            if issue["type"] == issue_type
         ]
+        for issue in issues:
+            if "details" in issue:
+                assert rule.details is not None
+                details = TypeAdapter(rule.details).validate_python(issue["details"])
+                assert details == issue["details"]
+        return issues
 
     return check
 

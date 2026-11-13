@@ -11,7 +11,6 @@ from test_qc_report_repository import _finding
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.jobs import JobStatus
-from standard_annotation_backend.domain.qc_reports import IssueType
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     bind_try_lock,
@@ -141,7 +140,7 @@ def test_only_annotations_with_issues_get_findings_and_counts_cover_all(
             job.job_id,
             owning_group_id=None,
             created_by=None,
-            issue_type=IssueType.DUPLICATE_ANNOTATION,
+            issue_type="duplicate_annotation",
             limit=10,
             offset=0,
         ).items
@@ -205,7 +204,7 @@ def test_a_structurally_invalid_stored_annotation_is_a_structural_finding(
             job.job_id,
             owning_group_id=None,
             created_by=None,
-            issue_type=IssueType.STRUCTURAL,
+            issue_type="structural",
             limit=10,
             offset=0,
         ).items

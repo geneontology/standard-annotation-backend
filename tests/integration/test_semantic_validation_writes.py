@@ -75,13 +75,13 @@ def test_every_semantic_issue_is_returned_in_one_invalid_annotation_error(
     assert error["code"] == "invalid_annotation"
     assert [(issue["location"], issue["type"]) for issue in error["details"]] == [
         (["annotation", "db_object_id"], "unknown_entity"),
-        (["annotation", "ontology_class_id"], "obsolete_term"),
         (
             ["annotation", "annotation_extensions", 0, "extension_term"],
             "unknown_term",
         ),
+        (["annotation", "ontology_class_id"], "obsolete_term"),
     ]
-    assert error["details"][1]["details"] == {
+    assert error["details"][2]["details"] == {
         "replaced_by": ["GO:0008150"],
         "consider": [],
     }

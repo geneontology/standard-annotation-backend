@@ -18,6 +18,7 @@ from standard_annotation_backend.domain.semantic_validation.rules import (
 )
 from standard_annotation_backend.domain.validation import (
     ValidationIssue,
+    ValidationStage,
     validate_annotation,
 )
 from standard_annotation_backend.persistence.repositories.annotations import (
@@ -42,6 +43,21 @@ class Candidate:
 
     payload: object
     annotation_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CheckedCandidate:
+    """The result of checking one candidate.
+
+    Attributes:
+        stage: The stage that produced the issues. A candidate that fails the
+            structural check has only structural issues.
+        issues: Every issue, in the order the checks report them; empty when the
+            candidate passed every check.
+    """
+
+    stage: ValidationStage
+    issues: tuple[ValidationIssue, ...]
 
 
 class AnnotationValidator:
@@ -136,7 +152,8 @@ class AnnotationValidator:
         candidates: Sequence[Candidate],
         *,
         snapshots: ActiveSnapshots | None = None,
-    ) -> tuple[tuple[ValidationIssue, ...], ...]:
+        include_report_only: bool = False,
+    ) -> tuple[CheckedCandidate, ...]:
         """Return every issue of each candidate, in candidate order.
 
         Duplicate peers and facts are read in batches, so one call can check one
@@ -149,22 +166,27 @@ class AnnotationValidator:
             snapshots: Active snapshots the caller already looked up, for example
                 a QC report that records which ones it used. Looked up here when
                 omitted.
+            include_report_only: Also run rules that do not block writes, as QC
+                reports do.
 
         Returns:
-            For each candidate, its issues; an empty tuple means none.
+            For each candidate, in order, the stage that produced its issues and
+            the issues; no issues means the candidate passed every check.
 
         Raises:
             ReferenceDataUnavailableError: If a configured ontology or the go-site
                 rule data has never been loaded, so it has no active snapshot.
         """
-        results: list[tuple[ValidationIssue, ...]] = []
+        results: list[CheckedCandidate] = []
         valid: list[tuple[int, Annotation, UUID | None]] = []
         for index, candidate in enumerate(candidates):
             validation = validate_annotation(candidate.payload)
             if validation.annotation is None:
-                results.append(validation.errors)
+                results.append(
+                    CheckedCandidate(ValidationStage.STRUCTURAL, validation.errors)
+                )
             else:
-                results.append(())
+                results.append(CheckedCandidate(ValidationStage.SEMANTIC, ()))
                 valid.append((index, validation.annotation, candidate.annotation_id))
         if not valid:
             return tuple(results)
@@ -181,7 +203,14 @@ class AnnotationValidator:
             snapshots=snapshots,
         )
         for (index, annotation, _), annotation_facts in zip(valid, facts, strict=True):
-            results[index] = validate_semantics(annotation, annotation_facts)
+            results[index] = CheckedCandidate(
+                ValidationStage.SEMANTIC,
+                validate_semantics(
+                    annotation,
+                    annotation_facts,
+                    include_report_only=include_report_only,
+                ),
+            )
         return tuple(results)
 
     def _require_no_semantic_issues(

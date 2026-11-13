@@ -91,7 +91,9 @@ def _duplicate_peer_ids(error: InvalidChangeSetError) -> object:
     """Return the peer IDs of an acceptance error's only issue, a duplicate."""
     (issue,) = error.errors
     assert issue["type"] == "duplicate_annotation"
-    return issue.get("details", {})["peer_ids"]
+    details = issue.get("details")
+    assert details is not None and "peer_ids" in details
+    return details["peer_ids"]
 
 
 def _prepare_session(session: Session) -> int:

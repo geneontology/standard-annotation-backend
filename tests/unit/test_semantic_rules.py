@@ -2,7 +2,11 @@
 
 from uuid import UUID
 
+import pytest
+from pydantic import TypeAdapter
+
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.semantic_validation import rules
 from standard_annotation_backend.domain.semantic_validation.checked_ancestors import (
     BP_ROOT,
     PROTEIN_CONTAINING_COMPLEX,
@@ -22,8 +26,12 @@ from standard_annotation_backend.domain.semantic_validation.rule_data import (
     WithPresenceCondition,
 )
 from standard_annotation_backend.domain.semantic_validation.rules import (
+    RULES,
+    Rule,
+    SemanticCheck,
     validate_semantics,
 )
+from standard_annotation_backend.domain.validation import ValidationIssue
 
 ENTITY = EntityFact(db_object_taxon_id="NCBITaxon:9606", db_object_type="PR:000000001")
 TERM = "GO:0006915"
@@ -107,7 +115,7 @@ def test_an_inactive_entity_is_reported_at_db_object_id() -> None:
 
 
 def test_each_term_problem_is_reported_at_its_identifier_with_details() -> None:
-    """Unknown, obsolete, and alternative identifiers are separate issues.
+    """Unknown, obsolete, and alternative identifiers are separate issues, by type.
 
     An obsolete term lists its suggested replacements, and an alternative
     identifier names its primary term.
@@ -133,6 +141,11 @@ def test_each_term_problem_is_reported_at_its_identifier_with_details() -> None:
         (issue["location"], issue["type"], issue.get("details")) for issue in issues
     ] == [
         (
+            ("annotation", "annotation_extensions", 1, "extension_term"),
+            "unknown_term",
+            None,
+        ),
+        (
             ("annotation", "ontology_class_id"),
             "obsolete_term",
             {"replaced_by": ["GO:0000001"], "consider": ["GO:0000003"]},
@@ -141,11 +154,6 @@ def test_each_term_problem_is_reported_at_its_identifier_with_details() -> None:
             ("annotation", "annotation_extensions", 0, "extension_term"),
             "alternate_term_id",
             {"primary_id": "CL:0000000"},
-        ),
-        (
-            ("annotation", "annotation_extensions", 1, "extension_term"),
-            "unknown_term",
-            None,
         ),
     ]
 
@@ -248,3 +256,103 @@ def test_rules_compose_by_restriction() -> None:
         "gorule_0000043",
         "gorule_0000043",
     ]
+
+
+def _always(issue_type: str) -> SemanticCheck:
+    """Return a check that reports one issue of `issue_type` for any annotation."""
+
+    def check(annotation: Annotation, facts: AnnotationFacts) -> list[ValidationIssue]:
+        return [ValidationIssue(location=("annotation",), message="x", type=issue_type)]
+
+    return check
+
+
+def test_issues_follow_the_registry_order() -> None:
+    """Issues of different rules come in the order the rules are registered."""
+    annotation = _annotation(
+        annotation_extensions=[
+            {"extension_relation": "BFO:0000066", "extension_term": "CL:0000001"},
+            {"extension_relation": "BFO:0000066", "extension_term": "CL:9999999"},
+        ],
+    )
+    terms = {
+        TERM: CURRENT,
+        "CL:0000001": TermFact(TermStatus.ALTERNATE, primary_id="CL:0000000"),
+        "CL:9999999": TermFact(TermStatus.UNKNOWN),
+    }
+
+    issues = validate_semantics(annotation, _facts(terms, entity=None, peers=(PEER,)))
+
+    order = [rule.issue_type for rule in RULES]
+    types = [issue["type"] for issue in issues]
+    assert types == sorted(types, key=order.index)
+    assert types[:4] == [
+        "unknown_entity",
+        "unknown_term",
+        "alternate_term_id",
+        "duplicate_annotation",
+    ]
+
+
+def test_a_rule_reporting_another_rules_type_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A check may only report its own rule's issue type."""
+    monkeypatch.setattr(
+        rules, "RULES", (Rule("unknown_entity", "x", _always("unknown_term")),)
+    )
+
+    with pytest.raises(ValueError, match="unknown_term"):
+        validate_semantics(_annotation(), _facts())
+
+
+def test_report_only_rules_run_only_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule that does not block writes runs only for reports."""
+    monkeypatch.setattr(
+        rules,
+        "RULES",
+        (Rule("gorule_0000004", "x", _always("gorule_0000004"), blocks_writes=False),),
+    )
+
+    assert validate_semantics(_annotation(), _facts()) == ()
+    assert [
+        issue["type"]
+        for issue in validate_semantics(
+            _annotation(), _facts(), include_report_only=True
+        )
+    ] == ["gorule_0000004"]
+
+
+@pytest.mark.parametrize(
+    ("issue_type", "terms", "peers"),
+    [
+        (
+            "obsolete_term",
+            {TERM: TermFact(TermStatus.OBSOLETE, replaced_by=("GO:1",))},
+            (),
+        ),
+        (
+            "alternate_term_id",
+            {TERM: TermFact(TermStatus.ALTERNATE, primary_id="GO:1")},
+            (),
+        ),
+        ("duplicate_annotation", None, (PEER,)),
+    ],
+)
+def test_details_match_the_shape_each_rule_declares(
+    issue_type: str, terms: dict[str, TermFact] | None, peers: tuple[UUID, ...]
+) -> None:
+    """Each issue's details have exactly the fields of its rule's details shape."""
+    (rule,) = [rule for rule in RULES if rule.issue_type == issue_type]
+    assert rule.details is not None
+
+    (issue,) = [
+        issue
+        for issue in validate_semantics(_annotation(), _facts(terms, peers=peers))
+        if issue["type"] == issue_type
+    ]
+
+    details = TypeAdapter(rule.details).validate_python(issue["details"])
+    assert details == issue["details"]
