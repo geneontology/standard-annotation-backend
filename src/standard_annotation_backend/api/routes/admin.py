@@ -104,6 +104,28 @@ def refresh_authorization(
 
 
 @router.post(
+    "/rules-refreshes",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=RefreshJobsResource,
+    summary="Refresh GO Rule data",
+    description=(
+        "Refresh the go-site metadata files that GO Rules read (db-xrefs.yaml, "
+        "gorefs.yaml, groups.yaml, retracted-publications.txt, "
+        "eco-usage-constraints.yaml, and extensions-constraints.yaml) from one "
+        "commit of the configured repository, and activate them together. There is "
+        f"one rules source, so no body is needed. {_SHARED_DESCRIPTION}"
+    ),
+    response_description=_RESPONSE_DESCRIPTION,
+)
+def refresh_rules(
+    service: Annotated[RefreshStartService, Depends(get_refresh_start_service)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
+) -> RefreshJobsResource:
+    """Start a refresh of the single GO Rule data source."""
+    return _start(service, context, RefreshKindName.RULES, None)
+
+
+@router.post(
     "/ontology-refreshes",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,
@@ -111,8 +133,10 @@ def refresh_authorization(
     summary="Refresh ontologies",
     description=(
         "Refresh configured ontologies from their OBO sources, activating a new "
-        "snapshot and applying safe term replacements. Send {} to refresh every "
-        'configured ontology or {"source_key": "<key>"} for one. '
+        "snapshot. Activation changes no annotations; it queues a term "
+        "replacement job that replaces obsolete terms and alternative IDs in "
+        "annotations. Send {} to refresh every configured ontology or "
+        '{"source_key": "<key>"} for one. '
         f"{_SHARED_DESCRIPTION}"
     ),
     response_description=_RESPONSE_DESCRIPTION,
@@ -162,8 +186,11 @@ def refresh_entities(
     description=(
         "Replace a group's annotations with the contents of its configured GPAD "
         "file. Every successful refresh deletes all of the group's annotations, "
-        "including edits made in SABE, and imports the file; a file that is "
-        "unchanged while the group is untouched is skipped. Send {} to refresh "
+        "including edits made in SABE, and imports the file. A refresh is "
+        "skipped when the file and SABE's Standard Annotation schema version are "
+        "unchanged since the group's last import and the group has had no edits, "
+        "comments, or change sets since then. Each published import queues a "
+        "term replacement job for the group. Send {} to refresh "
         'every group that GPAD still manages, or {"source_key": "<key>"} for one. '
         f"{_SHARED_DESCRIPTION}"
     ),

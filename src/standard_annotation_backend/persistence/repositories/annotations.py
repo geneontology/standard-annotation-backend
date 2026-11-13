@@ -1,10 +1,12 @@
 """Read and write annotations in caller-managed transactions."""
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from itertools import batched
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, delete, exists, select
+from sqlalchemy import ColumnElement, delete, exists, select, tuple_
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotation_search import (
@@ -18,11 +20,11 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationOrigin,
     AnnotationStatus,
     ChangeSource,
-    DuplicateAnnotationError,
     StaleAnnotationVersionError,
     new_annotation_id,
 )
-from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.domain.duplicate_policy import DuplicateKey
+from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.persistence.annotation_data import (
     AnnotationPersistenceData,
     prepare_annotation_for_persistence,
@@ -39,13 +41,13 @@ from standard_annotation_backend.persistence.models import (
     OntologyClosureRecord,
     OntologyMetadataRecord,
 )
-from standard_annotation_backend.persistence.repositories.entities import (
-    EntityRepository,
-)
 from standard_annotation_backend.persistence.repositories.pagination import (
     Page,
     load_page,
 )
+
+_PEER_BATCH_SIZE = 2_000
+"""The most lookup values one query in a batched read sends to the database."""
 
 
 def _closure_condition(term_id: str, predicate_id: str) -> ColumnElement[bool]:
@@ -69,7 +71,7 @@ def _closure_condition(term_id: str, predicate_id: str) -> ColumnElement[bool]:
             OntologyMetadataRecord.version_id == OntologyClosureRecord.version_id,
         )
         .where(
-            OntologyMetadataRecord.ontology_key == OntologyKey.GO.value,
+            OntologyMetadataRecord.ontology_key == GO_ONTOLOGY_KEY,
             OntologyMetadataRecord.active.is_(True),
             OntologyClosureRecord.subject_term_id == AnnotationRecord.ontology_class_id,
             OntologyClosureRecord.object_term_id == term_id,
@@ -170,18 +172,54 @@ def _ownership_conditions(scope: OwnershipScope) -> list[ColumnElement[bool]]:
     return conditions
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedCreate:
+    """Hold a new annotation after `AnnotationRepository.prepare_create` locked it.
+
+    Attributes:
+        data: The annotation's stored form and duplicate lookup values.
+        duplicate_peer_ids: Active annotations that duplicate it.
+        session: The session whose transaction holds the locks. `create` accepts
+            the value only in this session.
+    """
+
+    data: AnnotationPersistenceData
+    duplicate_peer_ids: tuple[UUID, ...]
+    session: Session = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedUpdate:
+    """Hold a locked annotation and its replacement after `prepare_update` checks.
+
+    Attributes:
+        record: The current annotation, locked for update.
+        data: The replacement's stored form and duplicate lookup values.
+        duplicate_peer_ids: Other active annotations that duplicate the
+            replacement.
+        session: The session whose transaction holds the locks. `update` accepts
+            the value only in this session.
+    """
+
+    record: AnnotationRecord
+    data: AnnotationPersistenceData
+    duplicate_peer_ids: tuple[UUID, ...]
+    session: Session = field(repr=False, compare=False)
+
+
 class AnnotationRepository:
     """Read and write annotations in a caller-managed transaction.
 
     The repository flushes changes so database errors are raised promptly, but
     the caller remains responsible for committing or rolling back the session.
 
-    `create`, `update`, and `soft_delete` serve both direct API writes and
-    change-set acceptance. They enforce an active entity catalog subject,
-    duplicate prevention, and expected-version checks. `apply_system_update`
-    serves system-wide updates such as ontology refresh, whose caller holds the
-    exclusive annotation lock and checks duplicates for the whole batch. All of
-    them use shared private helpers for the underlying database writes so
+    Creates and updates happen in two steps. `prepare_create` and
+    `prepare_update` take the locks a write needs and return the annotation's
+    duplicate peers, the other active annotations it would duplicate. The caller
+    validates the annotation, and then `create` or `update` writes it. Each
+    accepts only a value prepared in the same session, so no write can skip the
+    locks. `soft_delete` checks the expected version and takes its locks itself.
+    All of them use shared private helpers for the underlying database writes so
     annotations and their version histories remain consistent.
 
     Args:
@@ -190,7 +228,6 @@ class AnnotationRepository:
 
     def __init__(self, session: Session) -> None:
         self.session = session
-        self._entities = EntityRepository(session)
 
     def get(
         self,
@@ -294,21 +331,39 @@ class AnnotationRepository:
             offset=offset,
         )
 
-    def lock_all_active_for_system_update(self) -> tuple[AnnotationRecord, ...]:
-        """Lock and return all active annotations for a system-wide update."""
+    def list_active_after(
+        self,
+        after: UUID | None,
+        *,
+        owning_group_id: str | None,
+        limit: int,
+    ) -> tuple[AnnotationRecord, ...]:
+        """Return the next active annotations in `annotation_id` order, without locks.
+
+        QC reports and term replacement jobs read annotations in batches by calling
+        this repeatedly, passing the last ID of the previous batch as `after`.
+
+        Args:
+            after: Return only annotations whose ID is greater; `None` starts at
+                the beginning.
+            owning_group_id: Return only this group's annotations; `None` returns
+                every group's.
+            limit: The most annotations to return.
+        """
+        statement = select(AnnotationRecord).where(
+            AnnotationRecord.status == AnnotationStatus.ACTIVE
+        )
+        if after is not None:
+            statement = statement.where(AnnotationRecord.annotation_id > after)
+        if owning_group_id is not None:
+            statement = statement.where(
+                AnnotationRecord.owning_group_id == owning_group_id
+            )
         return tuple(
             self.session.scalars(
-                select(AnnotationRecord)
-                .where(AnnotationRecord.status == AnnotationStatus.ACTIVE)
-                .order_by(AnnotationRecord.annotation_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
+                statement.order_by(AnnotationRecord.annotation_id).limit(limit)
             )
         )
-
-    def acquire_exclusive_system_update_lock(self) -> None:
-        """Block annotation writes during a system-wide annotation update."""
-        acquire_global_annotation_write_lock(self.session, exclusive=True)
 
     def find_duplicate_peer_ids(
         self,
@@ -356,46 +411,128 @@ class AnnotationRepository:
             )
         return tuple(self.session.scalars(statement))
 
+    def duplicate_peers_for(
+        self, keys: Mapping[UUID, DuplicateKey]
+    ) -> dict[UUID, tuple[UUID, ...]]:
+        """Return each annotation's active duplicate peers, for a whole batch.
+
+        Peers share the annotation's signature and at least one of its
+        references, as in `find_duplicate_peer_ids`. Nothing is locked, so use
+        this for reports, not for writes.
+
+        Args:
+            keys: Each annotation's duplicate key, keyed by annotation ID.
+
+        Returns:
+            Each annotation's peers, in ID order, excluding itself.
+        """
+        pairs = sorted(
+            {
+                (key.signature, reference)
+                for key in keys.values()
+                for reference in key.references
+            }
+        )
+        holders: dict[tuple[str, str], set[UUID]] = {}
+        for batch in batched(pairs, _PEER_BATCH_SIZE, strict=False):
+            rows = self.session.execute(
+                select(
+                    AnnotationDuplicateReferenceRecord.duplicate_base_signature,
+                    AnnotationDuplicateReferenceRecord.canonical_reference,
+                    AnnotationDuplicateReferenceRecord.annotation_id,
+                )
+                .join(
+                    AnnotationRecord,
+                    AnnotationRecord.annotation_id
+                    == AnnotationDuplicateReferenceRecord.annotation_id,
+                )
+                .where(
+                    AnnotationRecord.status == AnnotationStatus.ACTIVE,
+                    tuple_(
+                        AnnotationDuplicateReferenceRecord.duplicate_base_signature,
+                        AnnotationDuplicateReferenceRecord.canonical_reference,
+                    ).in_(batch),
+                )
+            )
+            for signature, reference, annotation_id in rows:
+                holders.setdefault((signature, reference), set()).add(annotation_id)
+        return {
+            annotation_id: tuple(
+                sorted(
+                    {
+                        peer
+                        for reference in key.references
+                        for peer in holders.get((key.signature, reference), ())
+                    }
+                    - {annotation_id}
+                )
+            )
+            for annotation_id, key in keys.items()
+        }
+
+    def creators(self, annotation_ids: Collection[UUID]) -> dict[UUID, str]:
+        """Return the actor who created each annotation, from its first version.
+
+        A caller whose authorization has `self` scope may read only the
+        annotations it created.
+        """
+        found: dict[UUID, str] = {}
+        for batch in batched(sorted(annotation_ids), _PEER_BATCH_SIZE, strict=False):
+            rows = self.session.execute(
+                select(
+                    AnnotationVersionRecord.annotation_id,
+                    AnnotationVersionRecord.actor_id,
+                ).where(
+                    AnnotationVersionRecord.annotation_id.in_(batch),
+                    AnnotationVersionRecord.version == 1,
+                )
+            )
+            found.update({annotation_id: actor for annotation_id, actor in rows})
+        return found
+
+    def prepare_create(self, annotation: Annotation) -> PreparedCreate:
+        """Take the locks a create needs and find the annotation's duplicates.
+
+        The global annotation-write lock is taken in shared mode, which lets other
+        ordinary writes run but waits for exclusive operations such as a GPAD
+        publication. The annotation's signature lock is also taken. Both are held
+        until the transaction ends, so no concurrent write can create a duplicate
+        of the annotation before this transaction commits.
+
+        Raises:
+            TypeError: If `annotation` is not a validated `Annotation`.
+        """
+        data = prepare_annotation_for_persistence(annotation)
+        acquire_global_annotation_write_lock(self.session)
+        acquire_signature_locks(self.session, [data.duplicate_base_signature])
+        return PreparedCreate(
+            data=data,
+            duplicate_peer_ids=self.find_duplicate_peer_ids(
+                data.duplicate_base_signature, data.canonical_references
+            ),
+            session=self.session,
+        )
+
     def create(
         self,
+        prepared: PreparedCreate,
         *,
-        annotation: Annotation,
         actor_id: str,
         owning_group_id: str,
         change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
-        """Store an annotation unless an equivalent one is active.
+        """Store a prepared annotation as version 1.
 
         Args:
-            annotation: Validated annotation to store.
+            prepared: The result of `prepare_create` in this session.
             actor_id: Identifier for the person or process creating the annotation.
             owning_group_id: Identifier of the responsible group.
             change_source: Workflow recorded in version history; defaults to API.
 
-        Returns:
-            The newly stored annotation at version 1.
-
         Raises:
-            UnknownDbObjectIdError: If `db_object_id` is not in the active entity
-                catalog.
-            DuplicateAnnotationError: If an equivalent active annotation exists.
-            TypeError: If `annotation` is not a validated `Annotation`.
+            ValueError: If `prepared` came from another session.
         """
-        # Lock the subject's catalog membership before the annotation locks, the
-        # order every annotation write uses, so catalog removal waits for us.
-        self._entities.require_active(annotation.db_object_id)
-        persistence_data = prepare_annotation_for_persistence(annotation)
-        acquire_global_annotation_write_lock(self.session)
-        acquire_signature_locks(
-            self.session,
-            [persistence_data.duplicate_base_signature],
-        )
-        peers = self.find_duplicate_peer_ids(
-            persistence_data.duplicate_base_signature,
-            persistence_data.canonical_references,
-        )
-        if peers:
-            raise DuplicateAnnotationError(peers)
+        self._require_session(prepared.session)
         annotation_id = new_annotation_id()
         record = AnnotationRecord(
             annotation_id=annotation_id,
@@ -405,7 +542,7 @@ class AnnotationRepository:
             owning_group_id=owning_group_id,
             record_origin=AnnotationOrigin.DIRECT,
             source_import_job_id=None,
-            **persistence_data.column_values(),
+            **prepared.data.column_values(),
         )
         self.session.add(record)
         self.session.flush([record])
@@ -413,91 +550,82 @@ class AnnotationRepository:
             AnnotationVersionRecord(
                 annotation_id=annotation_id,
                 version=1,
-                annotation_data=persistence_data.annotation_data,
+                annotation_data=prepared.data.annotation_data,
                 is_deleted=False,
                 actor_id=actor_id,
                 change_source=change_source,
             )
         )
-        self._add_derived_values(annotation_id, persistence_data)
+        self._add_derived_values(annotation_id, prepared.data)
         self.session.flush()
         return record
 
-    def update(
+    def prepare_update(
         self,
         annotation_id: UUID,
         annotation: Annotation,
         *,
         expected_version: int,
-        actor_id: str,
-        change_source: ChangeSource = ChangeSource.API,
-    ) -> AnnotationRecord:
-        """Update an annotation when the client version is current.
+    ) -> PreparedUpdate:
+        """Lock an annotation for update and find its replacement's duplicates.
 
-        Args:
-            annotation_id: Identifier of the annotation to update.
-            annotation: Validated replacement annotation.
-            expected_version: Version supplied by the client.
-            actor_id: Identifier for the person or process making the change.
-            change_source: Workflow recorded in version history; defaults to API.
-
-        Returns:
-            The updated annotation with a newly saved version.
+        Locks are taken in the order every annotation write uses: the shared
+        global annotation-write lock, the annotation's row, then the signature
+        locks of its current and replacement states. The expected version is
+        checked after the row is locked, so it cannot change before the update.
 
         Raises:
-            UnknownDbObjectIdError: If the replacement `db_object_id` is not in the
-                active entity catalog.
             AnnotationNotFoundError: If the annotation does not exist.
-            AnnotationDeletedError: If the annotation has already been deleted.
-            DuplicateAnnotationError: If the change creates a new duplicate.
+            AnnotationDeletedError: If the annotation is deleted.
             StaleAnnotationVersionError: If `expected_version` is not current.
             TypeError: If `annotation` is not a validated `Annotation`.
         """
-        # Same lock order as `create`: catalog membership first.
-        self._entities.require_active(annotation.db_object_id)
-        candidate = prepare_annotation_for_persistence(annotation)
+        data = prepare_annotation_for_persistence(annotation)
         acquire_global_annotation_write_lock(self.session)
         current = self._get_annotation_for_change(annotation_id)
         self._raise_if_deleted(current)
-        before = prepare_annotation_for_persistence(
-            Annotation.model_validate(current.annotation_data)
-        )
-
-        # The row lock taken above keeps `current` unchanged until this
-        # transaction ends, so its signature is the one to lock and compare.
+        # The row lock keeps `current` unchanged until this transaction ends, so
+        # its stored signature is the one to lock.
         acquire_signature_locks(
             self.session,
-            [before.duplicate_base_signature, candidate.duplicate_base_signature],
+            [current.duplicate_base_signature, data.duplicate_base_signature],
         )
-
         if current.current_version != expected_version:
             raise StaleAnnotationVersionError(
-                annotation_id,
-                expected_version,
-                current.current_version,
+                annotation_id, expected_version, current.current_version
             )
-
-        before_peers = set(
-            self.find_duplicate_peer_ids(
-                before.duplicate_base_signature,
-                before.canonical_references,
+        return PreparedUpdate(
+            record=current,
+            data=data,
+            duplicate_peer_ids=self.find_duplicate_peer_ids(
+                data.duplicate_base_signature,
+                data.canonical_references,
                 exclude_annotation_id=annotation_id,
-            )
+            ),
+            session=self.session,
         )
-        after_peers = set(
-            self.find_duplicate_peer_ids(
-                candidate.duplicate_base_signature,
-                candidate.canonical_references,
-                exclude_annotation_id=annotation_id,
-            )
-        )
-        introduced = tuple(sorted(after_peers - before_peers))
-        if introduced:
-            raise DuplicateAnnotationError(introduced)
 
+    def update(
+        self,
+        prepared: PreparedUpdate,
+        *,
+        actor_id: str,
+        change_source: ChangeSource = ChangeSource.API,
+    ) -> AnnotationRecord:
+        """Save a prepared replacement as the annotation's next version.
+
+        Args:
+            prepared: The result of `prepare_update` in this session.
+            actor_id: Identifier for the person or process making the change.
+            change_source: Workflow recorded in version history; defaults to API.
+
+        Raises:
+            ValueError: If `prepared` came from another session.
+        """
+        self._require_session(prepared.session)
         return self._apply_update(
-            current,
-            candidate,
+            prepared.record,
+            prepared.data,
             actor_id=actor_id,
             change_source=change_source,
         )
@@ -546,35 +674,6 @@ class AnnotationRepository:
         self._add_derived_values(record.annotation_id, persistence_data)
         self.session.flush()
         return record
-
-    def apply_system_update(
-        self,
-        record: AnnotationRecord,
-        annotation: Annotation,
-        *,
-        actor_id: str,
-        change_source: ChangeSource,
-    ) -> AnnotationRecord:
-        """Update one annotation after system-wide validation is complete.
-
-        The caller must hold the exclusive global annotation lock and evaluate
-        duplicate safety for the complete batch before calling this method.
-
-        Args:
-            record: Current record of the annotation to update.
-            annotation: Validated replacement annotation.
-            actor_id: Identifier for the person or process making the change.
-            change_source: Workflow recorded in version history.
-
-        Returns:
-            The updated current annotation record.
-        """
-        return self._apply_update(
-            record,
-            prepare_annotation_for_persistence(annotation),
-            actor_id=actor_id,
-            change_source=change_source,
-        )
 
     def soft_delete(
         self,
@@ -685,6 +784,11 @@ class AnnotationRepository:
         if record is None:
             raise AnnotationNotFoundError(annotation_id)
         return record
+
+    def _require_session(self, session: Session) -> None:
+        """Reject a prepared write from another session, which holds no locks here."""
+        if session is not self.session:
+            raise ValueError("a prepared write must be used in its own session")
 
     @staticmethod
     def _raise_if_deleted(record: AnnotationRecord) -> None:

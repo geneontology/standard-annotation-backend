@@ -13,6 +13,7 @@ from refresh_helpers import (
     FakeFetchers,
     build_runner,
     ignore_progress,
+    rule_files,
     start_job,
 )
 from seeding import create_job
@@ -21,11 +22,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     RefreshKindName,
 )
+from standard_annotation_backend.go_site.rule_files import GOREFS_PATH
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     bind_try_lock,
@@ -125,6 +127,16 @@ CASES = {
         applied_action=AuditAction.AUTHORIZATION_REFRESHED,
         public_error="Authorization refresh failed",
         recovery_refetches=True,
+    ),
+    "rules": KindCase(
+        job_type=JobType.RULES_REFRESH,
+        source_key="go-site",
+        content=rule_files(),
+        invalid_content=rule_files({GOREFS_PATH: b"- id: GO_REF:15\n"}),
+        invalid_code=RefreshFailureCode.INVALID_DOCUMENT,
+        applied_action=AuditAction.RULES_REFRESHED,
+        public_error="Rules refresh failed",
+        recovery_refetches=False,
     ),
 }
 
@@ -397,7 +409,7 @@ def test_ontology_refresh_waits_for_the_ontology_lock_by_retrying(
     job_id = _job(unit_of_work_factory, CASES["ontology"])
 
     with try_advisory_lock(
-        database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+        database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
     ) as acquired:
         assert acquired
         with (
@@ -538,7 +550,7 @@ def test_in_process_pruning_is_skipped_while_the_ontology_lock_is_held(
     )
 
     with try_advisory_lock(
-        database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+        database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
     ) as acquired:
         assert acquired
         components.ontology.after_terminal("go")
@@ -628,7 +640,7 @@ def test_document_activated_while_waiting_for_the_lock_reports_unchanged(
         return bound(namespace, value)
 
     service = OntologyRefreshService(
-        unit_of_work_factory, try_lock_after_the_other_job, None
+        unit_of_work_factory, TEST_SOURCES, try_lock_after_the_other_job, None
     )
     document = FakeFetchers({"go": content}).fetch(
         "go", TEST_SOURCES.source(RefreshKindName.ONTOLOGY, "go")

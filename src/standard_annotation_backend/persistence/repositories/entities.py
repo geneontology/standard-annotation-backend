@@ -12,9 +12,6 @@ from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from standard_annotation_backend.domain.annotations import (
-    AnnotationStatus,
-)
 from standard_annotation_backend.domain.entities import (
     STORED_ENTITY_REFRESH_RESULT,
     STORED_ENTITY_RETIREMENT_RESULT,
@@ -23,8 +20,6 @@ from standard_annotation_backend.domain.entities import (
     EntityCatalogCollisionError,
     EntityCatalogRetirementResult,
     EntityRefreshResult,
-    EntityRemovalImpact,
-    UnknownDbObjectIdError,
 )
 from standard_annotation_backend.domain.jobs import (
     ACTIVE_JOB_STATUSES,
@@ -35,7 +30,6 @@ from standard_annotation_backend.persistence.locks import (
     acquire_transaction_lock,
 )
 from standard_annotation_backend.persistence.models import (
-    AnnotationRecord,
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
     EntitySourceRecord,
@@ -101,10 +95,9 @@ class EntityRepository:
         """Deactivate a source's catalog and delete its membership rows.
 
         The source's catalog lock is held, so no publication for the source runs
-        at the same time. Membership rows are locked before affected annotations
-        are listed, so an annotation being saved with a removed identifier is
-        included in the result. If this job already retired the catalog, the
-        stored result is returned and nothing changes.
+        at the same time. Removing identifiers never changes annotations. If this
+        job already retired the catalog, the stored result is returned and nothing
+        changes.
 
         Args:
             job_id: The retirement job.
@@ -127,7 +120,7 @@ class EntityRepository:
                 STORED_ENTITY_RETIREMENT_RESULT.load(recorded.retirement_result),
                 False,
             )
-        not_retired = EntityCatalogRetirementResult(source_key, False, None, ())
+        not_retired = EntityCatalogRetirementResult(source_key, False)
         if configured:
             return not_retired, False
         current = self.session.scalar(
@@ -146,10 +139,8 @@ class EntityRepository:
                 select(EntityMembershipRecord.db_object_id)
                 .where(EntityMembershipRecord.source_key == source_key)
                 .order_by(EntityMembershipRecord.db_object_id)
-                .with_for_update()
             )
         )
-        impacts = self._removal_impacts(removed)
         self.session.execute(
             delete(EntityMembershipRecord).where(
                 EntityMembershipRecord.source_key == source_key
@@ -159,7 +150,7 @@ class EntityRepository:
             source_key=source_key,
             retired=True,
             snapshot_id=current.snapshot_id,
-            removal_impacts=impacts,
+            removed_count=len(removed),
         )
         current.active = False
         current.retired_at = datetime.now(UTC)
@@ -259,11 +250,7 @@ class EntityRepository:
         source record rows. The caller records the audit event and commits; any
         failure rolls back and leaves the previous catalog active.
 
-        Membership rows are locked before affected annotations are listed, so an
-        annotation being saved with a removed identifier is included in
-        `removal_impacts`. Removing an identifier never changes annotations; the
-        result lists the active annotations that still use each removed
-        identifier.
+        Removing an identifier never changes annotations.
 
         Raises:
             EntityCandidateConflictError: If the job has no staging, or a newer
@@ -303,14 +290,12 @@ class EntityRepository:
                     EntityMembershipRecord.source_key == candidate.source_key,
                 )
                 .order_by(EntityMembershipRecord.db_object_id)
-                .with_for_update()
             )
         )
         collisions = self._collisions(candidate)
         if collisions:
             raise EntityCatalogCollisionError(collisions)
         removed = old_ids - new_ids
-        impacts = self._removal_impacts(removed)
         self.session.execute(
             update(EntityCatalogSnapshotRecord)
             .where(
@@ -326,10 +311,7 @@ class EntityRepository:
         )
         self._insert_memberships(candidate, new_ids)
         for batch in batched(
-            (
-                {key: value for key, value in row.items() if key != "job_id"}
-                for row in rows
-            ),
+            (_source_record_values(row) for row in rows),
             _INSERT_BATCH_SIZE,
             strict=False,
         ):
@@ -347,7 +329,6 @@ class EntityRepository:
             retained_count=len(new_ids & old_ids),
             removed_count=len(removed),
             warnings=staging.warnings,
-            removal_impacts=impacts,
         )
         candidate.active = True
         candidate.published_at = datetime.now(UTC)
@@ -422,57 +403,6 @@ class EntityRepository:
             self.session.execute(
                 delete(EntityStagingRecord).where(EntityStagingRecord.job_id == job_id)
             )
-
-    def require_active(self, db_object_id: str) -> EntityMembershipRecord:
-        """Confirm an active identifier and block its removal for this transaction.
-
-        Annotation writes call this before saving an annotation. It locks the
-        identifier's membership row until the annotation's transaction ends,
-        so a catalog publication or retirement cannot remove the identifier while the
-        annotation is being saved. A publication that would remove it waits for the
-        annotation to commit, then lists that annotation in its removal report. An
-        annotation write that starts after the removal fails here.
-
-        The lock is a PostgreSQL `FOR KEY SHARE` row lock. It does not block other
-        annotation writes that check the same identifier.
-
-        The retry loop handles one race. Publication of an entity catalog replaces a
-        source's membership rows by deleting all of them and inserting the new set,
-        so an identifier that stays in the catalog gets a new row. If this method was
-        waiting to lock the old row, PostgreSQL reports no row once the publication
-        commits, because the waiting query cannot see rows inserted after it started.
-        A second, ordinary query then checks whether the identifier exists now: if it
-        does, the identifier was kept and the lock is attempted again on the new row;
-        if it does not, the identifier was removed.
-
-        Args:
-            db_object_id: Exact, case-sensitive identifier to check.
-
-        Returns:
-            The locked membership row.
-
-        Raises:
-            UnknownDbObjectIdError: The identifier is not in the active catalog.
-        """
-        statement = (
-            select(EntityMembershipRecord)
-            .where(
-                EntityMembershipRecord.db_object_id == db_object_id,
-            )
-            .with_for_update(read=True, key_share=True)
-            .execution_options(populate_existing=True)
-        )
-        while True:
-            record = self.session.scalar(statement)
-            if record is not None:
-                return record
-            still_present = self.session.scalar(
-                select(EntityMembershipRecord.db_object_id).where(
-                    EntityMembershipRecord.db_object_id == db_object_id
-                )
-            )
-            if still_present is None:
-                raise UnknownDbObjectIdError(db_object_id)
 
     def _candidate(self, job_id: UUID) -> EntityCatalogSnapshotRecord | None:
         return self.session.scalar(
@@ -582,30 +512,6 @@ class EntityRepository:
         if collided:
             raise EntityCatalogCollisionError(self._collisions(candidate))
 
-    def _removal_impacts(self, removed: set[str]) -> tuple[EntityRemovalImpact, ...]:
-        impacts: dict[str, list[UUID]] = {
-            identifier: [] for identifier in sorted(removed)
-        }
-        for batch in batched(
-            ({"id": identifier} for identifier in sorted(removed)),
-            _INSERT_BATCH_SIZE,
-            strict=False,
-        ):
-            rows = self.session.execute(
-                select(AnnotationRecord.db_object_id, AnnotationRecord.annotation_id)
-                .where(
-                    AnnotationRecord.db_object_id.in_([row["id"] for row in batch]),
-                    AnnotationRecord.status == AnnotationStatus.ACTIVE,
-                )
-                .order_by(AnnotationRecord.db_object_id, AnnotationRecord.annotation_id)
-            )
-            for identifier, annotation_id in rows:
-                impacts[identifier].append(annotation_id)
-        return tuple(
-            EntityRemovalImpact(identifier, tuple(ids))
-            for identifier, ids in impacts.items()
-        )
-
 
 def _catalog_digest(
     source_format: str,
@@ -629,3 +535,24 @@ def _catalog_digest(
         )
         hasher.update(b"\n")
     return hasher.hexdigest()
+
+
+def _source_record_values(row: dict[str, object]) -> dict[str, object]:
+    """Return the `entity_source_record` values for one verified staging row.
+
+    The entity's taxon and type are copied into their own columns. Staging rows
+    hold schema-validated entities, which always have both.
+
+    Raises:
+        EntityCandidateConflictError: If the row's entity is not a JSON object.
+    """
+    entity = row["entity"]
+    if not isinstance(entity, dict):
+        raise EntityCandidateConflictError
+    return {
+        "db_object_id": row["db_object_id"],
+        "line_number": row["line_number"],
+        "entity": entity,
+        "db_object_taxon_id": entity["db_object_taxon_id"],
+        "db_object_type": entity["db_object_type"],
+    }

@@ -1,4 +1,9 @@
-"""Test duplicate prevention when separate database transactions run concurrently."""
+"""Test duplicate detection when separate database transactions run concurrently.
+
+A mutation whose prepared write has duplicate peers stops, as a validated write
+would. The signature locks make the second of two conflicting writes wait for the
+first and then find it as a peer.
+"""
 
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -7,13 +12,14 @@ from time import monotonic
 from uuid import UUID
 
 import pytest
+from refresh_helpers import TEST_SOURCES
+from seeding import insert_annotation
 from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationStatus,
-    DuplicateAnnotationError,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.domain.auth import (
@@ -34,11 +40,10 @@ from standard_annotation_backend.services.annotation_service import AnnotationSe
 
 
 @pytest.fixture(autouse=True)
-def _active_subjects(seed_active_subjects: Callable[..., None]) -> None:
-    """Make the subjects these tests write active in the entity catalog.
-
-    Direct annotation writes require an active subject.
-    """
+def _active_subjects(
+    seed_active_subjects: Callable[..., None], reference_data: Callable[..., None]
+) -> None:
+    """Load the subjects and reference data these tests' service writes need."""
     seed_active_subjects(
         "UniProtKB:P12345",
         "UniProtKB:FIRST",
@@ -58,12 +63,18 @@ def _changed(annotation: Annotation, **changes: object) -> Annotation:
     return Annotation.model_validate(data)
 
 
+class _DuplicateFound(Exception):
+    """Stop a mutation whose prepared write has duplicate peers."""
+
+
 def _create(annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
-        AnnotationRepository(session).create(
-            annotation=annotation,
-            actor_id="concurrent-creator",
-            owning_group_id="group-1",
+        repository = AnnotationRepository(session)
+        prepared = repository.prepare_create(annotation)
+        if prepared.duplicate_peer_ids:
+            raise _DuplicateFound
+        repository.create(
+            prepared, actor_id="concurrent-creator", owning_group_id="group-1"
         )
 
     return mutate
@@ -71,12 +82,13 @@ def _create(annotation: Annotation) -> Mutation:
 
 def _update(annotation_id: UUID, annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
-        AnnotationRepository(session).update(
-            annotation_id,
-            annotation,
-            expected_version=1,
-            actor_id="concurrent-editor",
+        repository = AnnotationRepository(session)
+        prepared = repository.prepare_update(
+            annotation_id, annotation, expected_version=1
         )
+        if prepared.duplicate_peer_ids:
+            raise _DuplicateFound
+        repository.update(prepared, actor_id="concurrent-editor")
 
     return mutate
 
@@ -117,7 +129,7 @@ def _run_coordinated_mutations(
                 assert release.wait(GUARD_SECONDS), "second transaction not released"
             session.commit()
             return "success"
-        except DuplicateAnnotationError:
+        except _DuplicateFound:
             session.rollback()
             return "duplicate"
         except StaleAnnotationVersionError as error:
@@ -214,11 +226,15 @@ def _run_coordinated_mutations(
 
 def test_conflicting_creates_cannot_both_succeed(
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
+    """Of two concurrent creates of the same annotation, only one is stored.
+
+    The second waits for the first to commit, then finds it as a duplicate peer.
+    """
     # Removing create's signature lock allows both uncommitted creates.
     outcomes, blocked = _run_coordinated_mutations(
-        session_factory, _create(validated_annotation), _create(validated_annotation)
+        session_factory, _create(writable_annotation), _create(writable_annotation)
     )
     assert outcomes == ["duplicate", "success"]
     assert blocked
@@ -235,17 +251,23 @@ def test_conflicting_creates_cannot_both_succeed(
 
 def test_distinct_record_updates_cannot_introduce_the_same_duplicate(
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
+    """Concurrent updates of two annotations cannot make them duplicates.
+
+    The second update waits for the first to commit, finds it as a peer, and
+    leaves its own annotation at version 1.
+    """
     with session_factory() as session:
-        repository = AnnotationRepository(session)
-        first = repository.create(
-            annotation=_changed(validated_annotation, db_object_id="UniProtKB:FIRST"),
+        first = insert_annotation(
+            session,
+            _changed(writable_annotation, db_object_id="UniProtKB:FIRST"),
             actor_id="seed",
             owning_group_id="group-1",
         )
-        second = repository.create(
-            annotation=_changed(validated_annotation, db_object_id="UniProtKB:SECOND"),
+        second = insert_annotation(
+            session,
+            _changed(writable_annotation, db_object_id="UniProtKB:SECOND"),
             actor_id="seed",
             owning_group_id="group-1",
         )
@@ -255,8 +277,8 @@ def test_distinct_record_updates_cannot_introduce_the_same_duplicate(
     # Removing update's candidate signature lock permits both updates.
     outcomes, blocked = _run_coordinated_mutations(
         session_factory,
-        _update(first_id, validated_annotation),
-        _update(second_id, validated_annotation),
+        _update(first_id, writable_annotation),
+        _update(second_id, writable_annotation),
     )
     assert outcomes == ["duplicate", "success"]
     assert blocked
@@ -269,11 +291,16 @@ def test_distinct_record_updates_cannot_introduce_the_same_duplicate(
 
 def test_same_record_update_race_rejects_the_stale_version(
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
+    """Of two concurrent updates from version 1 of one annotation, only one applies.
+
+    The waiting update rereads the annotation after the first commits and is
+    rejected as stale, even though its session had already loaded version 1.
+    """
     with session_factory() as session:
-        record = AnnotationRepository(session).create(
-            annotation=validated_annotation, actor_id="seed", owning_group_id="group-1"
+        record = insert_annotation(
+            session, writable_annotation, actor_id="seed", owning_group_id="group-1"
         )
         session.commit()
         annotation_id = record.annotation_id
@@ -281,8 +308,8 @@ def test_same_record_update_race_rejects_the_stale_version(
     # Removing the fresh-state read leaves a cached version 1 in the waiter.
     outcomes, blocked = _run_coordinated_mutations(
         session_factory,
-        _update(annotation_id, _changed(validated_annotation, assigned_by="First")),
-        _update(annotation_id, _changed(validated_annotation, assigned_by="Second")),
+        _update(annotation_id, _changed(writable_annotation, assigned_by="First")),
+        _update(annotation_id, _changed(writable_annotation, assigned_by="Second")),
         preload_id=annotation_id,
     )
     assert outcomes == ["stale", "success"]
@@ -306,11 +333,18 @@ def test_same_record_update_race_rejects_the_stale_version(
 
 def test_patch_rejects_a_merge_based_on_a_different_version(
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
+    """A patch is rejected when its expected version differs from the one it merged.
+
+    Another writer commits version 2 after the patch reads version 1. The patch
+    expects version 2 but merged its changes into version 1, so it is rejected as
+    stale and the other writer's version stays current.
+    """
     with session_factory() as session:
-        record = AnnotationRepository(session).create(
-            annotation=validated_annotation,
+        record = insert_annotation(
+            session,
+            writable_annotation,
             actor_id="seed",
             owning_group_id="group-1",
         )
@@ -326,10 +360,13 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
             nonlocal writer_calls
             writer_calls += 1
             with session_factory() as writer:
-                AnnotationRepository(writer).update(
-                    annotation_id,
-                    _changed(validated_annotation, assigned_by="Concurrent"),
-                    expected_version=1,
+                repository = AnnotationRepository(writer)
+                repository.update(
+                    repository.prepare_update(
+                        annotation_id,
+                        _changed(writable_annotation, assigned_by="Concurrent"),
+                        expected_version=1,
+                    ),
                     actor_id="concurrent-editor",
                 )
                 writer.commit()
@@ -342,7 +379,9 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
         )
         return reader
 
-    service = AnnotationService(create_unit_of_work_factory(reader_session_factory))
+    service = AnnotationService(
+        create_unit_of_work_factory(reader_session_factory), TEST_SOURCES
+    )
     with pytest.raises(StaleAnnotationVersionError):
         service.patch(
             annotation_id,
@@ -375,7 +414,7 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
 
 def test_unrelated_signatures_overlap_and_both_succeed(
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Creates with unrelated duplicate signatures proceed concurrently and succeed.
 
@@ -384,8 +423,8 @@ def test_unrelated_signatures_overlap_and_both_succeed(
     """
     outcomes, _blocked = _run_coordinated_mutations(
         session_factory,
-        _create(validated_annotation),
-        _create(_changed(validated_annotation, db_object_id="UniProtKB:UNRELATED")),
+        _create(writable_annotation),
+        _create(_changed(writable_annotation, db_object_id="UniProtKB:UNRELATED")),
         expect_overlap=True,
     )
     assert outcomes == ["success", "success"]

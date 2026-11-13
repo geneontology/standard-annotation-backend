@@ -15,6 +15,7 @@ class AuditAction(StrEnum):
     TOKEN_CREATED = "token.created"
     TOKEN_REVOKED = "token.revoked"
     AUTHORIZATION_REFRESHED = "authorization.refreshed"
+    RULES_REFRESHED = "rules.refreshed"
     JOB_QUEUED = "job.queued"
     JOB_STARTED = "job.started"
     JOB_SUCCEEDED = "job.succeeded"

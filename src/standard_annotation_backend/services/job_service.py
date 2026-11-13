@@ -140,8 +140,17 @@ class JobService:
         job_id: UUID,
         *,
         result: dict[str, object],
+        finalize: Callable[[SqlAlchemyUnitOfWork], None] | None = None,
     ) -> Job:
-        """Commit a running job's successful terminal result."""
+        """Commit a running job's successful terminal result.
+
+        Args:
+            job_id: Job to mark succeeded.
+            result: JSON-compatible result to store.
+            finalize: Work specific to the job type, such as deleting older
+                findings, done in the same transaction so that it commits only
+                together with the success.
+        """
         with self._unit_of_work_factory() as unit_of_work:
             mutation = unit_of_work.jobs.succeed(
                 job_id,
@@ -152,6 +161,8 @@ class JobService:
                 AuditService(unit_of_work.audit).record_job_lifecycle(
                     action=AuditAction.JOB_SUCCEEDED, record=mutation.record
                 )
+            if finalize is not None:
+                finalize(unit_of_work)
             completed = job_from_record(mutation.record)
             unit_of_work.commit()
         return completed

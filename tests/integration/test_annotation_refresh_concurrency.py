@@ -20,7 +20,6 @@ from test_entity_refresh_concurrency import TIMEOUT, wait_for_lock
 
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
-    CutoverRejectedError,
     GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.annotations import Annotation
@@ -32,7 +31,6 @@ from standard_annotation_backend.persistence.locks import (
 from standard_annotation_backend.persistence.models import (
     AnnotationMultivaluedFieldValueRecord,
     AnnotationRecord,
-    EntityMembershipRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_refresh_service import (
@@ -42,7 +40,6 @@ from standard_annotation_backend.services.annotation_refresh_service import (
 _PUBLICATION_COPY_STATEMENT = (
     f"INSERT INTO {AnnotationMultivaluedFieldValueRecord.__tablename__}"
 )
-_STAGED_SUBJECT_CHECK_STATEMENT = "SELECT annotation_staging.line_number"
 
 
 @dataclass(slots=True)
@@ -195,8 +192,8 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
 
     def write_other_group() -> None:
         with unit_of_work_factory() as uow:
-            uow.annotations.create(
-                annotation=Annotation.model_validate(
+            prepared = uow.annotations.prepare_create(
+                Annotation.model_validate(
                     {
                         "db_object_id": "UniProtKB:Q99999",
                         "relation": "RO:0002331",
@@ -206,10 +203,9 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
                         "annotation_date": "2026-09-29",
                         "assigned_by": "RGD",
                     }
-                ),
-                actor_id="curator",
-                owning_group_id="RGD",
+                )
             )
+            uow.annotations.create(prepared, actor_id="curator", owning_group_id="RGD")
             uow.commit()
 
     with (
@@ -282,95 +278,3 @@ def test_refresh_waiting_on_a_cutover_cannot_overwrite_the_sabe_managed_group(
     with unit_of_work_factory() as uow:
         assert uow.annotation_imports.published_import(refresh.job_id) is None
     assert group_rows(session_factory) == [("import", ["PMID:2"])]
-
-
-@contextmanager
-def pause_before_staged_subject_check(engine: Engine) -> Iterator[PublicationPause]:
-    """Pause a cutover publication after it locks its subjects' entity rows.
-
-    The pause comes just before the publication decides which staged subjects
-    are missing, while its transaction is still open. The pause is always
-    released when the context exits.
-
-    Yields:
-        The pause state; only `reached` and `release` are used.
-    """
-    pause = PublicationPause()
-
-    def before_cursor_execute(
-        connection: object,
-        cursor: Cursor[Any],
-        statement: str,
-        parameters: object,
-        context: object,
-        executemany: bool,
-    ) -> None:
-        if not statement.startswith(_STAGED_SUBJECT_CHECK_STATEMENT):
-            return
-        with pause._guard:
-            if pause.reached.is_set():
-                return
-            pause.reached.set()
-        assert pause.release.wait(TIMEOUT)
-
-    event.listen(engine, "before_cursor_execute", before_cursor_execute)
-    try:
-        yield pause
-    finally:
-        pause.release.set()
-        event.remove(engine, "before_cursor_execute", before_cursor_execute)
-
-
-def test_cutover_rejects_a_subject_that_becomes_active_after_its_locks(
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    seed_active_subjects: Callable[..., None],
-) -> None:
-    """A cutover accepts only subjects whose entity rows it locked.
-
-    A subject that becomes active again after the cutover locked the others is
-    rejected: its row is not locked, so an entity refresh could remove it again
-    before the cutover commits. The group stays `gpad_imported`.
-    """
-    seed_active_subjects("UniProtKB:P12345", "UniProtKB:Q99999")
-    service = AnnotationRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
-    )
-    cutover = create_job(unit_of_work_factory, JobType.ANNOTATION_CUTOVER)
-    stage(
-        service,
-        cutover,
-        gpad_text(gpad_row("UniProtKB:P12345"), gpad_row("UniProtKB:Q99999")),
-    )
-    with session_factory() as session:
-        removed = session.get(EntityMembershipRecord, "UniProtKB:Q99999")
-        assert removed is not None
-        source_key, snapshot_id = removed.source_key, removed.snapshot_id
-        session.delete(removed)
-        session.commit()
-
-    with (
-        pause_before_staged_subject_check(database_engine) as pause,
-        ThreadPoolExecutor(max_workers=1) as pool,
-    ):
-        published = pool.submit(publish, unit_of_work_factory, cutover.job_id, "admin")
-        assert pause.reached.wait(TIMEOUT)
-        with session_factory() as session:
-            session.add(
-                EntityMembershipRecord(
-                    db_object_id="UniProtKB:Q99999",
-                    source_key=source_key,
-                    snapshot_id=snapshot_id,
-                )
-            )
-            session.commit()
-        pause.release.set()
-        with pytest.raises(CutoverRejectedError) as raised:
-            published.result(timeout=TIMEOUT)
-
-    assert [
-        (issue.line_number, issue.code) for issue in raised.value.report.issues
-    ] == [(5, "unknown_db_object_id")]
-    assert group_mode(unit_of_work_factory) is AnnotationManagementMode.GPAD_IMPORTED
-    assert group_rows(session_factory) == []

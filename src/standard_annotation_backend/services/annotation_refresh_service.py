@@ -1,18 +1,21 @@
 """Replace groups' annotations from configured GPAD sources for `RefreshRunner`.
 
 `annotation_refresh` jobs replace a `gpad_imported` group's annotations. They
-skip a file that matches the group's last import when the group has not changed
-since. `annotation_cutover` jobs never skip, require every record to be imported,
+skip a file that matches the group's last import, when that import was checked
+with the installed schema package version and the group has not changed since.
+`annotation_cutover` jobs never skip, require every record to be imported,
 and move the group to `sabe_managed` permanently. One service runs both job types.
-Staging and publication commit in separate transactions.
+Staging and publication commit in separate transactions. Each publication also
+queues a term replacement job for the group.
 """
 
+import logging
+from collections.abc import Callable
 from itertools import batched
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotation_management import (
     STORED_REJECTION_REPORT,
-    UNKNOWN_DB_OBJECT_ID,
     AnnotationImportConflictError,
     AnnotationManagementMode,
     AnnotationRefreshResult,
@@ -22,7 +25,6 @@ from standard_annotation_backend.domain.annotation_management import (
     NoValidAnnotationsError,
     RejectionReport,
     RejectionReportBuilder,
-    unknown_subject_rejection,
 )
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import (
@@ -35,6 +37,7 @@ from standard_annotation_backend.domain.refresh import (
     SourceProvenance,
     TerminalRefreshError,
 )
+from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
 from standard_annotation_backend.gpad.parser import (
     GpadDocument,
     GpadHeaderError,
@@ -53,8 +56,13 @@ from standard_annotation_backend.refresh.decoding import decode_source_text
 from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
+from standard_annotation_backend.services.term_replacement_service import (
+    queue_term_replacement,
+)
 
 _STAGING_BATCH_SIZE = 5_000
+
+logger = logging.getLogger(__name__)
 
 
 class AnnotationRefreshBusyError(RetryableRefreshError):
@@ -79,6 +87,9 @@ class AnnotationRefreshService:
         sources: Configured sources for every kind; maps a GPAD source to its
             group.
         try_lock: Takes the per-group lock.
+        dispatch_replacement: Sends a queued term replacement job to a worker
+            after a publication commits. `None` leaves the job queued without
+            sending it.
     """
 
     def __init__(
@@ -86,10 +97,13 @@ class AnnotationRefreshService:
         unit_of_work_factory: UnitOfWorkFactory,
         sources: RefreshSources,
         try_lock: AdvisoryTryLock,
+        *,
+        dispatch_replacement: Callable[[Job], None] | None = None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._sources = sources
         self._try_lock = try_lock
+        self._dispatch_replacement = dispatch_replacement
 
     @property
     def name(self) -> RefreshKindName:
@@ -119,7 +133,8 @@ class AnnotationRefreshService:
         """Stage and publish a document while holding the group's lock.
 
         An ordinary refresh is skipped, before taking the lock, when the
-        document matches the group's last import and the group has not changed
+        document matches the group's last import, that import was checked with
+        the installed schema package version, and the group has not changed
         since. A cutover is never skipped.
 
         Raises:
@@ -203,8 +218,7 @@ class AnnotationRefreshService:
 
         Staging stores the annotations in separate tables until `_publish`
         replaces the group's annotations with them. Any staging left by an
-        earlier, interrupted attempt of the job is replaced. Annotations whose
-        `db_object_id` is not an active entity are rejected. Nothing is committed
+        earlier, interrupted attempt of the job is replaced. Nothing is committed
         when the document has an invalid header, yields no valid annotations, or
         is a cutover with any rejection.
 
@@ -234,21 +248,8 @@ class AnnotationRefreshService:
                             parsed.append(item)
                         else:
                             builder.add(item)
-                    known = imports.active_db_object_ids(
-                        {item.annotation.db_object_id for item in parsed}
-                    )
-                    accepted: list[ParsedAnnotation] = []
-                    for item in parsed:
-                        if item.annotation.db_object_id in known:
-                            accepted.append(item)
-                        else:
-                            builder.add(
-                                unknown_subject_rejection(
-                                    item.line_number, item.annotation.db_object_id
-                                )
-                            )
-                    imports.stage_annotations(job_id, accepted)
-                    staged += len(accepted)
+                    imports.stage_annotations(job_id, parsed)
+                    staged += len(parsed)
                 metadata = document.metadata
                 data_rows = document.data_rows
             report = builder.build()
@@ -266,6 +267,7 @@ class AnnotationRefreshService:
                 data_rows=data_rows,
                 annotations_staged=staged,
                 report=report,
+                schema_version=SCHEMA_PACKAGE_VERSION,
             )
             uow.commit()
         return report
@@ -276,19 +278,14 @@ class AnnotationRefreshService:
         """Return a result that lets an ordinary refresh skip an unchanged file.
 
         A refresh can be skipped only when the group is `gpad_imported`, its last
-        published import has the same `source_checksum`, the group has no local
-        changes since that import, and that import rejected no annotations as
-        `unknown_db_object_id`. Local changes include edits, comments, and change
-        sets; see `AnnotationImportRepository.has_local_changes`. Those
-        rejections are retried because the entity catalog may have changed even
-        when the file has not.
+        published import has the same `source_checksum` and was checked with the
+        installed schema package version, and the group has no local changes since
+        that import. Local changes include edits, comments, and change sets; see
+        `AnnotationImportRepository.has_local_changes`. A different schema version
+        can change which rows are accepted, so it requires a new import.
 
         Returns:
             The skip result, or `None` when the file must be imported.
-
-        Raises:
-            StoredDataError: If the last import's stored rejection report is
-                malformed.
         """
         with self._unit_of_work_factory() as uow:
             imports = uow.annotation_imports
@@ -301,7 +298,7 @@ class AnnotationRefreshService:
             if (
                 last is None
                 or last.source_checksum != source_checksum
-                or _has_unknown_subject_rejections(last.rejection_report)
+                or last.schema_version != SCHEMA_PACKAGE_VERSION
                 or imports.has_local_changes(group_key, last.job_id)
             ):
                 return None
@@ -321,15 +318,15 @@ class AnnotationRefreshService:
     def _publish(self, *, job_id: UUID, actor_id: str) -> AnnotationRefreshResult:
         """Publish a job's staged import with its audit event, then commit.
 
-        If the job already published, its stored result is returned and no
-        audit event is added.
+        The publication also queues a term replacement job for the group in the
+        same transaction, and sends that job to a worker after the commit. If
+        this job already published, its stored result is returned and no audit
+        event or replacement job is added.
 
         Raises:
             AnnotationImportConflictError: If the job does not exist, is not a
                 GPAD job, or has no staged import.
             GroupSabeManagedError: If the group is already SABE-managed.
-            CutoverRejectedError: If a cutover's staged subject is no longer an
-                active entity.
         """
         with self._unit_of_work_factory() as uow:
             existing = uow.annotation_imports.published_import(job_id)
@@ -337,6 +334,9 @@ class AnnotationRefreshService:
                 return _import_result(existing)
             result = _import_result(
                 uow.annotation_imports.publish(job_id, actor_id=actor_id)
+            )
+            replacement = queue_term_replacement(
+                uow, group_key=result.group_key, requested_by=actor_id
             )
             AuditService(uow.audit).record_annotation_import_published(
                 is_cutover=result.is_cutover,
@@ -350,17 +350,25 @@ class AnnotationRefreshService:
                 },
             )
             uow.commit()
-            return result
+        self._dispatch(replacement)
+        return result
 
+    def _dispatch(self, job: Job) -> None:
+        """Send a replacement job to a worker, leaving it queued if sending fails.
 
-def _has_unknown_subject_rejections(stored_report: dict[str, object]) -> bool:
-    """Report whether a stored rejection report counts any unknown-entity rejection.
-
-    Raises:
-        StoredDataError: If the stored report is malformed.
-    """
-    report = STORED_REJECTION_REPORT.load(stored_report)
-    return report.by_code.get(UNKNOWN_DB_OBJECT_ID, 0) > 0
+        A failure is logged. The next publication for the same group reuses the
+        queued job and sends it again.
+        """
+        if self._dispatch_replacement is None:
+            return
+        try:
+            self._dispatch_replacement(job)
+        except Exception as error:
+            logger.error(
+                "Term replacement dispatch failed: job_id=%s failure_type=%s",
+                job.job_id,
+                type(error).__name__,
+            )
 
 
 def _import_result(record: AnnotationImportRecord) -> AnnotationRefreshResult:
@@ -384,6 +392,7 @@ def _import_result(record: AnnotationImportRecord) -> AnnotationRefreshResult:
             source_checksum=record.source_checksum,
             fetched_at=record.fetched_at,
         ),
+        schema_version=record.schema_version,
         data_rows=record.data_rows,
         annotations_published=record.annotations_staged,
         records_rejected=record.records_rejected,

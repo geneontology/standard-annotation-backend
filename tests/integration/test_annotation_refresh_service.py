@@ -14,12 +14,10 @@ from refresh_helpers import (
     start_job,
 )
 from seeding import create_job as queue_job
-from sqlalchemy import ColumnElement, Engine, delete, func, select, update
+from sqlalchemy import ColumnElement, Engine, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotation_management import (
-    AnnotationManagementMode,
-    CutoverRejectedError,
     GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
@@ -27,6 +25,7 @@ from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
+from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
 from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import (
@@ -36,7 +35,6 @@ from standard_annotation_backend.persistence.models import (
     AnnotationVersionRecord,
     AuditEventRecord,
     ChangeSetRecord,
-    EntityMembershipRecord,
 )
 from standard_annotation_backend.persistence.repositories import (
     AnnotationImportRepository,
@@ -192,16 +190,15 @@ def _audit_count(
         )
 
 
-def test_refresh_publishes_valid_annotations_and_reports_rejected_records(
+def test_refresh_publishes_rows_whose_subject_is_unknown_and_reports_unreadable_ones(
     run: RunJob,
     session_factory: sessionmaker[Session],
     seed_active_subjects: Callable[..., None],
 ) -> None:
-    """Valid annotations are published and every rejected record is reported.
+    """Every readable row is published, even one whose subject is not an entity.
 
     A row with with/from alternatives becomes one annotation per alternative.
-    Unknown subjects and unreadable rows are reported by line number and code in
-    the job result.
+    Unreadable rows are reported by line number and code in the job result.
     """
     seed_active_subjects("UniProtKB:P12345")
 
@@ -226,30 +223,33 @@ def test_refresh_publishes_valid_annotations_and_reports_rejected_records(
         "source_revision": None,
         "source_checksum": job.result["source_checksum"],
         "fetched_at": "2026-10-01T00:00:00Z",
+        "schema_version": SCHEMA_PACKAGE_VERSION,
         "data_rows": 3,
-        "annotations_published": 2,
-        "records_rejected": 2,
+        "annotations_published": 3,
+        "records_rejected": 1,
         "annotations_deleted": 0,
         "mode": "gpad_imported",
         "unchanged": False,
     }
     assert isinstance(report, dict)
-    assert report["issue_count"] == 2
-    assert report["by_code"] == {"unknown_db_object_id": 1, "field-count": 1}
+    assert report["issue_count"] == 1
+    assert report["by_code"] == {"field-count": 1}
     issues = report["issues"]
     assert isinstance(issues, list)
     assert [(issue["line_number"], issue["code"]) for issue in issues] == [
-        (5, "unknown_db_object_id"),
-        (6, "field-count"),
+        (6, "field-count")
     ]
-    assert "UniProtKB:UNKNOWN" in issues[0]["reason"]
     assert sorted(
         (
-            record.annotation_data["with_or_from"]
+            (record.db_object_id, record.annotation_data.get("with_or_from"))
             for record in annotations_of(session_factory)
         ),
         key=str,
-    ) == [["UniProtKB:Q1"], ["UniProtKB:Q2"]]
+    ) == [
+        ("UniProtKB:P12345", ["UniProtKB:Q1"]),
+        ("UniProtKB:P12345", ["UniProtKB:Q2"]),
+        ("UniProtKB:UNKNOWN", None),
+    ]
 
 
 def test_recovering_a_job_with_a_corrupt_stored_rejection_report_is_reported(
@@ -338,15 +338,17 @@ def _apply_local_change(
     with unit_of_work_factory() as uow:
         if change == "direct_create":
             uow.annotations.create(
-                annotation=_annotation("UniProtKB:Q99999"),
+                uow.annotations.prepare_create(_annotation("UniProtKB:Q99999")),
                 actor_id="curator",
                 owning_group_id=GROUP,
             )
         elif change == "edit":
             uow.annotations.update(
-                imported,
-                _annotation("UniProtKB:Q99999"),
-                expected_version=1,
+                uow.annotations.prepare_update(
+                    imported,
+                    _annotation("UniProtKB:Q99999"),
+                    expected_version=1,
+                ),
                 actor_id="curator",
                 change_source=ChangeSource.API,
             )
@@ -413,7 +415,7 @@ def test_changed_file_is_imported(
     ] == [["PMID:2"]]
 
 
-def test_ontology_term_replacement_does_not_force_a_reimport(
+def test_term_replacement_versions_do_not_force_a_reimport(
     run: RunJob,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
@@ -425,13 +427,15 @@ def test_ontology_term_replacement_does_not_force_a_reimport(
     [imported] = annotations_of(session_factory)
     with unit_of_work_factory() as uow:
         uow.annotations.update(
-            imported.annotation_id,
-            _annotation("UniProtKB:P12345").model_copy(
-                update={"ontology_class_id": "GO:0003674"}
+            uow.annotations.prepare_update(
+                imported.annotation_id,
+                _annotation("UniProtKB:P12345").model_copy(
+                    update={"ontology_class_id": "GO:0003674"}
+                ),
+                expected_version=1,
             ),
-            expected_version=1,
             actor_id="system",
-            change_source=ChangeSource.ONTOLOGY_REFRESH,
+            change_source=ChangeSource.TERM_REPLACEMENT,
         )
         uow.commit()
 
@@ -441,35 +445,6 @@ def test_ontology_term_replacement_does_not_force_a_reimport(
     assert again.result is not None and again.result["unchanged"] is True
     [kept] = annotations_of(session_factory)
     assert kept.annotation_data["ontology_class_id"] == "GO:0003674"
-
-
-def test_identical_file_is_imported_again_after_unknown_entity_rejections(
-    run: RunJob,
-    session_factory: sessionmaker[Session],
-    seed_active_subjects: Callable[..., None],
-) -> None:
-    """Annotations rejected for an unknown subject are admitted once it is known.
-
-    The file is unchanged, but the entity catalog changed after the first import.
-    """
-    seed_active_subjects("UniProtKB:P12345")
-    content = gpad_bytes(gpad_row("UniProtKB:P12345"), gpad_row("UniProtKB:Q99999"))
-    first = run(content)
-    assert first.result is not None and first.result["records_rejected"] == 1
-    seed_active_subjects("UniProtKB:Q99999")
-
-    again = run(content)
-
-    assert again.progress["unchanged"] is False
-    assert again.result is not None and again.result["unchanged"] is False
-    assert again.result["records_rejected"] == 0
-    assert sorted(
-        (
-            record.annotation_data["db_object_id"]
-            for record in annotations_of(session_factory)
-        ),
-        key=str,
-    ) == ["UniProtKB:P12345", "UniProtKB:Q99999"]
 
 
 def test_identical_file_with_only_unreadable_rows_rejected_is_skipped(
@@ -486,14 +461,15 @@ def test_identical_file_with_only_unreadable_rows_rejected_is_skipped(
     assert again.result is not None and again.result["unchanged"] is True
 
 
-def test_identical_file_with_a_corrupt_stored_rejection_report_is_not_skipped(
+def test_identical_file_is_imported_again_after_a_schema_upgrade(
     run: RunJob,
     session_factory: sessionmaker[Session],
     seed_active_subjects: Callable[..., None],
 ) -> None:
-    """A malformed stored rejection report raises `StoredDataError`, not a skip.
+    """An unchanged file is imported again when its last import used another schema.
 
-    The unchanged-file check does not trust the report, and nothing is published.
+    The installed schema version may accept different rows, so the refresh does not
+    skip the file. The new import records the installed version.
     """
     seed_active_subjects("UniProtKB:P12345")
     first = run(GOOD)
@@ -501,20 +477,15 @@ def test_identical_file_with_a_corrupt_stored_rejection_report_is_not_skipped(
         session.execute(
             update(AnnotationImportRecord)
             .where(AnnotationImportRecord.job_id == first.job_id)
-            .values(rejection_report={"issue_count": "x"})
+            .values(schema_version="0.0.5")
         )
         session.commit()
 
-    with pytest.raises(StoredDataError):
-        run(GOOD)
+    again = run(GOOD)
 
-    with session_factory() as session:
-        published = session.scalar(
-            select(func.count())
-            .select_from(AnnotationImportRecord)
-            .where(AnnotationImportRecord.annotations_deleted.is_not(None))
-        )
-    assert published == 1
+    assert again.progress["unchanged"] is False
+    assert again.result is not None and again.result["unchanged"] is False
+    assert again.result["schema_version"] == SCHEMA_PACKAGE_VERSION
 
 
 def test_refresh_replaces_only_the_target_groups_annotations_and_history(
@@ -535,9 +506,11 @@ def test_refresh_replaces_only_the_target_groups_annotations_and_history(
     soft_deleted = seed_annotation("UniProtKB:Q99999")
     with unit_of_work_factory() as uow:
         uow.annotations.update(
-            edited,
-            _annotation("UniProtKB:Q99999"),
-            expected_version=1,
+            uow.annotations.prepare_update(
+                edited,
+                _annotation("UniProtKB:Q99999"),
+                expected_version=1,
+            ),
             actor_id="curator",
             change_source=ChangeSource.API,
         )
@@ -741,36 +714,3 @@ def test_cutover_moves_the_group_to_sabe_management_permanently(
         RefreshKindName.ANNOTATION, context=system_context("scheduler"), source_key=None
     )
     assert [job.parameters["source_key"] for job in refresh_all] == ["rgd-gpad"]
-
-
-def test_cutover_fails_when_an_entity_disappears_before_publication(
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    seed_active_subjects: Callable[..., None],
-) -> None:
-    """A cutover fails at publication if a staged subject is no longer active.
-
-    The group stays `gpad_imported` and its annotations are unchanged.
-    """
-    service = AnnotationRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
-    )
-    seed_active_subjects("UniProtKB:P12345")
-    job = create_job(unit_of_work_factory, JobType.ANNOTATION_CUTOVER)
-    stage(service, job, gpad_text(gpad_row("UniProtKB:P12345")))
-    with session_factory() as session:
-        session.execute(delete(EntityMembershipRecord))
-        session.commit()
-
-    with (
-        pytest.raises(CutoverRejectedError) as raised,
-        unit_of_work_factory() as uow,
-    ):
-        uow.annotation_imports.publish(job.job_id, actor_id="curator")
-
-    assert [issue.line_number for issue in raised.value.report.issues] == [4]
-    with unit_of_work_factory() as uow:
-        mode = uow.annotation_imports.group_mode(GROUP)
-    assert mode is AnnotationManagementMode.GPAD_IMPORTED
-    assert annotations_of(session_factory) == []

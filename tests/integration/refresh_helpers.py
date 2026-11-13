@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol, cast
 
 import pytest
@@ -15,12 +16,15 @@ from standard_annotation_backend.domain.refresh import (
     RefreshOutcome,
     SourceDocument,
     SourceProvenance,
+    pack_source_files,
 )
+from standard_annotation_backend.go_site.rule_files import RULE_FILE_PATHS
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh.runner import RefreshRunner
 from standard_annotation_backend.refresh.sources import (
+    ConfiguredSource,
+    GitHubRulesSource,
     GitHubSource,
-    HttpsSource,
     RefreshSources,
     SourcesFile,
 )
@@ -44,17 +48,52 @@ TEST_ANNOTATION_SOURCES: dict[str, object] = {
 }
 
 
+GO_ENTRY: dict[str, object] = {
+    "type": "github",
+    "repository": "geneontology/go-ontology",
+    "ref": "master",
+    "path": "src/ontology/go-edit.obo",
+    "document_ontology_id": "go",
+    "prefixes": ["GO"],
+    "closure_predicates": ["rdfs:subClassOf", "BFO:0000050"],
+    "required_subsets": ["gocheck_do_not_annotate", "gocheck_obsoletion_candidate"],
+}
+RULES_ENTRY: dict[str, object] = {
+    "type": "github",
+    "repository": "geneontology/go-site",
+    "ref": "master",
+}
+RULES_LOCATOR = "github:geneontology/go-site"
+GO_SITE_FIXTURES = Path(__file__).parents[1] / "fixtures" / "go_site"
+
+
+def rule_files(replacements: Mapping[str, bytes] | None = None) -> bytes:
+    """Return the go-site fixture files packed as the rules fetcher packs them.
+
+    Args:
+        replacements: Contents to use instead of fixtures, keyed by go-site path,
+            such as `metadata/gorefs.yaml`.
+    """
+    files = {
+        path: (GO_SITE_FIXTURES / PurePosixPath(path).name).read_bytes()
+        for path in RULE_FILE_PATHS
+    }
+    return pack_source_files({**files, **(replacements or {})})
+
+
 def sources_with(
     *,
     entities: dict[str, object] | None = None,
     annotations: dict[str, object] | None = None,
+    ontologies: dict[str, object] | None = None,
 ) -> RefreshSources:
-    """Return test sources with the standard authorization and GO entries.
+    """Return test sources with the standard authorization, rules, and GO entries.
 
     Args:
         entities: The `entities` section of the sources file; empty if omitted.
         annotations: The `annotations` section of the sources file; empty if
             omitted.
+        ontologies: Ontology entries to configure in addition to GO.
     """
     return RefreshSources(
         SourcesFile.model_validate(
@@ -65,14 +104,8 @@ def sources_with(
                     "ref": "master",
                     "path": "metadata/users.yaml",
                 },
-                "ontologies": {
-                    "go": {
-                        "type": "github",
-                        "repository": "geneontology/go-ontology",
-                        "ref": "master",
-                        "path": "src/ontology/go-edit.obo",
-                    }
-                },
+                "rules": RULES_ENTRY,
+                "ontologies": {"go": GO_ENTRY, **(ontologies or {})},
                 "entities": entities or {},
                 "annotations": annotations or {},
             }
@@ -107,14 +140,22 @@ class FakeFetchers:
         self.contents = contents
         self.calls: list[str] = []
 
-    def fetch(
-        self, source_key: str, source: GitHubSource | HttpsSource
-    ) -> SourceDocument:
+    def fetch(self, source_key: str, source: ConfiguredSource) -> SourceDocument:
         """Return the configured document for `source_key` or raise its error."""
         self.calls.append(source_key)
         content = self.contents[source_key]
         if isinstance(content, Exception):
             raise content
+        if isinstance(source, GitHubRulesSource):
+            return SourceDocument(
+                source_key=source_key,
+                source_type="github",
+                source_locator=f"github:{source.repository}",
+                source_revision=REVISION,
+                source_checksum=sha256(content).hexdigest(),
+                fetched_at=FETCHED_AT,
+                content=content,
+            )
         if isinstance(source, GitHubSource):
             return SourceDocument(
                 source_key=source_key,
@@ -143,6 +184,7 @@ def build_runner(
     *,
     sources: RefreshSources = TEST_SOURCES,
     enqueue_prune: Callable[[str], None] | None = None,
+    dispatch_replacement: Callable[[Job], None] | None = None,
 ) -> RefreshRunner:
     """Build the production runner and kinds around fake fetchers."""
     return create_refresh_runner(
@@ -151,6 +193,7 @@ def build_runner(
         sources=sources,
         fetchers=fetchers,
         enqueue_prune=enqueue_prune,
+        dispatch_replacement=dispatch_replacement,
     ).runner
 
 
@@ -192,6 +235,8 @@ def obo(*terms: OboTerm, data_version: str = "releases/2026-09-28") -> bytes:
         "format-version: 1.4",
         f"data-version: {data_version}",
         "ontology: go",
+        'subsetdef: gocheck_do_not_annotate "Term not to be used for direct annotation"',
+        'subsetdef: gocheck_obsoletion_candidate "Terms planned for obsoletion"',
         "",
     ]
     for term in terms:

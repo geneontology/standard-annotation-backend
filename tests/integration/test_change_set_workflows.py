@@ -1,8 +1,10 @@
 """Verify atomic change-set review workflows with PostgreSQL."""
 
-from uuid import uuid4
+from collections.abc import Sequence
+from uuid import UUID, uuid4
 
 import pytest
+from refresh_helpers import TEST_SOURCES
 from seeding import insert_annotation
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -10,7 +12,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     ChangeSource,
-    DuplicateAnnotationError,
 )
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
@@ -23,6 +24,7 @@ from standard_annotation_backend.domain.change_sets import (
     StaleChangeSetError,
 )
 from standard_annotation_backend.domain.stored_json import StoredDataError
+from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
@@ -59,18 +61,29 @@ REVIEWER = RequestContext(
 
 
 def _service(factory: UnitOfWorkFactory) -> ChangeSetService:
-    return ChangeSetService(factory)
+    return ChangeSetService(factory, TEST_SOURCES)
+
+
+def _duplicate_peers(issues: Sequence[ValidationIssue]) -> set[UUID]:
+    """Return the peer IDs of the `duplicate_annotation` issue, if there is one."""
+    for issue in issues:
+        if issue["type"] == "duplicate_annotation":
+            details = issue.get("details", {})
+            peer_ids = details["peer_ids"]
+            assert isinstance(peer_ids, list)
+            return {UUID(peer_id) for peer_id in peer_ids}
+    return set()
 
 
 def test_create_preview_preserves_annotations_and_acceptance_records_history(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Only acceptance creates an annotation, with linked review and audit history."""
     service = _service(unit_of_work_factory)
     proposed = service.propose_create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="curator-group",
         reason="New evidence",
         context=PROPOSER,
@@ -80,9 +93,8 @@ def test_create_preview_preserves_annotations_and_acceptance_records_history(
     assert proposed.proposed_by == "proposer"
     preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert preview.can_accept
-    assert preview.annotation == validated_annotation.model_dump(mode="json")
+    assert preview.annotation == writable_annotation.model_dump(mode="json")
     assert preview.validation_errors == ()
-    assert preview.duplicate_peer_ids == ()
     stored = service.get(proposed.change_set_id, context=PROPOSER)
     assert stored.state == "proposed"
     assert stored.preview == preview
@@ -136,12 +148,12 @@ def test_create_preview_preserves_annotations_and_acceptance_records_history(
 def test_corrupt_stored_preview_is_reported_when_reading_a_change_set(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Reading a change set whose stored preview is malformed raises `StoredDataError` instead of returning the preview."""
     service = _service(unit_of_work_factory)
     proposed = service.propose_create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="curator-group",
         reason="New evidence",
         context=PROPOSER,
@@ -159,11 +171,11 @@ def test_corrupt_stored_preview_is_reported_when_reading_a_change_set(
 
 def test_create_acceptance_rechecks_duplicates_after_successful_preview(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """A duplicate created after preview prevents acceptance and preserves review."""
     service = _service(unit_of_work_factory)
-    payload = validated_annotation.model_dump(mode="json")
+    payload = writable_annotation.model_dump(mode="json")
     proposed = service.propose_create(
         payload=payload,
         owning_group_id="group",
@@ -171,17 +183,17 @@ def test_create_acceptance_rechecks_duplicates_after_successful_preview(
         context=PROPOSER,
     )
     assert service.preview(proposed.change_set_id, context=PROPOSER).can_accept
-    duplicate = AnnotationService(unit_of_work_factory).create(
+    duplicate = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
         payload=payload,
         owning_group_id="other-group",
         context=PROPOSER,
     )
-    with pytest.raises(DuplicateAnnotationError) as error:
+    with pytest.raises(InvalidChangeSetError) as error:
         service.accept(proposed.change_set_id, context=REVIEWER)
-    assert error.value.peer_ids == (duplicate.annotation_id,)
+    assert _duplicate_peers(error.value.errors) == {duplicate.annotation_id}
     preview = service.preview(proposed.change_set_id, context=PROPOSER)
     assert not preview.can_accept
-    assert preview.duplicate_peer_ids == (duplicate.annotation_id,)
+    assert _duplicate_peers(preview.validation_errors) == {duplicate.annotation_id}
     assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
@@ -191,7 +203,7 @@ def test_create_acceptance_rechecks_duplicates_after_successful_preview(
 def test_create_audit_failure_rolls_back_entire_workflow(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     failing_action: str,
 ) -> None:
     """Audit failure rolls back proposal or acceptance alongside annotation state."""
@@ -199,7 +211,7 @@ def test_create_audit_failure_rolls_back_entire_workflow(
 
     def propose() -> ChangeSet:
         return service.propose_create(
-            payload=validated_annotation.model_dump(mode="json"),
+            payload=writable_annotation.model_dump(mode="json"),
             owning_group_id="group",
             reason="New evidence",
             context=PROPOSER,
@@ -237,18 +249,21 @@ def test_create_audit_failure_rolls_back_entire_workflow(
 
 def test_repository_writes_default_to_api_change_source(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Repository create, update, and delete record the API change source by default."""
     with unit_of_work_factory() as unit_of_work:
-        target = unit_of_work.annotations.create(
-            annotation=validated_annotation, actor_id="writer", owning_group_id="group"
-        )
-        unit_of_work.annotations.update(
-            target.annotation_id,
-            validated_annotation,
+        repository = unit_of_work.annotations
+        target = repository.create(
+            repository.prepare_create(writable_annotation),
             actor_id="writer",
-            expected_version=1,
+            owning_group_id="group",
+        )
+        repository.update(
+            repository.prepare_update(
+                target.annotation_id, writable_annotation, expected_version=1
+            ),
+            actor_id="writer",
         )
         unit_of_work.annotations.soft_delete(
             target.annotation_id, actor_id="writer", expected_version=2
@@ -263,16 +278,16 @@ def test_repository_writes_default_to_api_change_source(
 
 def test_update_preview_and_acceptance_use_base_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """An update previews whole-field replacements and changes only on acceptance.
 
     The saved version is attributed to the proposer, as for creates; the reviewer
     is recorded on the change set.
     """
-    annotations = AnnotationService(unit_of_work_factory)
+    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     target = annotations.create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="target-group",
         context=PROPOSER,
     )
@@ -282,7 +297,7 @@ def test_update_preview_and_acceptance_use_base_snapshot(
         base_version=1,
         patch=[
             {"op": "test", "path": "/assigned_by", "value": "GO_Central"},
-            {"op": "replace", "path": "/assigned_by", "value": "NEW"},
+            {"op": "replace", "path": "/assigned_by", "value": "RGD"},
         ],
         reason="Correct attribution",
         context=PROPOSER,
@@ -293,12 +308,12 @@ def test_update_preview_and_acceptance_use_base_snapshot(
     assert preview.before_annotation is not None
     assert preview.annotation is not None
     assert preview.before_annotation["assigned_by"] == "GO_Central"
-    assert preview.annotation["assigned_by"] == "NEW"
+    assert preview.annotation["assigned_by"] == "RGD"
     assert annotations.get(target.annotation_id, context=PROPOSER).version == 1
     accepted = service.accept(proposed.change_set_id, context=REVIEWER)
     assert accepted.annotation_id == target.annotation_id
     assert accepted.version == 2
-    assert accepted.annotation.assigned_by == "NEW"
+    assert accepted.annotation.assigned_by == "RGD"
     with unit_of_work_factory() as unit_of_work:
         version = unit_of_work.annotations.get_version(target.annotation_id, 2)
         assert version is not None
@@ -309,11 +324,11 @@ def test_update_preview_and_acceptance_use_base_snapshot(
 
 def test_update_preview_reports_invalid_post_patch_annotation(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """A valid patch that removes a required field yields validation problems."""
-    target = AnnotationService(unit_of_work_factory).create(
-        payload=validated_annotation.model_dump(mode="json"),
+    target = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
     )
@@ -335,18 +350,18 @@ def test_update_preview_reports_invalid_post_patch_annotation(
 
 def test_update_preview_uses_historical_base_and_reports_current_version(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """A historical proposal previews its saved base while reporting staleness."""
-    annotations = AnnotationService(unit_of_work_factory)
+    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     target = annotations.create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
     )
     annotations.patch(
         target.annotation_id,
-        changes={"assigned_by": "CURRENT"},
+        changes={"assigned_by": "ZFIN"},
         expected_version=1,
         context=PROPOSER,
     )
@@ -373,17 +388,22 @@ def test_update_preview_uses_historical_base_and_reports_current_version(
 
 
 @pytest.mark.parametrize("introduce_peer", [False, True])
-def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
+def test_update_of_a_legacy_duplicate_is_previewed_and_rejected(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     introduce_peer: bool,
 ) -> None:
-    """Preview and acceptance allow existing duplicates but reject new conflicts."""
-    payload = validated_annotation.model_dump(mode="json")
+    """An update that leaves its annotation with any duplicate peer is rejected.
+
+    The target already duplicates an imported annotation. Whether or not the update
+    also matches a further annotation, the preview lists every peer, cannot be
+    accepted, and acceptance fails with the same peers.
+    """
+    payload = writable_annotation.model_dump(mode="json")
     with unit_of_work_factory() as unit_of_work:
         target = insert_annotation(
             unit_of_work.annotations.session,
-            annotation=validated_annotation,
+            annotation=writable_annotation,
             owning_group_id="group",
             actor_id="importer",
             change_source=ChangeSource.ANNOTATION_REFRESH,
@@ -391,7 +411,7 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
         target_id = target.annotation_id
         legacy = insert_annotation(
             unit_of_work.annotations.session,
-            annotation=validated_annotation,
+            annotation=writable_annotation,
             owning_group_id="other",
             actor_id="importer",
             change_source=ChangeSource.ANNOTATION_REFRESH,
@@ -411,8 +431,9 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
     patch = (
         [{"op": "replace", "path": "/references", "value": ["PMID:1", "PMID:99"]}]
         if introduce_peer
-        else [{"op": "replace", "path": "/assigned_by", "value": "NEW"}]
+        else [{"op": "replace", "path": "/assigned_by", "value": "RGD"}]
     )
+    expected = {legacy_id, new_peer_id} if introduce_peer else {legacy_id}
     proposed = service.propose_update(
         target_id,
         base_version=1,
@@ -420,17 +441,15 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
         reason="Review duplicates",
         context=PROPOSER,
     )
+
     preview = service.preview(proposed.change_set_id, context=PROPOSER)
-    assert legacy_id not in preview.duplicate_peer_ids
-    assert preview.duplicate_peer_ids == ((new_peer_id,) if introduce_peer else ())
-    assert preview.can_accept is not introduce_peer
-    if introduce_peer:
-        with pytest.raises(DuplicateAnnotationError) as error:
-            service.accept(proposed.change_set_id, context=REVIEWER)
-        assert error.value.peer_ids == (new_peer_id,)
-        assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
-    else:
-        assert service.accept(proposed.change_set_id, context=REVIEWER).version == 2
+
+    assert _duplicate_peers(preview.validation_errors) == expected
+    assert preview.can_accept is False
+    with pytest.raises(InvalidChangeSetError) as error:
+        service.accept(proposed.change_set_id, context=REVIEWER)
+    assert _duplicate_peers(error.value.errors) == expected
+    assert service.get(proposed.change_set_id, context=PROPOSER).state == "proposed"
 
 
 @pytest.mark.parametrize(
@@ -444,12 +463,12 @@ def test_update_duplicate_policy_preserves_legacy_peers_and_rejects_new_peers(
 def test_update_proposal_rejects_unusable_patch_before_persistence(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     patch: object,
 ) -> None:
     """Unsupported or inapplicable patches are rejected without storing a proposal."""
-    target = AnnotationService(unit_of_work_factory).create(
-        payload=validated_annotation.model_dump(mode="json"),
+    target = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
     )
@@ -468,11 +487,11 @@ def test_update_proposal_rejects_unusable_patch_before_persistence(
 
 def test_update_proposal_requires_existing_base_version(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """A proposal cannot target a version that has never existed."""
-    target = AnnotationService(unit_of_work_factory).create(
-        payload=validated_annotation.model_dump(mode="json"),
+    target = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
     )
@@ -480,7 +499,7 @@ def test_update_proposal_requires_existing_base_version(
         _service(unit_of_work_factory).propose_update(
             target.annotation_id,
             base_version=99,
-            patch=[{"op": "replace", "path": "/assigned_by", "value": "NEW"}],
+            patch=[{"op": "replace", "path": "/assigned_by", "value": "RGD"}],
             reason="Unknown base",
             context=PROPOSER,
         )
@@ -489,16 +508,16 @@ def test_update_proposal_requires_existing_base_version(
 
 def test_delete_preview_and_acceptance_preserve_history(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Deletion previews its target, then saves a deleted version upon acceptance.
 
     The deleted version is attributed to the proposer; the reviewer is recorded on
     the change set.
     """
-    annotations = AnnotationService(unit_of_work_factory)
+    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     target = annotations.create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="target-group",
         context=PROPOSER,
     )
@@ -513,7 +532,7 @@ def test_delete_preview_and_acceptance_preserve_history(
     preview = service.preview(proposal.change_set_id, context=PROPOSER)
     assert preview.can_accept
     assert preview.is_deleted
-    assert preview.annotation == validated_annotation.model_dump(mode="json")
+    assert preview.annotation == writable_annotation.model_dump(mode="json")
     assert annotations.get(target.annotation_id, context=PROPOSER).version == 1
     accepted = service.accept(proposal.change_set_id, context=REVIEWER)
     assert accepted.version == 2
@@ -532,12 +551,12 @@ def test_delete_preview_and_acceptance_preserve_history(
 def test_rejection_records_explanation_reviewer_and_audit(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Rejection stores the reviewer's explanation and leaves annotations untouched."""
     service = _service(unit_of_work_factory)
     proposal = service.propose_create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         reason="Candidate",
         context=PROPOSER,
@@ -568,14 +587,14 @@ def test_rejection_records_explanation_reviewer_and_audit(
 def test_stale_acceptance_commits_review_and_audit_before_raising(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     operation: str,
     target_change: str,
 ) -> None:
     """A changed or deleted target makes review stale durably before the error escapes."""
-    annotations = AnnotationService(unit_of_work_factory)
+    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     target = annotations.create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
     )
@@ -586,7 +605,7 @@ def test_stale_acceptance_commits_review_and_audit_before_raising(
         reason="Review",
         context=PROPOSER,
         **(
-            {"patch": [{"op": "replace", "path": "/assigned_by", "value": "PROPOSED"}]}
+            {"patch": [{"op": "replace", "path": "/assigned_by", "value": "SGD"}]}
             if operation == "update"
             else {}
         ),
@@ -594,7 +613,7 @@ def test_stale_acceptance_commits_review_and_audit_before_raising(
     if target_change == "update":
         annotations.patch(
             target.annotation_id,
-            changes={"assigned_by": "CURRENT"},
+            changes={"assigned_by": "ZFIN"},
             expected_version=1,
             context=PROPOSER,
         )
@@ -628,14 +647,14 @@ def test_stale_acceptance_commits_review_and_audit_before_raising(
 @pytest.mark.parametrize("operation", ["accept", "reject", "preview"])
 def test_terminal_proposals_reject_further_review_operations(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     state: str,
     operation: str,
 ) -> None:
     """A completed review remains terminal and cannot be previewed or reviewed again."""
-    annotations = AnnotationService(unit_of_work_factory)
+    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     target = annotations.create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
     )
@@ -650,7 +669,7 @@ def test_terminal_proposals_reject_further_review_operations(
     else:
         annotations.patch(
             target.annotation_id,
-            changes={"assigned_by": "CURRENT"},
+            changes={"assigned_by": "ZFIN"},
             expected_version=1,
             context=PROPOSER,
         )
@@ -668,12 +687,12 @@ def test_terminal_proposals_reject_further_review_operations(
 
 def test_delete_proposal_requires_existing_active_base_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Deletion proposals require a saved version that still represented an annotation."""
-    annotations = AnnotationService(unit_of_work_factory)
+    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     target = annotations.create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
     )
@@ -699,13 +718,13 @@ def test_delete_proposal_requires_existing_active_base_snapshot(
 def test_review_audit_failure_rolls_back_annotation_and_review_state(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     transition: str,
 ) -> None:
     """A failed audit record leaves the proposal and prior annotation version intact."""
-    annotations = AnnotationService(unit_of_work_factory)
+    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
     target = annotations.create(
-        payload=validated_annotation.model_dump(mode="json"),
+        payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
     )
@@ -714,7 +733,7 @@ def test_review_audit_failure_rolls_back_annotation_and_review_state(
         service.propose_update(
             target.annotation_id,
             base_version=1,
-            patch=[{"op": "replace", "path": "/assigned_by", "value": "PROPOSED"}],
+            patch=[{"op": "replace", "path": "/assigned_by", "value": "SGD"}],
             reason="Review",
             context=PROPOSER,
         )
@@ -726,7 +745,7 @@ def test_review_audit_failure_rolls_back_annotation_and_review_state(
     if transition == "stale":
         annotations.patch(
             target.annotation_id,
-            changes={"assigned_by": "CURRENT"},
+            changes={"assigned_by": "ZFIN"},
             expected_version=1,
             context=PROPOSER,
         )

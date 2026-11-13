@@ -1,0 +1,23 @@
+- id: GO_REF:0000015
+  title: Use of the ND evidence code for Gene Ontology (GO) terms.
+  authors: GO curators
+  year: 2006
+  description: Use of the ND evidence code for annotations.
+  alt_id:
+    - GO_REF:0000005
+  is_obsolete: false
+- id: GO_REF:0000033
+  title: Annotation inferences using phylogenetic trees
+  authors: Paul D. Thomas
+  year: 2010
+  description: |-
+    The Phylogenetic ANnotation using Gene Ontology (PAN-GO) method annotates
+    evolutionary trees from the PANTHER database with GO terms.
+  external_accession:
+    - PMID:21873635
+- id: GO_REF:0000001
+  title: Mouse Genome Informatics GO annotations from orthology
+  authors: MGI curators
+  year: 2001
+  description: An obsolete reference.
+  is_obsolete: true

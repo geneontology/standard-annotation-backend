@@ -1,5 +1,6 @@
 """Verify staging, publication, and replacement of entity catalogs in PostgreSQL."""
 
+from collections.abc import Callable
 from dataclasses import replace
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from standard_annotation_backend.domain.entities import (
     EntityRefreshResult,
 )
 from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.domain.refresh import (
     SourceDocument,
     SourceProvenance,
@@ -56,7 +58,7 @@ from standard_annotation_backend.services.job_service import Job
 
 
 def source_gpi(*identifiers: str) -> str:
-    """Return valid GPI text, preserving repeated identifiers and source order."""
+    """Return valid GPI text with one line per identifier, in the given order."""
     text = "!gpi-version: 2.0\n!generated-by: TestDB\n!date-generated: 2026-09-29\n"
     return text + "".join(
         f"{identifier}\tSYM{index}\tProtein\t\tSO:0001217\tNCBITaxon:9606\t\t{identifier}\t\t\t\n"
@@ -119,18 +121,33 @@ def active_ids(session_factory: sessionmaker[Session]) -> list[str]:
         )
 
 
+def _annotation_on(db_object_id: str) -> Annotation:
+    """Return a structurally valid annotation whose subject is `db_object_id`."""
+    return Annotation.model_validate(
+        {
+            "db_object_id": db_object_id,
+            "relation": "RO:0002331",
+            "ontology_class_id": "GO:0006915",
+            "references": ["PMID:1"],
+            "evidence_type": "ECO:0000314",
+            "annotation_date": "2026-09-29",
+            "assigned_by": "MGI",
+        }
+    )
+
+
 def test_publication_records_one_audit_event_and_a_durable_result(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
     """Publishing records one audit event and a durable result.
 
-    Each distinct identifier becomes one active entity. Recovering the job or
+    Each identifier becomes one active entity. Recovering the job or
     staging the same catalog again afterward returns the same result without
     adding audit events.
     """
     service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    job = publish_catalog(service, unit_of_work_factory, "MGI:2", "MGI:1", "MGI:1")
+    job = publish_catalog(service, unit_of_work_factory, "MGI:2", "MGI:1")
     recovered = service.recover(job)
     assert recovered is not None
     result = STORED_ENTITY_REFRESH_RESULT.load(recovered.result)
@@ -138,14 +155,10 @@ def test_publication_records_one_audit_event_and_a_durable_result(
         result.source_record_count,
         result.active_identifier_count,
         result.added_count,
-    ) == (3, 2, 2)
-    assert (result.retained_count, result.removed_count, result.removal_impacts) == (
-        0,
-        0,
-        (),
-    )
+    ) == (2, 2, 2)
+    assert (result.retained_count, result.removed_count) == (0, 0)
     assert result.source_key == "mgi"
-    document = _document("mgi", "MGI:2", "MGI:1", "MGI:1")
+    document = _document("mgi", "MGI:2", "MGI:1")
     assert (
         result.source_type,
         result.source_locator,
@@ -212,7 +225,6 @@ def test_recovered_publication_reports_the_original_outcome(
         job, _document("mgi", "MGI:3", "MGI:4", "MGI:5"), ignore_progress
     )
     assert original.warnings == ("catalog warning",)
-    assert original.counts["removal_impact_count"] >= 1
     assert original.counts["removed_count"] == 2
     assert original.counts["added_count"] == 2
     recovered = service.recover(job)
@@ -222,13 +234,14 @@ def test_recovered_publication_reports_the_original_outcome(
     assert recovered.warnings == original.warnings
 
 
-def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
+def test_replacement_does_not_change_annotations(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
-    """Replacing a catalog reports sorted impacts and leaves annotations unchanged.
+    """Replacing a catalog leaves annotations on removed entities unchanged.
 
-    Each impact lists the non-deleted annotations on a removed entity.
+    The annotations' current state and full history are the same afterwards,
+    including a deleted annotation's.
     """
     service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
     old = publish_catalog(service, unit_of_work_factory, "MGI:z", "MGI:a", "MGI:keep")
@@ -286,13 +299,6 @@ def test_replacement_reports_full_sorted_impacts_without_mutating_annotations(
         1,
         2,
     )
-    assert outcome.result["removal_impacts"] == [
-        {
-            "db_object_id": "MGI:a",
-            "annotation_ids": [str(UUID(int=1)), str(UUID(int=2))],
-        },
-        {"db_object_id": "MGI:z", "annotation_ids": [str(UUID(int=3))]},
-    ]
     assert active_ids(session_factory) == ["MGI:keep", "MGI:new", "RGD:1"]
     assert stored_result(unit_of_work_factory, old) == old_result
     with session_factory() as session:
@@ -431,3 +437,32 @@ def test_publication_spans_multiple_insert_batches_without_losing_records(
     assert result is not None
     assert result.source_record_count == result.active_identifier_count == 5001
     assert len(active_ids(session_factory)) == 5001
+
+
+def test_validation_reads_each_published_entity_taxon_and_type(
+    unit_of_work_factory: UnitOfWorkFactory,
+    reference_data: Callable[..., None],
+) -> None:
+    """Validation reads the taxon and type each entity's GPI line gives."""
+    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    text = (
+        "!gpi-version: 2.0\n!generated-by: TestDB\n!date-generated: 2026-09-29\n"
+        "MGI:1\tA\tProtein\t\tPR:000000001\tNCBITaxon:10090\t\tMGI:1\t\t\t\n"
+        "MGI:2\tB\tComplex\t\tGO:0032991\tNCBITaxon:9606\t\tMGI:2\t\t\t\n"
+    )
+    job = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "mgi")
+
+    service.apply(job, source_document("mgi", text.encode()), ignore_progress)
+
+    with unit_of_work_factory() as uow:
+        facts = uow.validation_facts.gather(
+            [_annotation_on("MGI:1"), _annotation_on("MGI:2")],
+            [(), ()],
+            {GO_ONTOLOGY_KEY: ("GO",)},
+        )
+    assert [
+        None
+        if fact.entity is None
+        else (fact.entity.db_object_taxon_id, fact.entity.db_object_type)
+        for fact in facts
+    ] == [("NCBITaxon:10090", "PR:000000001"), ("NCBITaxon:9606", "GO:0032991")]

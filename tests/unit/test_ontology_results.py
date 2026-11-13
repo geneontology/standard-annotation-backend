@@ -6,23 +6,23 @@ from uuid import UUID
 import pytest
 
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     STORED_ONTOLOGY_REFRESH_RESULT,
     OntologyDocument,
-    OntologyFinding,
-    OntologyKey,
     OntologyRefreshResult,
     OntologyRefreshWarning,
+    OntologyTerm,
     OntologyVersion,
+    ontology_refresh_warnings,
 )
 from standard_annotation_backend.domain.stored_json import StoredDataError
 
 _VERSION_ID = UUID("00000000-0000-0000-0000-000000000004")
-_ANNOTATION_ID = UUID("00000000-0000-0000-0000-000000000005")
 _FETCHED = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 _RESULT = OntologyRefreshResult(
     ontology_version=OntologyVersion(
         version_id=_VERSION_ID,
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         source_type="https",
         source_locator="https://example.org/go.obo",
         source_revision=None,
@@ -33,18 +33,6 @@ _RESULT = OntologyRefreshResult(
         term_count=10,
         closure_count=20,
         active=True,
-    ),
-    annotation_scan_count=3,
-    annotation_update_count=1,
-    annotation_skip_count=1,
-    findings=(
-        OntologyFinding(
-            code="obsolete_without_replacement",
-            ontology_key=OntologyKey.GO,
-            term_id="GO:0000001",
-            field_paths=("ontology_class_id",),
-            annotation_id=_ANNOTATION_ID,
-        ),
     ),
     ontology_warnings=(
         OntologyRefreshWarning("undefined_consider_target", "GO:1", "GO:2"),
@@ -61,25 +49,11 @@ _JOB_RESULT = {
     "loaded_predicates": ["BFO:0000050"],
     "term_count": 10,
     "closure_count": 20,
-    "annotation_scan_count": 3,
-    "annotation_update_count": 1,
-    "annotation_skip_count": 1,
     "ontology_warnings": [
         {
             "code": "undefined_consider_target",
             "term_id": "GO:1",
             "referenced_term_id": "GO:2",
-        }
-    ],
-    "findings": [
-        {
-            "code": "obsolete_without_replacement",
-            "ontology": "go",
-            "term_id": "GO:0000001",
-            "annotation_id": str(_ANNOTATION_ID),
-            "field_paths": ["ontology_class_id"],
-            "replacement_ids": [],
-            "conflicting_annotation_ids": [],
         }
     ],
 }
@@ -93,7 +67,7 @@ def test_job_result_keeps_its_keys() -> None:
 def test_already_active_result_keeps_every_key() -> None:
     """The result for an already-active document keeps every key with empty values."""
     document = OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=b"",
         source_type="https",
         source_locator="https://example.org/go.obo",
@@ -112,22 +86,18 @@ def test_already_active_result_keeps_every_key() -> None:
         "loaded_predicates": [],
         "term_count": 0,
         "closure_count": 0,
-        "annotation_scan_count": 0,
-        "annotation_update_count": 0,
-        "annotation_skip_count": 0,
         "ontology_warnings": [],
-        "findings": [],
     }
 
 
 @pytest.mark.parametrize(
     "change",
     [
-        {"annotation_update_count": None},
-        {"annotation_scan_count": "3"},
+        {"term_count": None},
+        {"closure_count": "3"},
         {"term_count": -1},
-        {"findings": {"code": "x"}},
-        {"ontology": "not-an-ontology"},
+        {"ontology_warnings": {"code": "x"}},
+        {"ontology": 5},
     ],
 )
 def test_corrupt_stored_result_is_rejected(change: dict[str, object]) -> None:
@@ -139,9 +109,20 @@ def test_corrupt_stored_result_is_rejected(change: dict[str, object]) -> None:
 def test_missing_count_is_rejected() -> None:
     """A stored result without one of its counts is rejected."""
     incomplete = {
-        key: value
-        for key, value in _JOB_RESULT.items()
-        if key != "annotation_skip_count"
+        key: value for key, value in _JOB_RESULT.items() if key != "term_count"
     }
     with pytest.raises(StoredDataError):
         STORED_ONTOLOGY_REFRESH_RESULT.load(incomplete)
+
+
+def test_consider_suggestions_into_other_ontologies_are_not_warned_about() -> None:
+    """Only a missing `consider` target with the ontology's own prefix is a warning."""
+    terms = {
+        "GO:0000001": OntologyTerm(
+            "GO:0000001", True, (), ("GO:9999999", "UBERON:0000001")
+        )
+    }
+
+    warnings = ontology_refresh_warnings(terms, ("GO",))
+
+    assert [warning.referenced_term_id for warning in warnings] == ["GO:9999999"]

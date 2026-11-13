@@ -22,15 +22,20 @@ _PREVIEW = ChangeSetPreview(
             "message": "bad value",
             "type": "value_error",
         },
+        {
+            "location": ("annotation",),
+            "message": "Annotation duplicates other active annotations",
+            "type": "duplicate_annotation",
+            "details": {"peer_ids": ["00000000-0000-0000-0000-000000000009"]},
+        },
     ),
-    duplicate_peer_ids=(UUID("00000000-0000-0000-0000-000000000009"),),
     is_stale=True,
     can_accept=False,
 )
 
 
 def test_preview_round_trips_including_mixed_issue_locations() -> None:
-    """A stored preview loads back equal, keeping integer location parts."""
+    """A stored preview loads back equal, keeping locations and issue details."""
     loaded = STORED_CHANGE_SET_PREVIEW.load(STORED_CHANGE_SET_PREVIEW.dump(_PREVIEW))
     assert loaded == _PREVIEW
     assert loaded.validation_errors[0]["location"] == ("annotation", "with_or_from", 0)

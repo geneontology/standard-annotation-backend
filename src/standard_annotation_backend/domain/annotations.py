@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -14,8 +13,6 @@ from go_standard_annotation_schema.datamodel.go_standard_annotation_schema impor
 )
 
 from standard_annotation_backend.domain.errors import (
-    ConflictError,
-    DuplicatePeers,
     ErrorDetails,
     InvalidInputError,
     NotFoundError,
@@ -36,7 +33,6 @@ __all__ = [
     "AnnotationStatus",
     "AnnotationVersionNotFoundError",
     "ChangeSource",
-    "DuplicateAnnotationError",
     "EmptyAnnotationPatchError",
     "InvalidAnnotationPayloadError",
     "StaleAnnotationVersionError",
@@ -69,8 +65,8 @@ class ChangeSource(StrEnum):
     """A direct create, update, or delete request."""
     CHANGE_SET = "change_set"
     """An accepted change-set proposal."""
-    ONTOLOGY_REFRESH = "ontology_refresh"
-    """An automatic replacement of an obsolete ontology term."""
+    TERM_REPLACEMENT = "term_replacement"
+    """An automatic replacement of an obsolete term or alternative ID."""
     ANNOTATION_REFRESH = "annotation_refresh"
     """An import of a group's annotations from a GPAD source."""
     ANNOTATION_CUTOVER = "annotation_cutover"
@@ -115,21 +111,6 @@ class AnnotationVersionNotFoundError(NotFoundError):
         self.annotation_id = annotation_id
         self.version = version
         super().__init__()
-
-
-class DuplicateAnnotationError(ConflictError):
-    """Report that a write would duplicate active annotations."""
-
-    code = "duplicate_annotation"
-    message = "Annotation conflicts with active duplicates"
-
-    def __init__(self, peer_ids: Iterable[UUID]) -> None:
-        self.peer_ids = tuple(peer_ids)
-        super().__init__()
-
-    def details(self) -> ErrorDetails:
-        """Return the identifiers of the conflicting annotations."""
-        return DuplicatePeers(peer_ids=self.peer_ids)
 
 
 class StaleAnnotationVersionError(PreconditionFailedError):

@@ -7,14 +7,12 @@ import pytest
 from standard_annotation_backend.domain.entities import (
     STORED_ENTITY_REFRESH_RESULT,
     STORED_ENTITY_RETIREMENT_RESULT,
+    EntityCatalogRetirementResult,
     EntityRefreshResult,
-    EntityRemovalImpact,
 )
 from standard_annotation_backend.domain.stored_json import StoredDataError
 
 _SNAPSHOT = UUID("00000000-0000-0000-0000-000000000001")
-_ANNOTATION = UUID("00000000-0000-0000-0000-000000000002")
-_IMPACT = EntityRemovalImpact("UniProtKB:P1", (_ANNOTATION,))
 _RESULT = EntityRefreshResult(
     snapshot_id=_SNAPSHOT,
     source_key="uniprot",
@@ -28,7 +26,6 @@ _RESULT = EntityRefreshResult(
     retained_count=1,
     removed_count=1,
     warnings=("w1",),
-    removal_impacts=(_IMPACT,),
 )
 _JOB_RESULT = {
     "snapshot_id": str(_SNAPSHOT),
@@ -44,14 +41,11 @@ _JOB_RESULT = {
     "removed_count": 1,
     "warnings": ["w1"],
     "warning_count": 1,
-    "removal_impacts": [
-        {"db_object_id": "UniProtKB:P1", "annotation_ids": [str(_ANNOTATION)]}
-    ],
 }
 
 
 def test_refresh_job_result_keeps_its_stored_keys() -> None:
-    """The job result has exactly these keys, including `warning_count` and `removal_impacts`."""
+    """The job result has exactly these keys, including `warning_count`."""
     assert _RESULT.to_job_result() == _JOB_RESULT
 
 
@@ -61,7 +55,6 @@ def test_refresh_job_result_keeps_its_stored_keys() -> None:
         {"added_count": "1"},
         {"removed_count": -1},
         {"warnings": "w1"},
-        {"removal_impacts": [{"db_object_id": "UniProtKB:P1"}]},
         {"snapshot_id": "not-a-uuid"},
     ],
 )
@@ -75,3 +68,18 @@ def test_corrupt_stored_retirement_result_is_rejected() -> None:
     """A retirement result with a non-boolean `retired` raises `StoredDataError`."""
     with pytest.raises(StoredDataError):
         STORED_ENTITY_RETIREMENT_RESULT.load({"source_key": "uniprot", "retired": 1})
+
+
+def test_retirement_job_result_counts_the_removed_identifiers() -> None:
+    """A retirement result records how many identifiers it removed and loads back."""
+    result = EntityCatalogRetirementResult("mgi", True, _SNAPSHOT, removed_count=2)
+
+    stored = result.to_job_result()
+
+    assert stored == {
+        "source_key": "mgi",
+        "retired": True,
+        "snapshot_id": str(_SNAPSHOT),
+        "removed_count": 2,
+    }
+    assert STORED_ENTITY_RETIREMENT_RESULT.load(stored) == result

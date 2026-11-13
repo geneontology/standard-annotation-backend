@@ -50,9 +50,11 @@ class GpiRowIssue:
     Attributes:
         line_number: One-based line number of the row in the source file.
         category: `syntax`, `field-count`, or `validation`, as reported by the
-            schema package's reader.
-        message: The reason for a `syntax` or `field-count` problem, cut to 200
-            characters. `None` for `validation`, whose reasons are in `fields`.
+            schema package's reader, or `duplicate` for a line that repeats an
+            earlier line's `db_object_id`.
+        message: The reason for a `syntax`, `field-count`, or `duplicate`
+            problem, cut to 200 characters. `None` for `validation`, whose reasons
+            are in `fields`.
         fields: One entry per invalid field for a `validation` problem.
     """
 
@@ -128,8 +130,10 @@ def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
     text, counting header, comment, and blank lines. The GPI header is kept as the
     catalog's source metadata.
 
-    A catalog is returned only when every row is valid. Otherwise, all invalid
-    rows are collected first, so a single error reports every problem in the
+    A catalog is returned only when every row is valid and no identifier appears
+    on more than one line. A repeated identifier would give one entity two
+    descriptions, so each repeating line is reported as a `duplicate` issue. All
+    problems are collected first, so a single error reports every problem in the
     document.
 
     Args:
@@ -141,9 +145,10 @@ def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
         source metadata, and `source`.
 
     Raises:
-        GpiParseError: If the header or any data row is invalid. Lines containing
-            a NUL character, which PostgreSQL cannot store, are invalid. The error
-            describes each problem, including the rejected field values.
+        GpiParseError: If the header or any data row is invalid, or an identifier
+            appears on more than one line. Lines containing a NUL character, which
+            PostgreSQL cannot store, are invalid. The error describes each problem,
+            including the rejected field values.
     """
     try:
         nul_lines = nul_data_lines(text)
@@ -162,13 +167,18 @@ def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
     except HeaderError as error:
         raise GpiParseError("header", message=_truncate(str(error))) from None
 
-    issues = [
-        GpiRowIssue(line_number, "syntax", NUL_REASON, ()) for line_number in nul_lines
-    ] + [
-        _row_issue(issue)
-        for issue in reader_issues
-        if issue.line_number not in nul_lines
-    ]
+    issues = (
+        [
+            GpiRowIssue(line_number, "syntax", NUL_REASON, ())
+            for line_number in nul_lines
+        ]
+        + [
+            _row_issue(issue)
+            for issue in reader_issues
+            if issue.line_number not in nul_lines
+        ]
+        + _repeated_identifiers(records)
+    )
     if issues:
         raise GpiParseError(
             "row_validation",
@@ -182,6 +192,24 @@ def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
         records=records,
         warnings=(),
     )
+
+
+def _repeated_identifiers(records: tuple[EntityRecord, ...]) -> list[GpiRowIssue]:
+    """Return a `duplicate` issue for each record that repeats an earlier identifier."""
+    first_lines: dict[str, int] = {}
+    issues: list[GpiRowIssue] = []
+    for record in records:
+        first = first_lines.setdefault(record.entity.db_object_id, record.line_number)
+        if first != record.line_number:
+            issues.append(
+                GpiRowIssue(
+                    line_number=record.line_number,
+                    category="duplicate",
+                    message=f"repeats the db_object_id on line {first}",
+                    fields=(),
+                )
+            )
+    return issues
 
 
 def _row_issue(issue: RowIssue) -> GpiRowIssue:

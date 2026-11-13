@@ -71,19 +71,26 @@ def test_parse_gpi_accepts_a_header_only_document() -> None:
     assert catalog.warnings == ()
 
 
-def test_parse_gpi_records_physical_line_numbers_for_repeated_ids() -> None:
-    """Repeated IDs remain distinct records identified by their source lines."""
-    catalog = parse_gpi(_text("repeated-id.gpi"), PROVENANCE)
+def test_a_repeated_identifier_fails_with_the_line_it_repeats() -> None:
+    """A line that repeats an earlier line's identifier makes the file invalid.
 
-    assert [record.line_number for record in catalog.records] == [5, 8]
-    assert [record.entity.db_object_id for record in catalog.records] == [
-        "UniProtKB:P12345",
-        "UniProtKB:P12345",
-    ]
-    assert [record.entity.db_object_symbol for record in catalog.records] == [
-        "ABC1",
-        "ABC1-2",
-    ]
+    The issue is on the repeating line and names the line it repeats.
+    """
+    with pytest.raises(GpiParseError) as raised:
+        parse_gpi(_text("repeated-id.gpi"), PROVENANCE)
+
+    assert raised.value.code == "row_validation"
+    assert raised.value.details == {
+        "issue_count": 1,
+        "issues": [
+            {
+                "line_number": 8,
+                "category": "duplicate",
+                "message": "repeats the db_object_id on line 5",
+                "fields": [],
+            }
+        ],
+    }
 
 
 @pytest.mark.parametrize(
@@ -248,3 +255,20 @@ def test_parse_gpi_rejects_nul_in_source_metadata(header: str) -> None:
     assert caught.value.message is not None
     assert "NUL" in caught.value.message
     assert caught.value.details == {"message": caught.value.message}
+
+
+def test_header_values_followed_by_whitespace_are_read_without_it() -> None:
+    """Tabs or spaces after a header value are not part of the value.
+
+    WormBase writes `!gpi-version: 2.0` followed by tabs.
+    """
+    text = (
+        "!gpi-version: 2.0\t\t\t\n!generated-by: WB\t\t\t\t\n"
+        "!date-generated: 2026-11-10 \n"
+    )
+
+    catalog = parse_gpi(text, PROVENANCE)
+
+    assert catalog.source_metadata["version"] == "2.0"
+    assert catalog.source_metadata["generated_by"] == "WB"
+    assert catalog.source_metadata["date_generated"] == "2026-11-10"

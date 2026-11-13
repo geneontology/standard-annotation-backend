@@ -113,15 +113,18 @@ def _active_ids(session_factory: sessionmaker[Session]) -> list[str]:
         )
 
 
-def test_retirement_removes_membership_and_reports_impacts(
+def test_retirement_removes_membership_and_counts_identifiers(
     database_engine: Engine,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     services: tuple[JobService, EntityRefreshService],
     seed_annotation: Callable[[str], UUID],
 ) -> None:
-    """Retiring a source removes its entities and reports affected annotations."""
-    jobs, imports = services
+    """Retiring a source removes its entities and counts them.
+
+    An annotation on a retired entity is kept unchanged.
+    """
+    _, imports = services
     _publish(imports, unit_of_work_factory, "mgi", "MGI:1", "MGI:2")
     _publish(imports, unit_of_work_factory, "rgd", "RGD:1")
     annotation_id = seed_annotation("MGI:1")  # active annotation on a retired entity
@@ -137,7 +140,9 @@ def test_retirement_removes_membership_and_reports_impacts(
                 )
             )
         ) == ["RGD:1"]
-        assert session.get(AnnotationRecord, annotation_id) is not None
+        annotation = session.get(AnnotationRecord, annotation_id)
+        assert annotation is not None
+        assert annotation.current_version == 1
         audits = list(
             session.scalars(
                 select(AuditEventRecord).where(
@@ -147,7 +152,7 @@ def test_retirement_removes_membership_and_reports_impacts(
         )
         assert len(audits) == 1
         retired_snapshot_id = audits[0].details["snapshot_id"]
-    with jobs._unit_of_work_factory() as uow:
+    with unit_of_work_factory() as uow:
         record = uow.jobs.get(job_id)
         assert record is not None
         assert record.status == JobStatus.SUCCEEDED.value
@@ -157,10 +162,6 @@ def test_retirement_removes_membership_and_reports_impacts(
             "retired": True,
             "snapshot_id": retired_snapshot_id,
             "removed_count": 2,
-            "removal_impacts": [
-                {"db_object_id": "MGI:1", "annotation_ids": [str(annotation_id)]},
-                {"db_object_id": "MGI:2", "annotation_ids": []},
-            ],
         }
 
 
@@ -213,7 +214,6 @@ def test_redelivered_retirement_recovers_result_without_second_audit(
         "retired": True,
         "snapshot_id": audits[0].details["snapshot_id"],
         "removed_count": 1,
-        "removal_impacts": [{"db_object_id": "MGI:1", "annotation_ids": []}],
     }
     assert _active_ids(session_factory) == []
 

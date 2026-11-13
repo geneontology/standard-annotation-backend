@@ -302,7 +302,7 @@ def test_authenticated_write_records_user_and_failed_operation_retains_last_use(
     bearer_client: TestClient,
     bearer_token: dict[str, UUID],
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Version history uses the authenticated user regardless of the data outcome."""
     headers = {"Authorization": f"Bearer {RAW}"}
@@ -311,7 +311,7 @@ def test_authenticated_write_records_user_and_failed_operation_retains_last_use(
         headers=headers,
         json={
             "owning_group_id": "MGI",
-            "annotation": validated_annotation.model_dump(mode="json"),
+            "annotation": writable_annotation.model_dump(mode="json"),
         },
     )
     assert response.status_code == status.HTTP_201_CREATED

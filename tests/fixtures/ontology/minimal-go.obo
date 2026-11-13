@@ -1,6 +1,8 @@
 format-version: 1.4
 data-version: releases/2026-09-28
 ontology: go
+subsetdef: gocheck_do_not_annotate "Term not to be used for direct annotation"
+subsetdef: gocheck_obsoletion_candidate "Terms planned for obsoletion"
 
 [Term]
 id: GO:0000001

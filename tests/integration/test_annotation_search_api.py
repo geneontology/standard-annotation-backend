@@ -8,7 +8,9 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture(autouse=True)
-def active_search_subjects(seed_active_subjects: Callable[..., None]) -> None:
+def active_search_subjects(
+    seed_active_subjects: Callable[..., None], reference_data: Callable[..., None]
+) -> None:
     """Seed the exact subjects used by the successful search examples."""
     seed_active_subjects(
         "UniProtKB:P00001",
@@ -30,7 +32,7 @@ def _annotation(db_object_id: str) -> dict[str, object]:
     return {
         "db_object_id": db_object_id,
         "relation": "RO:0002331",
-        "ontology_class_id": "GO:0008150",
+        "ontology_class_id": "GO:0006915",
         "references": [f"PMID:{db_object_id.rsplit(':', 1)[-1]}"],
         "evidence_type": "ECO:0000314",
         "annotation_date": "2026-09-11",
@@ -134,17 +136,17 @@ def test_annotation_search_api_pagination_rejects_out_of_range_values(
         (
             {"relation": "RO:0002331"},
             {"relation": "RO:0002331"},
-            {"relation": "RO:0002327"},
+            {"relation": "RO:0002264"},
         ),
         (
-            {"ontology_class_id": "GO:0008150"},
-            {"ontology_class_id": "GO:0008150"},
-            {"ontology_class_id": "GO:0003674"},
+            {"ontology_class_id": "GO:0006915"},
+            {"ontology_class_id": "GO:0006915"},
+            {"ontology_class_id": "GO:0044419"},
         ),
         (
             {"evidence_type": "ECO:0000314"},
             {"evidence_type": "ECO:0000314"},
-            {"evidence_type": "ECO:0000250"},
+            {"evidence_type": "ECO:0000315"},
         ),
         (
             {"annotation_date": "2026-09-11"},
@@ -184,14 +186,20 @@ def test_annotation_search_api_filter_supports_each_scalar_field(
 
 
 @pytest.mark.parametrize(
-    ("field_name", "first_value", "second_value"),
+    ("field_name", "first_value", "second_value", "context"),
     [
-        ("references", "PMID:first", "PMID:second"),
-        ("with_or_from", "UniProtKB:FROM1", "UniProtKB:FROM2"),
+        ("references", "PMID:first", "DOI:10.1000/second", {}),
+        (
+            "with_or_from",
+            "UniProtKB:FROM1",
+            "UniProtKB:FROM2",
+            {"evidence_type": "ECO:0000353"},
+        ),
         (
             "interacting_taxon_id",
             "NCBITaxon:9606",
             "NCBITaxon:10090",
+            {"ontology_class_id": "GO:0044419"},
         ),
     ],
 )
@@ -200,17 +208,29 @@ def test_annotation_search_api_filter_supports_each_multivalued_field(
     field_name: str,
     first_value: str,
     second_value: str,
+    context: dict[str, object],
 ) -> None:
-    """A list-valued filter finds annotations containing the value; repeating it requires all."""
+    """A list-valued filter finds annotations containing the value; repeating it requires all.
+
+    `context` makes the annotations valid for the field: `with_or_from` values
+    need IPI evidence, and interacting taxa need an interspecies interaction term.
+    """
     only_first_id = _create_annotation(
-        integration_api_client, "UniProtKB:M1001", **{field_name: [first_value]}
+        integration_api_client,
+        "UniProtKB:M1001",
+        **context,
+        **{field_name: [first_value]},
     )
     _create_annotation(
-        integration_api_client, "UniProtKB:M1002", **{field_name: [second_value]}
+        integration_api_client,
+        "UniProtKB:M1002",
+        **context,
+        **{field_name: [second_value]},
     )
     both_id = _create_annotation(
         integration_api_client,
         "UniProtKB:M1003",
+        **context,
         **{field_name: [first_value, second_value]},
     )
 

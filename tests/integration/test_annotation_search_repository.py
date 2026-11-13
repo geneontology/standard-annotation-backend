@@ -186,6 +186,11 @@ def test_version_page_total_and_items_share_one_database_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
+    """A version page's total and items describe the same moment.
+
+    A version committed by another transaction between the page's queries
+    appears in neither the total nor the items.
+    """
     annotation_id = UUID("00000000-0000-0000-0000-000000000062")
     with unit_of_work_factory() as unit_of_work:
         _create(
@@ -204,9 +209,11 @@ def test_version_page_total_and_items_share_one_database_snapshot(
             writer_calls += 1
             with unit_of_work_factory() as writer:
                 writer.annotations.update(
-                    annotation_id,
-                    _changed(validated_annotation, assigned_by="MGI"),
-                    expected_version=1,
+                    writer.annotations.prepare_update(
+                        annotation_id,
+                        _changed(validated_annotation, assigned_by="MGI"),
+                        expected_version=1,
+                    ),
                     actor_id="concurrent-editor",
                     change_source=ChangeSource.API,
                 )

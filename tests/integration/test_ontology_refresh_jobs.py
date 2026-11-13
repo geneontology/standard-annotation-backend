@@ -8,16 +8,11 @@ from uuid import UUID
 
 import httpx2
 import pytest
-from seeding import create_job, insert_annotation
+from seeding import create_job
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.config import get_settings
-from standard_annotation_backend.domain.annotations import (
-    Annotation,
-    AnnotationOrigin,
-    ChangeSource,
-)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.models import (
@@ -35,6 +30,27 @@ from standard_annotation_backend.workers.tasks import (
 )
 
 SHA = "a" * 40
+WORKER_SOURCES = """\
+authorization:
+  type: github
+  repository: geneontology/go-site
+  ref: master
+  path: metadata/users.yaml
+rules:
+  type: github
+  repository: geneontology/go-site
+  ref: master
+ontologies:
+  go:
+    type: github
+    repository: geneontology/go-ontology
+    ref: master
+    path: src/ontology/go-edit.obo
+    document_ontology_id: go
+    prefixes: [GO]
+    closure_predicates: [rdfs:subClassOf, BFO:0000050]
+    required_subsets: [gocheck_do_not_annotate, gocheck_obsoletion_candidate]
+"""
 OBO = (
     Path(__file__).parents[1] / "fixtures" / "ontology" / "minimal-go.obo"
 ).read_bytes()
@@ -44,9 +60,18 @@ OBO = (
 def ontology_worker_environment(
     configured_environment: None,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> Iterator[None]:
-    """Point worker-created engines at the guarded disposable test database."""
+    """Point worker-created engines at the guarded disposable test database.
+
+    Workers read a sources file whose only ontology is GO from GitHub, so the fake
+    GitHub responses below answer every request, whatever `config/sources.yaml`
+    configures.
+    """
+    sources_file = tmp_path / "sources.yaml"
+    sources_file.write_text(WORKER_SOURCES, encoding="utf-8")
     monkeypatch.setenv("SABE_DATABASE_URL", os.environ["SABE_TEST_DATABASE_URL"])
+    monkeypatch.setenv("SABE_SOURCES_FILE", str(sources_file))
     get_settings.cache_clear()
     try:
         yield
@@ -245,6 +270,8 @@ def test_worker_reports_an_undefined_consider_target_as_a_warning(
     content = b"""\
 format-version: 1.4
 ontology: go
+subsetdef: gocheck_do_not_annotate "Term not to be used for direct annotation"
+subsetdef: gocheck_obsoletion_candidate "Terms planned for obsoletion"
 
 [Term]
 id: GO:0000001
@@ -342,36 +369,12 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
     monkeypatch: pytest.MonkeyPatch,
     finalization_method: str,
 ) -> None:
-    """A finalization retry reuses the stored result without updating annotations again."""
-    annotation_id = UUID("00000000-0000-0000-0000-000000000081")
-    annotation = Annotation.model_validate(
-        {
-            "db_object_id": "UniProtKB:RECOVERY",
-            "relation": "RO:0002331",
-            "ontology_class_id": "GO:0000002",
-            "references": ["PMID:recovery"],
-            "evidence_type": "ECO:0000314",
-            "annotation_date": "2026-09-28",
-            "assigned_by": "GO_Central",
-            "annotation_extensions": [
-                {
-                    "extension_relation": "BFO:0000050",
-                    "extension_term": "GO:9999999",
-                }
-            ],
-        }
-    )
-    with unit_of_work_factory() as uow:
-        insert_annotation(
-            uow.annotations.session,
-            annotation=annotation,
-            actor_id="creator",
-            change_source=ChangeSource.API,
-            owning_group_id="group-1",
-            record_origin=AnnotationOrigin.DIRECT,
-            annotation_id=annotation_id,
-        )
-        uow.commit()
+    """A finalization retry reports the first attempt's result without reapplying.
+
+    The retry does not fetch the source again. The job succeeds with the snapshot
+    the first attempt activated, and only that snapshot and one
+    `ontology.refreshed` audit event exist.
+    """
     job_id = _create_job(unit_of_work_factory)
     requests = _install_source(monkeypatch, _source_responses())
     original_finalization = getattr(JobService, finalization_method)
@@ -390,30 +393,11 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
     recovered = _load_job(unit_of_work_factory, job_id)
     assert recovered.status == JobStatus.SUCCEEDED.value
     assert recovered.result is not None
-    assert recovered.result["annotation_scan_count"] == 1
-    assert recovered.result["annotation_update_count"] == 1
-    assert recovered.result["findings"] == [
-        {
-            "annotation_id": str(annotation_id),
-            "code": "removed_term",
-            "conflicting_annotation_ids": [],
-            "field_paths": ["/annotation_extensions/0/extension_term"],
-            "ontology": "go",
-            "replacement_ids": [],
-            "term_id": "GO:9999999",
-        }
-    ]
     assert len(requests) == 2
-    with unit_of_work_factory() as uow:
-        record = uow.annotations.get(annotation_id)
-        assert record is not None
-        assert record.current_version == 2
-        assert record.ontology_class_id == "GO:0000001"
     with session_factory() as session:
-        assert (
-            session.scalar(select(func.count()).select_from(OntologyMetadataRecord))
-            == 1
-        )
+        (snapshot,) = session.scalars(select(OntologyMetadataRecord)).all()
+        assert snapshot.active is True
+        assert recovered.result["ontology_version_id"] == str(snapshot.version_id)
         assert (
             session.scalar(
                 select(func.count())

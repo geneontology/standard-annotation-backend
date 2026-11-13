@@ -148,7 +148,7 @@ class AuditService:
             details={"change_source": ChangeSource.API},
         )
 
-    def record_ontology_annotation_update(
+    def record_term_replacement(
         self,
         *,
         actor_id: str,
@@ -156,7 +156,7 @@ class AuditService:
         annotation_id: UUID,
         annotation_version: int,
     ) -> AuditEventRecord:
-        """Record an annotation update performed during ontology activation."""
+        """Record an annotation update made by a term replacement job."""
         return self._repository.record(
             action=AuditAction.ANNOTATION_UPDATED,
             actor_id=actor_id,
@@ -164,7 +164,7 @@ class AuditService:
             annotation_id=annotation_id,
             annotation_version=annotation_version,
             job_id=job_id,
-            details={"change_source": ChangeSource.ONTOLOGY_REFRESH},
+            details={"change_source": ChangeSource.TERM_REPLACEMENT},
         )
 
     def record_ontology_refreshed(
@@ -210,6 +210,23 @@ class AuditService:
         """
         return self._record_job_summary(
             AuditAction.AUTHORIZATION_REFRESHED, actor_id, job_id, details
+        )
+
+    def record_rules_refreshed(
+        self, *, actor_id: str, job_id: UUID, details: dict[str, object]
+    ) -> AuditEventRecord:
+        """Record a summary of an activated GO Rule data snapshot.
+
+        Args:
+            actor_id: Person or process that requested the refresh.
+            job_id: Job that requested the refresh.
+            details: The refresh result.
+
+        Returns:
+            The audit event added to the current transaction.
+        """
+        return self._record_job_summary(
+            AuditAction.RULES_REFRESHED, actor_id, job_id, details
         )
 
     def record_token_created(

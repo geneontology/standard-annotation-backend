@@ -57,7 +57,7 @@ def _create_annotation(
 ) -> UUID:
     with unit_of_work_factory() as unit_of_work:
         record = unit_of_work.annotations.create(
-            annotation=annotation,
+            unit_of_work.annotations.prepare_create(annotation),
             actor_id="creator",
             owning_group_id="group-1",
         )
@@ -170,9 +170,11 @@ def test_update_appends_version_and_replaces_current_derived_values(
 
     with unit_of_work_factory() as unit_of_work:
         record = unit_of_work.annotations.update(
-            annotation_id,
-            changed,
-            expected_version=1,
+            unit_of_work.annotations.prepare_update(
+                annotation_id,
+                changed,
+                expected_version=1,
+            ),
             actor_id="editor",
             change_source=ChangeSource.API,
         )
@@ -231,6 +233,12 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
+    """An update locks the stored duplicate signature, not one its session cached.
+
+    Another transaction changed the annotation after this session loaded it. The
+    update waits for the lock on the changed signature, so it cannot race a write
+    that duplicates the annotation's current state.
+    """
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     original_signature = prepare_annotation_for_persistence(
         validated_annotation
@@ -254,9 +262,11 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
 
         with unit_of_work_factory() as unit_of_work:
             unit_of_work.annotations.update(
-                annotation_id,
-                intervening,
-                expected_version=1,
+                unit_of_work.annotations.prepare_update(
+                    annotation_id,
+                    intervening,
+                    expected_version=1,
+                ),
                 actor_id="intervening-editor",
                 change_source=ChangeSource.API,
             )
@@ -269,9 +279,11 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
 
             with pytest.raises(DBAPIError, match="lock timeout"):
                 AnnotationRepository(retained_session).update(
-                    annotation_id,
-                    candidate,
-                    expected_version=2,
+                    AnnotationRepository(retained_session).prepare_update(
+                        annotation_id,
+                        candidate,
+                        expected_version=2,
+                    ),
                     actor_id="final-editor",
                     change_source=ChangeSource.API,
                 )
@@ -282,6 +294,11 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
+    """A deletion locks the stored duplicate signature, not one its session cached.
+
+    Another transaction changed the annotation after this session loaded it. The
+    deletion waits for the lock on the changed signature.
+    """
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     original_signature = prepare_annotation_for_persistence(
         validated_annotation
@@ -301,9 +318,11 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
 
         with unit_of_work_factory() as unit_of_work:
             unit_of_work.annotations.update(
-                annotation_id,
-                intervening,
-                expected_version=1,
+                unit_of_work.annotations.prepare_update(
+                    annotation_id,
+                    intervening,
+                    expected_version=1,
+                ),
                 actor_id="intervening-editor",
                 change_source=ChangeSource.API,
             )
@@ -386,6 +405,11 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
+    """Updating or deleting a deleted annotation, or a missing one, fails clearly.
+
+    A deleted annotation raises `AnnotationDeletedError`; an unknown ID raises
+    `AnnotationNotFoundError`.
+    """
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     with unit_of_work_factory() as unit_of_work:
         unit_of_work.annotations.soft_delete(
@@ -399,9 +423,11 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
     with unit_of_work_factory() as unit_of_work:
         with pytest.raises(AnnotationDeletedError):
             unit_of_work.annotations.update(
-                annotation_id,
-                validated_annotation,
-                expected_version=2,
+                unit_of_work.annotations.prepare_update(
+                    annotation_id,
+                    validated_annotation,
+                    expected_version=2,
+                ),
                 actor_id="editor",
                 change_source=ChangeSource.API,
             )
@@ -417,9 +443,11 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
     with unit_of_work_factory() as unit_of_work:
         with pytest.raises(AnnotationNotFoundError):
             unit_of_work.annotations.update(
-                missing_id,
-                validated_annotation,
-                expected_version=1,
+                unit_of_work.annotations.prepare_update(
+                    missing_id,
+                    validated_annotation,
+                    expected_version=1,
+                ),
                 actor_id="editor",
                 change_source=ChangeSource.API,
             )
@@ -439,7 +467,7 @@ def test_unit_of_work_rolls_back_without_explicit_commit(
     """Changes made in a unit of work that is never committed are not saved."""
     with unit_of_work_factory() as unit_of_work:
         annotation_id = unit_of_work.annotations.create(
-            annotation=validated_annotation,
+            unit_of_work.annotations.prepare_create(validated_annotation),
             actor_id="creator",
             owning_group_id="group-1",
         ).annotation_id

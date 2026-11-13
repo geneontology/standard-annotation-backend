@@ -3,12 +3,12 @@
 Every method works in the caller's transaction; the caller commits.
 """
 
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from itertools import batched
 from uuid import UUID
 
-from sqlalchemy import delete, false, func, insert, literal, null, or_, select
+from sqlalchemy import delete, false, insert, literal, null, or_, select
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -17,11 +17,8 @@ from standard_annotation_backend.domain.annotation_management import (
     STORED_REJECTION_REPORT,
     AnnotationImportConflictError,
     AnnotationManagementMode,
-    CutoverRejectedError,
     GroupSabeManagedError,
     RejectionReport,
-    RejectionReportBuilder,
-    unknown_subject_rejection,
 )
 from standard_annotation_backend.domain.annotations import (
     AnnotationOrigin,
@@ -50,14 +47,13 @@ from standard_annotation_backend.persistence.models import (
     AnnotationVersionRecord,
     AuditEventRecord,
     ChangeSetRecord,
-    EntityMembershipRecord,
     GroupAnnotationManagementRecord,
     JobRecord,
 )
 from standard_annotation_backend.persistence.repositories.jobs import lock_job_record
 
 _GPAD_JOB_TYPES = frozenset({JobType.ANNOTATION_REFRESH, JobType.ANNOTATION_CUTOVER})
-_SYSTEM_CHANGE_SOURCES = (ChangeSource.ONTOLOGY_REFRESH,)
+_SYSTEM_CHANGE_SOURCES = (ChangeSource.TERM_REPLACEMENT,)
 """Version sources that are system maintenance rather than local edits."""
 _INSERT_BATCH_SIZE = 5_000
 
@@ -119,18 +115,6 @@ class AnnotationImportRepository:
             )
         )
 
-    def active_db_object_ids(self, ids: Collection[str]) -> frozenset[str]:
-        """Return which of `ids` are active entity identifiers."""
-        if not ids:
-            return frozenset()
-        return frozenset(
-            self.session.scalars(
-                select(EntityMembershipRecord.db_object_id).where(
-                    EntityMembershipRecord.db_object_id.in_(list(ids))
-                )
-            )
-        )
-
     def stage_annotations(
         self, job_id: UUID, annotations: Sequence[ParsedAnnotation]
     ) -> None:
@@ -173,8 +157,13 @@ class AnnotationImportRepository:
         data_rows: int,
         annotations_staged: int,
         report: RejectionReport,
+        schema_version: str,
     ) -> AnnotationImportRecord:
-        """Record a job's staged, not yet published, import and return the row."""
+        """Record a job's staged, not yet published, import and return the row.
+
+        `schema_version` is the `go-standard-annotation-schema` version the staged
+        rows were checked with.
+        """
         record = AnnotationImportRecord(
             job_id=job_id,
             source_key=source_key,
@@ -190,6 +179,7 @@ class AnnotationImportRepository:
             annotations_staged=annotations_staged,
             records_rejected=report.issue_count,
             rejection_report=STORED_REJECTION_REPORT.dump(report),
+            schema_version=schema_version,
             staged_at=datetime.now(UTC),
         )
         self.session.add(record)
@@ -219,8 +209,8 @@ class AnnotationImportRepository:
         """Report whether the group has changed since `import_job_id` published.
 
         A local change is an annotation that the import did not publish, an edit
-        or soft delete, a comment, or a change set in any state. SABE's automatic
-        ontology term replacements are not local changes. This checks current
+        or soft delete, a comment, or a change set in any state. Versions written by
+        the term replacement job are not local changes. This checks current
         rows rather than timestamps, because a write's `created_at` is its
         transaction's start time, which can precede a publication it commits after.
         """
@@ -241,7 +231,7 @@ class AnnotationImportRepository:
             ),
             # Edits and soft deletes: imported annotations start at version 1,
             # so a later version means a change, unless SABE made it itself
-            # (such as an ontology term replacement).
+            # (such as a term replacement).
             select(AnnotationVersionRecord.annotation_id).where(
                 AnnotationVersionRecord.annotation_id.in_(group_annotations),
                 AnnotationVersionRecord.version > 1,
@@ -298,8 +288,6 @@ class AnnotationImportRepository:
             AnnotationImportConflictError: If the job does not exist, is not a
                 GPAD job, or has no staged import.
             GroupSabeManagedError: If the group is already SABE-managed.
-            CutoverRejectedError: If a cutover's staged subject is no longer an
-                active entity.
         """
         self.lock_job(job_id)
         record = self.session.get(
@@ -313,8 +301,6 @@ class AnnotationImportRepository:
         state = self._lock_group(record.group_key)
         if state.mode == AnnotationManagementMode.SABE_MANAGED.value:
             raise GroupSabeManagedError(record.group_key)
-        if record.is_cutover:
-            self._require_staged_subjects(job_id)
         deleted = self._delete_group_data(record.group_key)
         change_source = (
             ChangeSource.ANNOTATION_CUTOVER
@@ -354,63 +340,6 @@ class AnnotationImportRepository:
         if state is None:
             raise AnnotationImportConflictError
         return state
-
-    def _require_staged_subjects(self, job_id: UUID) -> None:
-        """Require every staged subject to stay an active entity until commit.
-
-        Each subject's `entity_membership` row is locked with PostgreSQL's
-        `FOR KEY SHARE` row lock, so an entity publication cannot remove the
-        subject before this transaction commits. Entity publication replaces a
-        source's rows by deleting and reinserting them, so a row this query waited
-        on can disappear while an equal row appears. The query is repeated until
-        every subject that is still present is locked, as in
-        `EntityRepository.require_active`.
-
-        A staged subject is accepted only if its row is among those locked. A
-        subject that becomes active after the locks are taken is rejected, because
-        nothing stops its row from being removed again before commit.
-
-        Raises:
-            CutoverRejectedError: Listing staged annotations whose subject is no
-                longer active.
-        """
-        staged_ids = (
-            select(AnnotationStagingRecord.db_object_id)
-            .where(AnnotationStagingRecord.job_id == job_id)
-            .distinct()
-        )
-        membership = EntityMembershipRecord
-        present_count = (
-            select(func.count())
-            .select_from(membership)
-            .where(membership.db_object_id.in_(staged_ids))
-            .scalar_subquery()
-        )
-        while True:
-            locked = set(
-                self.session.scalars(
-                    select(membership.db_object_id)
-                    .where(membership.db_object_id.in_(staged_ids))
-                    .with_for_update(read=True, key_share=True)
-                )
-            )
-            if len(locked) >= (self.session.scalar(select(present_count)) or 0):
-                break
-        builder = RejectionReportBuilder()
-        staged = self.session.execute(
-            select(
-                AnnotationStagingRecord.line_number,
-                AnnotationStagingRecord.db_object_id,
-            )
-            .where(AnnotationStagingRecord.job_id == job_id)
-            .order_by(AnnotationStagingRecord.line_number)
-        )
-        for line_number, db_object_id in staged:
-            if db_object_id not in locked:
-                builder.add(unknown_subject_rejection(line_number, db_object_id))
-        report = builder.build()
-        if report.issue_count:
-            raise CutoverRejectedError(report)
 
     def _delete_group_data(self, group_key: str) -> int:
         """Delete a group's annotations and dependents; return annotations deleted."""

@@ -28,6 +28,7 @@ from standard_annotation_backend.api.routes.annotations import (
 from standard_annotation_backend.api.routes.change_sets import (
     router as change_sets_router,
 )
+from standard_annotation_backend.api.routes.reports import router as reports_router
 from standard_annotation_backend.api.routes.token_management import (
     router as token_management_router,
 )
@@ -100,6 +101,11 @@ app = FastAPI(
             "ontologies, and entity catalogs from config/sources.yaml, and read "
             "job status.",
         },
+        {
+            "name": "reports",
+            "description": "Annotation QC reports: start and list them, and read "
+            "their summaries and findings.",
+        },
     ],
     version=get_application_version(),
     docs_url=None,
@@ -112,6 +118,7 @@ app.include_router(annotation_comments_router)
 app.include_router(annotation_versions_router)
 app.include_router(annotations_router)
 app.include_router(change_sets_router)
+app.include_router(reports_router)
 app.include_router(token_management_router)
 app.include_router(tokens_router)
 app.mount(

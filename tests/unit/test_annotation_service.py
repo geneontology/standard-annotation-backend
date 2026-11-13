@@ -1,7 +1,9 @@
 """Test annotation operations independently from HTTP and PostgreSQL."""
 
-from dataclasses import dataclass, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
+from pathlib import Path
 from types import TracebackType
 from typing import cast
 from uuid import UUID
@@ -18,11 +20,22 @@ from standard_annotation_backend.domain.auth import (
     AuthorizationScope,
     RequestContext,
 )
+from standard_annotation_backend.domain.semantic_validation.facts import (
+    AnnotationFacts,
+    EntityFact,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.refresh.sources import (
+    RefreshSources,
+    load_sources_file,
+)
 from standard_annotation_backend.services.annotation_service import (
     AnnotationService,
 )
 
+SOURCES = RefreshSources(
+    load_sources_file(Path(__file__).parents[2] / "config" / "sources.yaml")
+)
 FIXED_ID = UUID("00000000-0000-0000-0000-000000000301")
 CREATED_AT = datetime(2026, 9, 11, 10, 0, tzinfo=UTC)
 UPDATED_AT = datetime(2026, 9, 11, 10, 5, tzinfo=UTC)
@@ -42,8 +55,8 @@ def _valid_payload() -> dict[str, object]:
         "negation": None,
         "relation": "RO:0002331",
         "ontology_class_id": "GO:0008150",
-        "references": ["PMID:1", "PMID:2"],
-        "evidence_type": "ECO:0000314",
+        "references": ["PMID:1"],
+        "evidence_type": "ECO:0000353",
         "with_or_from": ["UniProtKB:Q1"],
         "interacting_taxon_id": ["NCBITaxon:9606"],
         "annotation_date": "2026-09-09",
@@ -108,6 +121,12 @@ def _current_record(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class FakePreparedWrite:
+    annotation: Annotation
+    duplicate_peer_ids: tuple[UUID, ...] = ()
+
+
 class FakeAnnotationRepository:
     """Record repository calls and return controlled results in service tests."""
 
@@ -115,13 +134,17 @@ class FakeAnnotationRepository:
         self.current_record = current_record
         self.last_annotation: Annotation | None = None
 
+    def prepare_create(self, annotation: Annotation) -> FakePreparedWrite:
+        return FakePreparedWrite(annotation)
+
     def create(
         self,
+        prepared: FakePreparedWrite,
         *,
-        annotation: Annotation,
         actor_id: str,
         owning_group_id: str,
     ) -> CurrentRecord:
+        annotation = prepared.annotation
         self.last_annotation = annotation
         self.current_record = _current_record(
             annotation_data=annotation.model_dump(mode="json")
@@ -142,16 +165,20 @@ class FakeAnnotationRepository:
             return None
         return self.current_record
 
-    def update(
+    def prepare_update(
         self,
         annotation_id: UUID,
         annotation: Annotation,
         *,
         expected_version: int,
-        actor_id: str,
-    ) -> CurrentRecord:
+    ) -> FakePreparedWrite:
         assert self.current_record is not None
         assert self.current_record.annotation_id == annotation_id
+        return FakePreparedWrite(annotation)
+
+    def update(self, prepared: FakePreparedWrite, *, actor_id: str) -> CurrentRecord:
+        assert self.current_record is not None
+        annotation = prepared.annotation
         self.last_annotation = annotation
         self.current_record.annotation_data = annotation.model_dump(mode="json")
         self.current_record.current_version += 1
@@ -220,10 +247,32 @@ class FakeAuditRepository:
         )
 
 
+class FakeValidationFacts:
+    """Describe every annotation as having an active entity and no peers.
+
+    Term facts are left empty, so no identifier is checked against an ontology.
+    """
+
+    def __init__(self) -> None:
+        self.entity: EntityFact | None = EntityFact("NCBITaxon:7955", "PR:000000001")
+
+    def gather(
+        self,
+        annotations: Sequence[Annotation],
+        peers: Sequence[tuple[UUID, ...]],
+        ontologies: Mapping[str, tuple[str, ...]],
+    ) -> tuple[AnnotationFacts, ...]:
+        return tuple(
+            AnnotationFacts(terms={}, entity=self.entity, duplicate_peer_ids=ids)
+            for ids in peers
+        )
+
+
 @dataclass(slots=True)
 class FakeUnitOfWork:
     annotations: FakeAnnotationRepository
     audit: FakeAuditRepository
+    validation_facts: FakeValidationFacts = field(default_factory=FakeValidationFacts)
     commit_count: int = 0
 
     def __enter__(self) -> "FakeUnitOfWork":
@@ -256,7 +305,7 @@ def service_harness() -> ServiceHarness:
         audit=FakeAuditRepository(),
     )
     factory = cast(UnitOfWorkFactory, lambda: unit_of_work)
-    service = AnnotationService(unit_of_work_factory=factory)
+    service = AnnotationService(factory, SOURCES)
     return ServiceHarness(service, repository, unit_of_work)
 
 
@@ -271,6 +320,24 @@ def test_create_rejects_invalid_payload_without_persisting_or_committing(
         )
 
     assert raised.value.errors[0]["location"] == ("annotation", "db_object_id")
+    assert service_harness.repository.last_annotation is None
+    assert service_harness.unit_of_work.commit_count == 0
+
+
+def test_create_with_semantic_issues_is_rejected_without_writing(
+    service_harness: ServiceHarness,
+) -> None:
+    """A structurally valid annotation with a semantic issue is neither stored nor committed."""
+    service_harness.unit_of_work.validation_facts.entity = None
+
+    with pytest.raises(InvalidAnnotationPayloadError) as raised:
+        service_harness.service.create(
+            payload=_valid_payload(),
+            owning_group_id="curation-group",
+            context=REQUEST_CONTEXT,
+        )
+
+    assert [issue["type"] for issue in raised.value.errors] == ["unknown_entity"]
     assert service_harness.repository.last_annotation is None
     assert service_harness.unit_of_work.commit_count == 0
 

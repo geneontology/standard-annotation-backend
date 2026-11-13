@@ -10,7 +10,7 @@ ENV UV_COMPILE_BYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app/src"
 
-RUN pip install --no-cache-dir uv==0.12.9
+RUN pip install --no-cache-dir uv==0.13.7
 
 RUN groupadd --gid 10001 sabe \
     && useradd --uid 10001 --gid sabe --create-home --shell /usr/sbin/nologin sabe \

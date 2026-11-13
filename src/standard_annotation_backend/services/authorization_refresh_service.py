@@ -26,9 +26,9 @@ from standard_annotation_backend.domain.refresh import (
     SourceDocument,
     SourceProvenance,
     TerminalRefreshError,
+    validation_failure_details,
 )
 from standard_annotation_backend.domain.stored_json import StoredJson
-from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.models import AuthorizationRefreshRecord
 from standard_annotation_backend.persistence.repositories.auth import (
     SyncAuthorization,
@@ -42,8 +42,6 @@ from standard_annotation_backend.persistence.unit_of_work import (
 from standard_annotation_backend.refresh.fetchers import SourceError
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
-
-MAX_REPORTED_ISSUES = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +148,7 @@ class AuthorizationRefreshService:
         except InvalidUsersDocumentError as error:
             raise TerminalRefreshError(
                 failure_code=RefreshFailureCode.INVALID_DOCUMENT,
-                failure_details=_issue_details(error.errors),
+                failure_details=validation_failure_details(error.errors),
             ) from None
         # Another job may have applied this same document first.
         return _outcome(result, unchanged=not applied)
@@ -283,18 +281,3 @@ def _outcome(result: AuthorizationRefreshResult, *, unchanged: bool) -> RefreshO
         },
         unchanged=unchanged,
     )
-
-
-def _issue_details(issues: tuple[ValidationIssue, ...]) -> dict[str, object]:
-    """Describe validation issues for the job, keeping at most 100 of them."""
-    return {
-        "issue_count": len(issues),
-        "issues": [
-            {
-                "location": list(issue["location"]),
-                "message": issue["message"],
-                "type": issue["type"],
-            }
-            for issue in issues[:MAX_REPORTED_ISSUES]
-        ],
-    }

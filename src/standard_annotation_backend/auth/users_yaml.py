@@ -14,7 +14,6 @@ from pydantic import (
     model_validator,
 )
 from pydantic_core import PydanticCustomError
-from yaml.nodes import MappingNode, Node
 
 from standard_annotation_backend.domain.auth import (
     AuthorizationRole,
@@ -25,6 +24,7 @@ from standard_annotation_backend.domain.validation import (
     validation_issues,
 )
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
+from standard_annotation_backend.yaml_loading import load_yaml
 
 
 def _require_yaml_sequence(value: object) -> list[object]:
@@ -160,36 +160,6 @@ class InvalidUsersDocumentError(Exception):
         self.errors = errors
 
 
-class _UniqueKeySafeLoader(yaml.SafeLoader):
-    """Reject mapping keys that would otherwise silently overwrite earlier values."""
-
-    def construct_mapping(self, node: Node, deep: bool = False) -> dict[object, object]:
-        """Build a mapping after rejecting duplicate or unhashable keys.
-
-        Args:
-            node: YAML node representing the mapping.
-            deep: Whether child objects should also be constructed deeply.
-
-        Returns:
-            Parsed mapping with unique keys.
-
-        Raises:
-            yaml.YAMLError: If a key is duplicated or cannot be compared.
-        """
-        if isinstance(node, MappingNode):
-            self.flatten_mapping(node)
-            seen: set[object] = set()
-            for key_node, _ in node.value:
-                key = self.construct_object(key_node, deep=deep)
-                try:
-                    if key in seen:
-                        raise yaml.YAMLError("duplicate mapping key")
-                    seen.add(key)
-                except TypeError:
-                    raise yaml.YAMLError("invalid mapping key") from None
-        return super().construct_mapping(node, deep=deep)
-
-
 def parse_users_yaml(yaml_text: str) -> UsersDocument:
     """Safely parse and validate an entire users.yaml document.
 
@@ -204,7 +174,7 @@ def parse_users_yaml(yaml_text: str) -> UsersDocument:
             Issues contain stable codes and input paths, never source values.
     """
     try:
-        payload = yaml.load(yaml_text, Loader=_UniqueKeySafeLoader)
+        payload = load_yaml(yaml_text)
     except yaml.YAMLError:
         raise InvalidUsersDocumentError(
             (

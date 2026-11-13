@@ -158,7 +158,10 @@ def test_proposal_discriminator_and_raw_candidates(client: TestClient) -> None:
 
 
 def test_review_request_models_and_stored_preview(client: TestClient) -> None:
-    """Review bodies document optional acceptance text and required rejection text."""
+    """Review bodies document optional acceptance text and required rejection text.
+
+    A stored preview's validation issues may carry optional details.
+    """
     schema = client.get("/openapi.json").json()
     schemas = schema["components"]["schemas"]
     for action, model in [
@@ -178,6 +181,8 @@ def test_review_request_models_and_stored_preview(client: TestClient) -> None:
     assert "ApiValidationIssue" in str(
         schemas["ChangeSetPreviewResource"]["properties"]["validation_errors"]
     )
+    assert "details" in schemas["ApiValidationIssue"]["properties"]
+    assert "details" not in schemas["ApiValidationIssue"]["required"]
     assert {
         "change_set_id",
         "annotation_id",
@@ -234,6 +239,7 @@ def test_change_set_responses_share_operation_and_state_vocabularies(
                 "404": {"change_set_not_found"},
                 "409": {"change_set_not_proposed"},
                 "422": {"request_validation_error"},
+                "503": {"reference_data_unavailable", "credential_storage_unavailable"},
             },
         ),
         (
@@ -241,16 +247,9 @@ def test_change_set_responses_share_operation_and_state_vocabularies(
             "post",
             {
                 "404": {"change_set_not_found"},
-                "409": {
-                    "change_set_not_proposed",
-                    "stale_change_set",
-                    "duplicate_annotation",
-                },
-                "422": {
-                    "invalid_change_set",
-                    "unknown_db_object_id",
-                    "request_validation_error",
-                },
+                "409": {"change_set_not_proposed", "stale_change_set"},
+                "422": {"invalid_change_set", "request_validation_error"},
+                "503": {"reference_data_unavailable", "credential_storage_unavailable"},
             },
         ),
         (

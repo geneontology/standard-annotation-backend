@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -47,7 +48,9 @@ CHANGE_SET_MISSING = {
 
 
 @pytest.fixture(autouse=True)
-def active_authorization_subjects(seed_active_subjects: Callable[..., None]) -> None:
+def active_authorization_subjects(
+    seed_active_subjects: Callable[..., None], reference_data: Callable[..., None]
+) -> None:
     """Seed subjects so authorized operations reach the ownership workflow."""
     seed_active_subjects(
         "UniProtKB:P12345",
@@ -128,7 +131,7 @@ def _seed(
                 "db_object_id": f"UniProtKB:{name}"
             }
             record = uow.annotations.create(
-                annotation=Annotation.model_validate(payload),
+                uow.annotations.prepare_create(Annotation.model_validate(payload)),
                 actor_id=creator,
                 owning_group_id=group,
             )
@@ -137,7 +140,7 @@ def _seed(
                 operation="update",
                 annotation_id=record.annotation_id,
                 base_version=1,
-                patch=[{"op": "replace", "path": "/assigned_by", "value": "Reviewed"}],
+                patch=[{"op": "replace", "path": "/assigned_by", "value": "Xenbase"}],
                 reason="Review",
                 proposed_by="different-proposer",
             )
@@ -218,12 +221,12 @@ def _snapshot(factory: sessionmaker[Session]) -> tuple[object, ...]:
 def test_reads_and_pagination_follow_creator_and_group_before_counting(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     role: str,
     scope: str,
 ) -> None:
     """Every role reads only its scope, including version history and stored proposals."""
-    resources = _seed(unit_of_work_factory, validated_annotation, role, scope)
+    resources = _seed(unit_of_work_factory, writable_annotation, role, scope)
     visible = {
         "self": ["own", "own2"],
         "group": ["other", "own", "own2"],
@@ -281,13 +284,13 @@ def test_mutations_enforce_roles_and_scope_without_partial_state(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     role: str,
     scope: str,
     operation: str,
 ) -> None:
     """Denied actions preserve annotation, proposal, version, and audit state."""
-    resources = _seed(unit_of_work_factory, validated_annotation, role, scope)
+    resources = _seed(unit_of_work_factory, writable_annotation, role, scope)
     role_allowed = (
         role == "admin" if operation in {"accept", "reject"} else role != "read"
     )
@@ -302,7 +305,7 @@ def test_mutations_enforce_roles_and_scope_without_partial_state(
                 operation.upper(),
                 f"/annotations/{annotation_id}",
                 headers=_headers(),
-                json={"assigned_by": "Reviewed"} if operation == "patch" else None,
+                json={"assigned_by": "Xenbase"} if operation == "patch" else None,
             )
         elif operation.startswith("propose_"):
             body: dict[str, object] = {
@@ -313,7 +316,7 @@ def test_mutations_enforce_roles_and_scope_without_partial_state(
             }
             if operation == "propose_update":
                 body["patch"] = [
-                    {"op": "replace", "path": "/assigned_by", "value": "Reviewed"}
+                    {"op": "replace", "path": "/assigned_by", "value": "Xenbase"}
                 ]
             response = bearer_client.post("/change-sets", json=body, headers=_headers())
         else:
@@ -351,16 +354,16 @@ def test_creation_derives_group_and_requires_explicit_global_ownership(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     role: str,
     scope: str,
     proposal: bool,
 ) -> None:
     """Creation respects selected roles and never accepts a conflicting group."""
-    _seed(unit_of_work_factory, validated_annotation, role, scope)
+    _seed(unit_of_work_factory, writable_annotation, role, scope)
     route = "/change-sets" if proposal else "/annotations"
     for group in (None, "MGI", "RGD"):
-        payload = validated_annotation.model_dump(mode="json") | {
+        payload = writable_annotation.model_dump(mode="json") | {
             "db_object_id": f"UniProtKB:create-{group}"
         }
         body: dict[str, object] = {"annotation": payload}
@@ -389,11 +392,11 @@ def test_creation_derives_group_and_requires_explicit_global_ownership(
 def test_deleted_history_is_authorized_before_version_disclosure(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     scope: str,
 ) -> None:
     """Deleted annotations retain their current ownership boundary for all history."""
-    resources = _seed(unit_of_work_factory, validated_annotation, "read", scope)
+    resources = _seed(unit_of_work_factory, writable_annotation, "read", scope)
     with unit_of_work_factory() as uow:
         for annotation_id in resources.annotations.values():
             uow.annotations.soft_delete(
@@ -417,10 +420,10 @@ def test_removed_authorization_rejects_an_issued_token_before_mutation(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Assignment removal invalidates already issued credentials on the next request."""
-    resources = _seed(unit_of_work_factory, validated_annotation, "edit", "group")
+    resources = _seed(unit_of_work_factory, writable_annotation, "edit", "group")
     with session_factory.begin() as session:
         assignment = session.get(AuthorizationAssignmentRecord, resources.assignment_id)
         assert assignment is not None
@@ -440,13 +443,13 @@ def test_hidden_change_sets_never_disclose_proposer_or_terminal_state(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     scope: str,
     kind: str,
     state: str,
 ) -> None:
     """Out-of-scope proposals use the missing-resource contract before every state check."""
-    resources = _seed(unit_of_work_factory, validated_annotation, "admin", scope)
+    resources = _seed(unit_of_work_factory, writable_annotation, "admin", scope)
     hidden = "other" if scope == "self" else "foreign"
     proposal_id = (resources.creates if kind == "create" else resources.updates)[hidden]
     with unit_of_work_factory() as uow:
@@ -488,19 +491,26 @@ def test_hidden_change_sets_never_disclose_proposer_or_terminal_state(
         assert _snapshot(session_factory) == before
 
 
+def _duplicate_peer_ids(issues: list[dict[str, Any]]) -> list[str]:
+    """Return the peer IDs listed by the only issue, which must be a duplicate."""
+    (issue,) = issues
+    assert issue["type"] == "duplicate_annotation"
+    return issue["details"]["peer_ids"]
+
+
 @pytest.mark.parametrize("scope", ["self", "group"])
 def test_duplicate_conflicts_disclose_all_peer_ids(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
     scope: str,
 ) -> None:
     """Duplicate conflicts identify every peer regardless of authorization scope."""
-    resources = _seed(unit_of_work_factory, validated_annotation, "admin", scope)
+    resources = _seed(unit_of_work_factory, writable_annotation, "admin", scope)
     hidden_name = "other" if scope == "self" else "foreign"
     peer_id = str(resources.annotations[hidden_name])
-    payload = validated_annotation.model_dump(mode="json") | {
+    payload = writable_annotation.model_dump(mode="json") | {
         "db_object_id": f"UniProtKB:{hidden_name}"
     }
     before = _snapshot(session_factory)
@@ -509,8 +519,8 @@ def test_duplicate_conflicts_disclose_all_peer_ids(
         headers=_headers(),
         json={"owning_group_id": "MGI", "annotation": payload},
     )
-    assert create.status_code == status.HTTP_409_CONFLICT
-    assert create.json()["error"]["details"]["peer_ids"] == [peer_id]
+    assert create.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert _duplicate_peer_ids(create.json()["error"]["details"]) == [peer_id]
     assert _snapshot(session_factory) == before
     proposed = bearer_client.post(
         "/change-sets",
@@ -528,25 +538,33 @@ def test_duplicate_conflicts_disclose_all_peer_ids(
         f"/change-sets/{proposal_id}/preview", headers=_headers()
     )
     assert preview.status_code == status.HTTP_200_OK
-    assert preview.json()["duplicate_peer_ids"] == [peer_id]
+    assert _duplicate_peer_ids(preview.json()["validation_errors"]) == [peer_id]
     assert preview.json()["can_accept"] is False
     before = _snapshot(session_factory)
     accepted = bearer_client.post(
         f"/change-sets/{proposal_id}/accept", headers=_headers()
     )
-    assert accepted.status_code == status.HTTP_409_CONFLICT
-    assert accepted.json()["error"]["details"]["peer_ids"] == [peer_id]
+    assert accepted.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert accepted.json()["error"]["code"] == "invalid_change_set"
+    assert _duplicate_peer_ids(accepted.json()["error"]["details"]) == [peer_id]
     assert _snapshot(session_factory) == before
 
 
 def test_stored_preview_returns_all_duplicate_peer_ids(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
-    """Reading a saved preview returns every recorded duplicate peer ID."""
-    resources = _seed(unit_of_work_factory, validated_annotation, "read", "self")
+    """Reading a saved preview returns every recorded duplicate peer ID.
+
+    The peers include an annotation outside the reader's scope.
+    """
+    resources = _seed(unit_of_work_factory, writable_annotation, "read", "self")
     proposal_id = resources.creates["own"]
+    peer_ids = [
+        str(resources.annotations["foreign"]),
+        str(resources.annotations["own"]),
+    ]
     with unit_of_work_factory() as uow:
         uow.change_sets.record_preview(
             proposal_id,
@@ -554,19 +572,22 @@ def test_stored_preview_returns_all_duplicate_peer_ids(
                 "change_set_id": str(proposal_id),
                 "operation": "create",
                 "can_accept": False,
-                "duplicate_peer_ids": [
-                    str(resources.annotations["foreign"]),
-                    str(resources.annotations["own"]),
+                "validation_errors": [
+                    {
+                        "location": ["annotation"],
+                        "message": "Annotation duplicates other active annotations",
+                        "type": "duplicate_annotation",
+                        "details": {"peer_ids": peer_ids},
+                    }
                 ],
             },
         )
         uow.commit()
     response = bearer_client.get(f"/change-sets/{proposal_id}", headers=_headers())
     assert response.status_code == status.HTTP_200_OK
-    assert response.json()["preview"]["duplicate_peer_ids"] == [
-        str(resources.annotations["foreign"]),
-        str(resources.annotations["own"]),
-    ]
+    assert _duplicate_peer_ids(response.json()["preview"]["validation_errors"]) == (
+        peer_ids
+    )
     assert response.json()["preview"]["can_accept"] is False
 
 
@@ -574,10 +595,10 @@ def test_accepted_creation_keeps_proposer_self_access_and_reviewer_audit(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Accepting a trainee's creation retains its creator and attributes review to the admin."""
-    resources = _seed(unit_of_work_factory, validated_annotation, "edit", "self")
+    resources = _seed(unit_of_work_factory, writable_annotation, "edit", "self")
     review_raw = "sabe_token_" + "r" * 43
     with unit_of_work_factory() as uow:
         reviewer = uow.auth.get_user_by_github_login("reviewer")
@@ -627,11 +648,11 @@ def test_all_mutation_audits_persist_the_full_bearer_selection_without_secrets(
     bearer_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    validated_annotation: Annotation,
+    writable_annotation: Annotation,
 ) -> None:
     """Successful direct changes and all proposal transitions record safe token metadata."""
-    resources = _seed(unit_of_work_factory, validated_annotation, "admin", "group")
-    payload = validated_annotation.model_dump(mode="json")
+    resources = _seed(unit_of_work_factory, writable_annotation, "admin", "group")
+    payload = writable_annotation.model_dump(mode="json")
     created = bearer_client.post(
         "/annotations", headers=_headers(), json={"annotation": payload}
     )
@@ -655,7 +676,7 @@ def test_all_mutation_audits_persist_the_full_bearer_selection_without_secrets(
     patched = bearer_client.patch(
         f"/annotations/{resources.annotations['own2']}",
         headers=_headers(),
-        json={"assigned_by": "New source"},
+        json={"assigned_by": "RGD"},
     )
     assert patched.status_code == status.HTTP_200_OK
     stale = bearer_client.post(

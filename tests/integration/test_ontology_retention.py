@@ -12,9 +12,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyClosureRow,
     OntologyDocument,
-    OntologyKey,
     OntologySnapshot,
     OntologyTerm,
 )
@@ -58,7 +58,7 @@ def _stage_snapshot(
         )
         session.commit()
     document = OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=b"fixture",
         source_type="test",
         source_locator="fixture/go.obo",
@@ -91,7 +91,7 @@ def _prune(
 ) -> tuple[UUID, ...]:
     """Prune GO snapshots in one committed transaction."""
     with unit_of_work_factory() as unit_of_work:
-        pruned = unit_of_work.ontologies.prune_candidates(OntologyKey.GO, pruned_at)
+        pruned = unit_of_work.ontologies.prune_candidates(GO_ONTOLOGY_KEY, pruned_at)
         unit_of_work.commit()
     return pruned
 
@@ -175,7 +175,7 @@ def _stage_history(
             term_id = f"GO:{index:07d}"
             broader_id = f"GO:{index + 100:07d}"
             document = OntologyDocument(
-                ontology_key=OntologyKey.GO,
+                ontology_key=GO_ONTOLOGY_KEY,
                 content=name.encode(),
                 source_type="test",
                 source_locator="fixture/go.obo",

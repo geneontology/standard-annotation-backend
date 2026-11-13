@@ -23,7 +23,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -303,9 +303,10 @@ class JobRecord(Base):
     __tablename__ = "job"
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('annotation_cutover', 'annotation_refresh', "
-            "'authorization_refresh', 'entity_refresh', 'entity_retirement', "
-            "'ontology_refresh')",
+            "job_type IN ('annotation_cutover', 'annotation_qc_report', "
+            "'annotation_refresh', 'authorization_refresh', 'entity_refresh', "
+            "'entity_retirement', 'ontology_refresh', 'rules_refresh', "
+            "'term_replacement')",
             name="type_allowed",
         ),
         CheckConstraint(
@@ -374,6 +375,75 @@ class JobRecord(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class QcReportFindingRecord(Base):
+    """Store one annotation's issues in one QC report.
+
+    A report checks one owning group's annotations or every group's. When a report
+    succeeds, `QcReportRepository.expire_findings_of_older_reports` deletes the
+    findings of earlier succeeded reports with the same scope: the same single
+    group, or all groups. Their group and issue counts are kept.
+    """
+
+    __tablename__ = "qc_report_finding"
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(issues) = 'array'", name="issues_array"),
+        Index(
+            "ix_qc_report_finding_job_id_owning_group_id", "job_id", "owning_group_id"
+        ),
+        Index(
+            "ix_qc_report_finding_issue_types", "issue_types", postgresql_using="gin"
+        ),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    annotation_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    annotation_version: Mapped[int] = mapped_column(Integer)
+    owning_group_id: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(Text)
+    issue_types: Mapped[list[str]] = mapped_column(ARRAY(Text))
+    issues: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+
+
+class QcReportGroupCountRecord(Base):
+    """Store one group's annotation counts in one QC report.
+
+    `annotations_checked` counts the group's annotations the report checked, and
+    `annotations_with_issues` counts those with at least one issue.
+    """
+
+    __tablename__ = "qc_report_group_count"
+
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    owning_group_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    annotations_checked: Mapped[int] = mapped_column(Integer)
+    annotations_with_issues: Mapped[int] = mapped_column(Integer)
+
+
+class QcReportIssueCountRecord(Base):
+    """Store how many of one group's annotations have one issue type in a QC report."""
+
+    __tablename__ = "qc_report_issue_count"
+
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    owning_group_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    issue_type: Mapped[str] = mapped_column(Text, primary_key=True)
+    annotation_count: Mapped[int] = mapped_column(Integer)
 
 
 class EntityCatalogSnapshotRecord(Base):
@@ -481,10 +551,11 @@ class EntityMembershipRecord(Base):
 
     Annotations deliberately have no foreign key to this table. Replacing or
     retiring a catalog must be able to remove an identifier while existing
-    annotations and their version history stay unchanged. The rule that a new or
-    updated annotation's `db_object_id` must be active is enforced instead by
-    `EntityRepository.require_active`, which checks the identifier and locks its
-    row while the annotation is saved.
+    annotations and their version history stay unchanged. When an annotation is
+    created or updated, validation checks that its `db_object_id` is active, but
+    nothing locks the identifier, so a catalog change that commits during the write
+    can still remove it. A later QC report lists such annotations as
+    `unknown_entity`.
     """
 
     __tablename__ = "entity_membership"
@@ -504,17 +575,27 @@ class EntityMembershipRecord(Base):
 
 
 class EntitySourceRecord(Base):
-    """Store one source file record for an active entity identifier.
+    """Store the source file record of an active entity identifier.
 
-    An identifier may appear on several lines of a source file, so each record is
-    stored separately with its line number. Records are deleted with their
-    membership row when the catalog is replaced or retired.
+    A catalog lists each identifier on one line. A catalog published before
+    repeated identifiers were rejected may still have several records for one
+    identifier, one per line. Records are deleted with their membership row when
+    the catalog is replaced or retired.
+
+    The entity's taxon and type are copied out of `entity` into their own columns,
+    so validation can read them without parsing the stored entity. A check keeps
+    them equal to the values in `entity`, and fails if `entity` lacks either one.
     """
 
     __tablename__ = "entity_source_record"
     __table_args__ = (
         CheckConstraint("line_number > 0", name="line_number_positive"),
         CheckConstraint("jsonb_typeof(entity) = 'object'", name="entity_object"),
+        CheckConstraint(
+            "db_object_taxon_id IS NOT DISTINCT FROM entity->>'db_object_taxon_id' "
+            "AND db_object_type IS NOT DISTINCT FROM entity->>'db_object_type'",
+            name="taxon_and_type_match_entity",
+        ),
     )
 
     db_object_id: Mapped[str] = mapped_column(
@@ -524,6 +605,8 @@ class EntitySourceRecord(Base):
     )
     line_number: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     entity: Mapped[dict[str, object]] = mapped_column(JSONB)
+    db_object_taxon_id: Mapped[str] = mapped_column(Text)
+    db_object_type: Mapped[str] = mapped_column(Text)
 
 
 class OntologyMetadataRecord(Base):
@@ -539,6 +622,12 @@ class OntologyMetadataRecord(Base):
             "jsonb_path_exists(loaded_predicates, "
             "'$[*] ? (@.type() != \"string\")')",
             name="loaded_predicates_string_array",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(identifier_prefixes) = 'array' AND NOT "
+            "jsonb_path_exists(identifier_prefixes, "
+            "'$[*] ? (@.type() != \"string\")')",
+            name="identifier_prefixes_string_array",
         ),
         CheckConstraint(
             "NOT active OR bulk_data_pruned_at IS NULL",
@@ -571,6 +660,7 @@ class OntologyMetadataRecord(Base):
     source_checksum: Mapped[str] = mapped_column(String(64))
     document_version: Mapped[str | None] = mapped_column(Text)
     loaded_predicates: Mapped[list[str]] = mapped_column(JSONB)
+    identifier_prefixes: Mapped[list[str]] = mapped_column(JSONB)
     refresh_result: Mapped[dict[str, object] | None] = mapped_column(JSONB)
     job_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
@@ -585,7 +675,7 @@ class OntologyMetadataRecord(Base):
 
 
 class OntologyTermRecord(Base):
-    """Store one term, its obsolete status, and its replacement suggestions."""
+    """Store one term, its obsolete status, replacement suggestions, and subsets."""
 
     __tablename__ = "ontology_term"
     __table_args__ = (
@@ -599,6 +689,11 @@ class OntologyTermRecord(Base):
             "jsonb_path_exists(consider, '$[*] ? (@.type() != \"string\")')",
             name="consider_string_array",
         ),
+        CheckConstraint(
+            "jsonb_typeof(subsets) = 'array' AND NOT "
+            "jsonb_path_exists(subsets, '$[*] ? (@.type() != \"string\")')",
+            name="subsets_string_array",
+        ),
     )
 
     version_id: Mapped[UUID] = mapped_column(
@@ -610,6 +705,35 @@ class OntologyTermRecord(Base):
     obsolete: Mapped[bool] = mapped_column(Boolean)
     replaced_by: Mapped[list[str]] = mapped_column(JSONB)
     consider: Mapped[list[str]] = mapped_column(JSONB)
+    subsets: Mapped[list[str]] = mapped_column(JSONB)
+
+
+class OntologyAltIdRecord(Base):
+    """Map one alternative identifier to the term it names in a snapshot.
+
+    Ontologies keep the identifiers of merged terms as alternative identifiers
+    (`alt_id` in OBO). An annotation that uses one should use the primary term
+    instead. Deleting a snapshot's terms deletes its alternative identifiers.
+    """
+
+    __tablename__ = "ontology_alt_id"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["version_id", "term_id"],
+            ["ontology_term.version_id", "ontology_term.term_id"],
+            ondelete="CASCADE",
+        ),
+        # Deleting a term deletes its alternative identifiers through the foreign
+        # key. This index lets PostgreSQL find them by term, so pruning a snapshot
+        # does not scan the whole table for each deleted term.
+        Index("ix_ontology_alt_id_term", "version_id", "term_id"),
+    )
+
+    version_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    alt_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    term_id: Mapped[str] = mapped_column(Text)
 
 
 class OntologyClosureRecord(Base):
@@ -645,6 +769,73 @@ class OntologyClosureRecord(Base):
     predicate_id: Mapped[str] = mapped_column(Text, primary_key=True)
     object_term_id: Mapped[str] = mapped_column(Text, primary_key=True)
     depth: Mapped[int] = mapped_column(Integer)
+
+
+class RulesSnapshotRecord(Base):
+    """Store one snapshot of the go-site files that GO Rules read.
+
+    A snapshot is the parsed content of the files from one `rules` refresh.
+    `rule_data` holds five of the files as validated `RuleData` JSON, and
+    `RetractedPublicationRecord` rows hold the PMIDs listed in the sixth,
+    `retracted-publications.txt`. At most one snapshot is active. Activating a new
+    snapshot keeps the one it replaces and deletes all older ones.
+    """
+
+    __tablename__ = "rules_snapshot"
+    __table_args__ = (
+        CheckConstraint(
+            "source_checksum ~ '^[0-9a-f]{64}$'", name="source_checksum_format"
+        ),
+        CheckConstraint("jsonb_typeof(rule_data) = 'object'", name="rule_data_object"),
+        CheckConstraint(
+            "retracted_publication_count >= 0",
+            name="retracted_publication_count_nonnegative",
+        ),
+        Index(
+            "uq_rules_snapshot_active",
+            "active",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+    )
+
+    snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("job.job_id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    source_type: Mapped[str] = mapped_column(String(20))
+    source_locator: Mapped[str] = mapped_column(Text)
+    source_revision: Mapped[str | None] = mapped_column(Text)
+    source_checksum: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    rule_data: Mapped[dict[str, object]] = mapped_column(JSONB)
+    retracted_publication_count: Mapped[int] = mapped_column(Integer)
+
+
+class RetractedPublicationRecord(Base):
+    """Store one PMID that a snapshot's `retracted-publications.txt` lists.
+
+    The primary key also serves as the index for looking up an annotation's PMIDs
+    in one snapshot.
+    """
+
+    __tablename__ = "retracted_publication"
+    __table_args__ = (CheckConstraint("pmid ~ '^PMID:[0-9]+$'", name="pmid_format"),)
+
+    snapshot_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("rules_snapshot.snapshot_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    pmid: Mapped[str] = mapped_column(Text, primary_key=True)
 
 
 class AnnotationRecord(Base):
@@ -917,6 +1108,9 @@ class AnnotationImportRecord(Base):
     A row is written when a job finishes staging and is deleted if the job fails
     before publishing. Published rows are kept after later imports replace the
     group's annotations, as the lasting record of what each job imported.
+    `schema_version` is the `go-standard-annotation-schema` version the file's rows
+    were checked with. A refresh compares it with the installed version to decide
+    whether an unchanged file must be imported again.
     """
 
     __tablename__ = "annotation_import"
@@ -963,6 +1157,7 @@ class AnnotationImportRecord(Base):
     annotations_staged: Mapped[int] = mapped_column(BigInteger)
     records_rejected: Mapped[int] = mapped_column(BigInteger)
     rejection_report: Mapped[dict[str, object]] = mapped_column(JSONB)
+    schema_version: Mapped[str] = mapped_column(Text)
     staged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     annotations_deleted: Mapped[int | None] = mapped_column(BigInteger)

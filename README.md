@@ -62,12 +62,14 @@ just down
 
 ## Refresh reference data
 
-SABE keeps four kinds of reference data current: authorization (go-site
-`users.yaml`), ontologies (GO), entity catalogs (GPI files), and group annotations
-(GPAD files). Their sources are
-configured in `config/sources.yaml`. `SABE_SOURCES_FILE` can be used to point to a
-different file. Each entry is a `github` source (`repository`, `ref`, `path`) or an
-`https` source (`url`).
+SABE keeps five kinds of reference data current: authorization (go-site `users.yaml`),
+GO Rule data (six other go-site metadata files), ontologies (GO, NCBITaxon, and the
+ontologies used in annotation extensions), entity catalogs (GPI files), and group
+annotations (GPAD files). Their sources are configured in `config/sources.yaml`.
+`SABE_SOURCES_FILE` can be used to point to a different file. Each entry is a `github`
+source (`repository`, `ref`, `path`) or an `https` source (`url`). The `rules` entry
+is a `github` source with only `repository` and `ref`, because SABE reads a fixed set
+of files from it.
 
 After setup, load authorization into the local database so you can sign in and create
 tokens:
@@ -76,15 +78,26 @@ tokens:
 just refresh authorization
 ```
 
-`just refresh KIND [SOURCE]` refreshes `authorization`, `ontology`, `entity`, or
-`annotation` sources in a one-off container and prints one line per job. Omit `SOURCE` to refresh
-every configured source of that kind. Authorization has a single source, so it takes
-no `SOURCE`.
+Annotation creates and updates are validated against the GO Rule data, every configured
+ontology, and the entity catalogs, so load them before writing annotations:
+
+```bash
+just refresh rules
+just refresh ontology
+just refresh entity
+```
+
+`just refresh KIND [SOURCE]` refreshes `authorization`, `rules`, `ontology`, `entity`,
+or `annotation` sources in a one-off container and prints one line per job. Omit
+`SOURCE` to refresh every configured source of that kind. Authorization and rules each
+have a single source, so they take no `SOURCE`.
 
 When `just up` is running, the scheduler refreshes each kind on a UTC cron schedule:
-`SABE_AUTHORIZATION_REFRESH_CRON`, `SABE_ONTOLOGY_REFRESH_CRON`,
-`SABE_ENTITY_REFRESH_CRON`, and `SABE_ANNOTATION_REFRESH_CRON`. With an `admin/global` bearer token, you can also start a
-refresh and follow its job through the API:
+`SABE_AUTHORIZATION_REFRESH_CRON`, `SABE_RULES_REFRESH_CRON`,
+`SABE_ONTOLOGY_REFRESH_CRON`, `SABE_ENTITY_REFRESH_CRON`, and
+`SABE_ANNOTATION_REFRESH_CRON`. It runs the nightly annotation QC report on
+`SABE_QC_REPORT_CRON`. With an `admin/global` bearer token, you can also
+start a refresh and follow its job through the API:
 
 ```bash
 curl -X POST \
@@ -97,10 +110,11 @@ curl -H "Authorization: Bearer ${SABE_API_TOKEN}" \
   http://localhost:8000/admin/jobs/<job_id>
 ```
 
-The routes are `/admin/authorization-refreshes`, `/admin/ontology-refreshes`,
-`/admin/entity-refreshes`, and `/admin/annotation-refreshes`. The authorization route
-takes no body. For the others, send `{}` to refresh every configured source or
-`{"source_key": "<key>"}` for one.
+The routes are `/admin/authorization-refreshes`, `/admin/rules-refreshes`,
+`/admin/ontology-refreshes`, `/admin/entity-refreshes`, and
+`/admin/annotation-refreshes`. The authorization and rules routes take no body. For
+the others, send `{}` to refresh every configured source or `{"source_key": "<key>"}`
+for one.
 
 GPAD annotation sources are configured in the `annotations` section of
 `config/sources.yaml`. Each refresh replaces all annotations of the source's group. To

@@ -80,6 +80,7 @@ def test_refresh_all_entities_retires_removed_sources_first(
     [
         (RefreshKindName.AUTHORIZATION, [(JobType.AUTHORIZATION_REFRESH, "go-site")]),
         (RefreshKindName.ONTOLOGY, [(JobType.ONTOLOGY_REFRESH, "go")]),
+        (RefreshKindName.RULES, [(JobType.RULES_REFRESH, "go-site")]),
     ],
 )
 def test_refresh_all_for_kinds_without_retirement(
@@ -87,7 +88,7 @@ def test_refresh_all_for_kinds_without_retirement(
     kind: RefreshKindName,
     expected: list[tuple[JobType, str]],
 ) -> None:
-    """Authorization and ontology refreshes never create retirement jobs."""
+    """Refreshes of kinds other than entity never create retirement jobs."""
     _publish_unconfigured_catalog(unit_of_work_factory)
 
     jobs = _service(unit_of_work_factory, []).start(

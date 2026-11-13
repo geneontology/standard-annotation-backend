@@ -24,7 +24,7 @@ from standard_annotation_backend.domain.auth import (
     authorize_role,
     derive_creation_group,
 )
-from standard_annotation_backend.domain.ontology import OntologyKey
+from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.domain.validation import validate_annotation
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
@@ -32,12 +32,14 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories import AuditRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.resource_authorization import (
     load_authorized_annotation,
     ownership_scope,
 )
+from standard_annotation_backend.services.semantic_validator import SemanticValidator
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,10 +96,15 @@ class AnnotationService:
     Args:
         unit_of_work_factory: Callable that opens a transaction containing the
             annotation repositories used by each operation.
+        sources: Configured sources, which name the ontologies that
+            validation checks identifiers against.
     """
 
-    def __init__(self, unit_of_work_factory: UnitOfWorkFactory) -> None:
+    def __init__(
+        self, unit_of_work_factory: UnitOfWorkFactory, sources: RefreshSources
+    ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
+        self._validator = SemanticValidator(sources)
 
     def create(
         self,
@@ -118,10 +125,11 @@ class AnnotationService:
             The newly created annotation at version 1.
 
         Raises:
-            InvalidAnnotationPayloadError: If the annotation data is invalid.
-            UnknownDbObjectIdError: If `db_object_id` is not in the active entity
-                catalog.
-            DuplicateAnnotationError: If an equivalent active annotation exists.
+            InvalidAnnotationPayloadError: If the annotation fails structural
+                (schema) validation, or passes it and fails semantic validation.
+                The error lists every issue that the failing check found.
+            ReferenceDataUnavailableError: If reference data needed for
+                validation has never been loaded.
             PermissionDeniedError: If the role or requested creation group is denied.
         """
         group = derive_creation_group(
@@ -131,8 +139,14 @@ class AnnotationService:
         )
         annotation = _validated_annotation(payload)
         with self._unit_of_work_factory() as unit_of_work:
+            prepared = unit_of_work.annotations.prepare_create(annotation)
+            issues = self._validator.issues(
+                unit_of_work, annotation, prepared.duplicate_peer_ids
+            )
+            if issues:
+                raise InvalidAnnotationPayloadError(issues)
             record = unit_of_work.annotations.create(
-                annotation=annotation,
+                prepared,
                 actor_id=context.actor_id,
                 owning_group_id=group,
             )
@@ -197,10 +211,11 @@ class AnnotationService:
             EmptyAnnotationPatchError: If `changes` contains no fields.
             AnnotationNotFoundError: If the annotation is missing or deleted.
             AnnotationDeletedError: If it is deleted after the initial read.
-            InvalidAnnotationPayloadError: If the resulting annotation is invalid.
-            UnknownDbObjectIdError: If the updated `db_object_id` is not in the
-                active entity catalog.
-            DuplicateAnnotationError: If the change creates a new duplicate.
+            InvalidAnnotationPayloadError: If the annotation fails structural
+                (schema) validation, or passes it and fails semantic validation.
+                The error lists every issue that the failing check found.
+            ReferenceDataUnavailableError: If reference data needed for
+                validation has never been loaded.
             StaleAnnotationVersionError: If `expected_version` is no longer current.
         """
         authorize_role(context, PermissionAction.ANNOTATION_EDIT)
@@ -224,11 +239,16 @@ class AnnotationService:
             merged = current.annotation_data.copy()
             merged.update(changes)
             annotation = _validated_annotation(merged)
+            prepared = unit_of_work.annotations.prepare_update(
+                annotation_id, annotation, expected_version=expected_version
+            )
+            issues = self._validator.issues(
+                unit_of_work, annotation, prepared.duplicate_peer_ids
+            )
+            if issues:
+                raise InvalidAnnotationPayloadError(issues)
             updated = unit_of_work.annotations.update(
-                annotation_id,
-                annotation,
-                expected_version=expected_version,
-                actor_id=context.actor_id,
+                prepared, actor_id=context.actor_id
             )
             result = _current_annotation(updated)
             _record_annotation_audit(
@@ -313,7 +333,7 @@ class AnnotationService:
         scope = ownership_scope(context)
         with self._unit_of_work_factory() as unit_of_work:
             if criteria.ontology_class_id_closure is not None:
-                active = unit_of_work.ontologies.get_active(OntologyKey.GO)
+                active = unit_of_work.ontologies.get_active(GO_ONTOLOGY_KEY)
                 if active is None:
                     raise OntologyUnavailableError
                 if criteria.ontology_class_id_closure not in active.loaded_predicates:

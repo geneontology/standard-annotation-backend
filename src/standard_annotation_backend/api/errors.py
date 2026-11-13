@@ -15,7 +15,6 @@ from standard_annotation_backend.api.models import (
     ApiErrorDetails,
     ApiErrorResponse,
     ApiValidationIssue,
-    DuplicateAnnotationDetails,
     StaleAnnotationVersionDetails,
     StaleChangeSetDetails,
 )
@@ -26,9 +25,9 @@ from standard_annotation_backend.domain.auth import (
 from standard_annotation_backend.domain.errors import (
     BadRequestError,
     ConflictError,
-    DuplicatePeers,
     ErrorDetails,
     ForbiddenError,
+    GoneError,
     InternalServerError,
     InvalidInputError,
     MethodNotAllowedError,
@@ -132,6 +131,7 @@ STATUS_BY_BASE: tuple[tuple[type[SabeError], int], ...] = (
     (NotFoundError, status.HTTP_404_NOT_FOUND),
     (MethodNotAllowedError, status.HTTP_405_METHOD_NOT_ALLOWED),
     (ConflictError, status.HTTP_409_CONFLICT),
+    (GoneError, status.HTTP_410_GONE),
     (PreconditionFailedError, status.HTTP_412_PRECONDITION_FAILED),
     (InvalidInputError, status.HTTP_422_UNPROCESSABLE_CONTENT),
     (PreconditionRequiredError, status.HTTP_428_PRECONDITION_REQUIRED),
@@ -148,6 +148,7 @@ _STATUS_DESCRIPTIONS = {
     status.HTTP_404_NOT_FOUND: "Not found",
     status.HTTP_405_METHOD_NOT_ALLOWED: "Method not allowed",
     status.HTTP_409_CONFLICT: "Conflict",
+    status.HTTP_410_GONE: "Gone",
     status.HTTP_412_PRECONDITION_FAILED: "Precondition failed",
     status.HTTP_422_UNPROCESSABLE_CONTENT: "Invalid input",
     status.HTTP_428_PRECONDITION_REQUIRED: "Precondition required",
@@ -208,8 +209,6 @@ def _api_details(details: ErrorDetails | None) -> ApiErrorDetails | None:
     match details:
         case None:
             return None
-        case DuplicatePeers(peer_ids=peer_ids):
-            return DuplicateAnnotationDetails(peer_ids=peer_ids)
         case StaleVersion():
             return StaleAnnotationVersionDetails(
                 annotation_id=details.annotation_id,

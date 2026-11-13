@@ -6,6 +6,7 @@ from standard_annotation_backend.main import app
 
 REFRESH_PATHS = (
     "/admin/authorization-refreshes",
+    "/admin/rules-refreshes",
     "/admin/ontology-refreshes",
     "/admin/entity-refreshes",
     "/admin/annotation-refreshes",
@@ -48,9 +49,12 @@ def test_source_key_operations_document_the_shared_body_and_unknown_source(
     assert "unknown_source" in operation["responses"]["422"]["description"]
 
 
-def test_authorization_refresh_takes_no_body(schema: dict) -> None:
-    """The single authorization source needs no request body or source key."""
-    operation = schema["paths"]["/admin/authorization-refreshes"]["post"]
+@pytest.mark.parametrize(
+    "path", ["/admin/authorization-refreshes", "/admin/rules-refreshes"]
+)
+def test_single_source_refreshes_take_no_body(schema: dict, path: str) -> None:
+    """Authorization and rules each have one source, so they need no request body."""
+    operation = schema["paths"][path]["post"]
 
     assert "requestBody" not in operation
     assert "422" not in operation["responses"]
@@ -87,11 +91,14 @@ def test_job_resource_documents_exact_fields_and_vocabulary(schema: dict) -> Non
     assert set(resource["required"]) == set(resource["properties"])
     assert schema["components"]["schemas"]["JobType"]["enum"] == [
         "annotation_cutover",
+        "annotation_qc_report",
         "annotation_refresh",
         "authorization_refresh",
         "entity_refresh",
         "entity_retirement",
         "ontology_refresh",
+        "rules_refresh",
+        "term_replacement",
     ]
     assert schema["components"]["schemas"]["JobStatus"]["enum"] == [
         "queued",

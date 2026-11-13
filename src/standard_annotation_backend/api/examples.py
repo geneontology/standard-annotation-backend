@@ -138,7 +138,7 @@ ONTOLOGY_REFRESH_EXAMPLES: dict[str, Example] = {
 ENTITY_REFRESH_EXAMPLES: dict[str, Example] = {
     "single-source": {
         "summary": "Refresh a single entity source",
-        "value": {"source_key": "caeel"},
+        "value": {"source_key": "wb"},
     },
     "all-sources": {
         "summary": "Refresh all configured entity sources",
@@ -157,5 +157,16 @@ ANNOTATION_REFRESH_EXAMPLES: dict[str, Example] = {
             "cut over to SABE-managed annotations"
         ),
         "value": {},
+    },
+}
+
+QC_REPORT_EXAMPLES: dict[str, Example] = {
+    "all-groups": {
+        "summary": "Report on every group (global admins)",
+        "value": {},
+    },
+    "one-group": {
+        "summary": "Report on one group",
+        "value": {"owning_group_id": "MGI"},
     },
 }

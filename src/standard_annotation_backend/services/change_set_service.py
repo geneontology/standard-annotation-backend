@@ -60,10 +60,12 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
+from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.resource_authorization import (
     load_authorized_annotation,
 )
+from standard_annotation_backend.services.semantic_validator import SemanticValidator
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 
@@ -74,7 +76,9 @@ class ChangeSetPreview:
     A preview is advisory: acceptance repeats validation and repository checks.
     `annotation` is the candidate payload, or the snapshot to be deleted.
     `before_annotation` is the saved base snapshot for an update or deletion.
-    Duplicate peer IDs identify only conflicts that the operation would introduce.
+    `validation_errors` lists the candidate's structural (schema) issues. If there
+    are none and the operation is not a deletion, it lists the candidate's
+    semantic issues instead.
     """
 
     change_set_id: UUID
@@ -86,7 +90,6 @@ class ChangeSetPreview:
     annotation: dict[str, object] | None = None
     is_deleted: bool = False
     validation_errors: tuple[ValidationIssue, ...] = ()
-    duplicate_peer_ids: tuple[UUID, ...] = ()
     is_stale: bool = False
     can_accept: bool
 
@@ -197,10 +200,15 @@ class ChangeSetService:
 
     Args:
         unit_of_work_factory: Factory opening repositories in one transaction.
+        sources: Configured sources, which name the ontologies that
+            validation checks identifiers against.
     """
 
-    def __init__(self, unit_of_work_factory: UnitOfWorkFactory) -> None:
+    def __init__(
+        self, unit_of_work_factory: UnitOfWorkFactory, sources: RefreshSources
+    ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
+        self._validator = SemanticValidator(sources)
 
     def propose_create(
         self,
@@ -417,6 +425,8 @@ class ChangeSetService:
             ChangeSetNotFoundError: If the proposal is missing or inaccessible.
             ChangeSetStateError: If the proposal has already been reviewed.
             PermissionDeniedError: If the selected role cannot update proposals.
+            ReferenceDataUnavailableError: If reference data needed for
+                validation has never been loaded.
         """
         authorize_role(context, PermissionAction.CHANGE_SET_PROPOSE)
         with self._unit_of_work_factory() as unit_of_work:
@@ -426,7 +436,7 @@ class ChangeSetService:
                 context,
                 PermissionAction.CHANGE_SET_PROPOSE,
             )
-            preview = _build_preview(unit_of_work.annotations, record)
+            preview = _build_preview(unit_of_work, record, self._validator)
             unit_of_work.change_sets.record_preview(
                 change_set_id, preview=STORED_CHANGE_SET_PREVIEW.dump(preview)
             )
@@ -443,8 +453,9 @@ class ChangeSetService:
         """Repeat validation and repository checks, then accept and audit atomically.
 
         If a target has changed, commit the stale state and its audit event before
-        raising `StaleChangeSetError`, after the unit of work has closed. Other
-        validation or duplicate failures roll back and leave the proposal reviewable.
+        raising `StaleChangeSetError`, after the unit of work has closed. A
+        candidate that fails validation, including the duplicate check, rolls back
+        and leaves the proposal reviewable.
 
         Args:
             change_set_id: Identifier of the proposal to accept.
@@ -457,10 +468,10 @@ class ChangeSetService:
         Raises:
             ChangeSetNotFoundError: If the proposal is missing or inaccessible.
             ChangeSetStateError: If the proposal has already been reviewed.
-            InvalidChangeSetError: If the candidate is not a valid annotation.
-            UnknownDbObjectIdError: If a create or update has a `db_object_id`
-                that is not in the active entity catalog.
-            DuplicateAnnotationError: If acceptance would create a new duplicate.
+            InvalidChangeSetError: If the candidate fails structural or semantic
+                validation.
+            ReferenceDataUnavailableError: If reference data needed for
+                validation has never been loaded.
             StaleChangeSetError: If the target changed after the proposal was created.
             PermissionDeniedError: If the selected role cannot review proposals.
         """
@@ -474,7 +485,11 @@ class ChangeSetService:
             )
             try:
                 result = _accept_proposal(
-                    unit_of_work, record, context, review.review_reason
+                    unit_of_work,
+                    record,
+                    context,
+                    review.review_reason,
+                    self._validator,
                 )
             except (StaleAnnotationVersionError, AnnotationDeletedError):
                 assert (
@@ -489,7 +504,7 @@ class ChangeSetService:
                     record.base_version,
                     current.current_version,
                 )
-                preview = _build_preview(unit_of_work.annotations, record)
+                preview = _build_preview(unit_of_work, record, self._validator)
                 unit_of_work.change_sets.record_preview(
                     change_set_id, preview=STORED_CHANGE_SET_PREVIEW.dump(preview)
                 )
@@ -599,6 +614,7 @@ def _accept_proposal(
     record: ChangeSetRecord,
     context: RequestContext,
     review_reason: str | None,
+    validator: SemanticValidator,
 ) -> AcceptedChangeSet:
     """Apply the repository's write policy and record acceptance without committing.
 
@@ -617,8 +633,14 @@ def _accept_proposal(
     if validation.annotation is None:
         raise InvalidChangeSetError(validation.errors)
     if record.operation == ChangeSetOperation.CREATE:
+        prepared_create = unit_of_work.annotations.prepare_create(validation.annotation)
+        issues = validator.issues(
+            unit_of_work, validation.annotation, prepared_create.duplicate_peer_ids
+        )
+        if issues:
+            raise InvalidChangeSetError(issues)
         changed = unit_of_work.annotations.create(
-            annotation=validation.annotation,
+            prepared_create,
             owning_group_id=record.owning_group_id,
             actor_id=record.proposed_by,
             change_source=ChangeSource.CHANGE_SET,
@@ -626,10 +648,20 @@ def _accept_proposal(
     else:
         assert record.annotation_id is not None and record.base_version is not None
         if record.operation == ChangeSetOperation.UPDATE:
-            changed = unit_of_work.annotations.update(
+            prepared_update = unit_of_work.annotations.prepare_update(
                 record.annotation_id,
                 validation.annotation,
                 expected_version=record.base_version,
+            )
+            issues = validator.issues(
+                unit_of_work,
+                validation.annotation,
+                prepared_update.duplicate_peer_ids,
+            )
+            if issues:
+                raise InvalidChangeSetError(issues)
+            changed = unit_of_work.annotations.update(
+                prepared_update,
                 actor_id=record.proposed_by,
                 change_source=ChangeSource.CHANGE_SET,
             )
@@ -749,27 +781,31 @@ def _candidate(
 
 
 def _build_preview(
-    repository: AnnotationRepository, record: ChangeSetRecord
+    unit_of_work: SqlAlchemyUnitOfWork,
+    record: ChangeSetRecord,
+    validator: SemanticValidator,
 ) -> ChangeSetPreview:
-    """Describe validation, new duplicate conflicts, and observed version drift."""
+    """Describe the candidate, its validation issues, and whether its target changed.
+
+    The target has changed when its current version differs from the proposal's
+    base version. Duplicates are looked up without locks, so the result is only
+    advisory; acceptance looks them up again under locks before writing.
+    """
+    repository = unit_of_work.annotations
     before, validation = _candidate(repository, record)
     annotation = validation.annotation
-    peers: tuple[UUID, ...] = ()
-    current_version = None
+    issues = validation.errors
     if annotation is not None and record.operation != ChangeSetOperation.DELETE:
-        peers = _duplicate_peers(
-            repository, annotation, exclude_annotation_id=record.annotation_id
+        key = duplicate_key(annotation)
+        peers = repository.find_duplicate_peer_ids(
+            key.signature, key.references, exclude_annotation_id=record.annotation_id
         )
-        if before is not None:
-            before_peers = _duplicate_peers(
-                repository,
-                Annotation.model_validate(before),
-                exclude_annotation_id=record.annotation_id,
-            )
-            peers = tuple(sorted(set(peers) - set(before_peers)))
+        issues = validator.issues(unit_of_work, annotation, peers)
+    current_version = None
     if record.annotation_id is not None:
-        current = _current_target(repository, record.annotation_id)
-        current_version = current.current_version
+        current_version = _current_target(
+            repository, record.annotation_id
+        ).current_version
     is_stale = (
         record.base_version is not None and current_version != record.base_version
     )
@@ -781,11 +817,10 @@ def _build_preview(
         current_version=current_version,
         before_annotation=before,
         annotation=None if annotation is None else annotation.model_dump(mode="json"),
-        validation_errors=validation.errors,
-        duplicate_peer_ids=peers,
+        validation_errors=issues,
         is_stale=is_stale,
         is_deleted=record.operation == ChangeSetOperation.DELETE,
-        can_accept=annotation is not None and not peers and not is_stale,
+        can_accept=annotation is not None and not issues and not is_stale,
     )
 
 
@@ -826,21 +861,6 @@ def _lock_proposal(
     if record.state != ChangeSetState.PROPOSED:
         raise ChangeSetStateError(change_set_id, record.state)
     return record
-
-
-def _duplicate_peers(
-    repository: AnnotationRepository,
-    annotation: Annotation,
-    *,
-    exclude_annotation_id: UUID | None = None,
-) -> tuple[UUID, ...]:
-    """Look up active peers for advisory preview without performing a write."""
-    key = duplicate_key(annotation)
-    return repository.find_duplicate_peer_ids(
-        key.signature,
-        key.references,
-        exclude_annotation_id=exclude_annotation_id,
-    )
 
 
 def _record_audit(

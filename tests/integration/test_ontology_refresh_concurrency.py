@@ -6,13 +6,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
-from time import monotonic
 from uuid import UUID
 
 import httpx2
 import pytest
 from refresh_helpers import (
     REVISION,
+    TEST_SOURCES,
     OboTerm,
     go_document,
     ignore_progress,
@@ -20,7 +20,7 @@ from refresh_helpers import (
     start_job,
 )
 from seeding import create_job, insert_annotation
-from sqlalchemy import Engine, select, text
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.config import get_settings
@@ -31,26 +31,23 @@ from standard_annotation_backend.domain.annotations import (
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyDocument,
-    OntologyKey,
     OntologySnapshot,
     OntologyTerm,
 )
 from standard_annotation_backend.domain.refresh import SourceDocument
 from standard_annotation_backend.persistence.locks import (
-    GLOBAL_ANNOTATION_WRITE_LOCK_KEY,
     LockNamespace,
     acquire_global_annotation_write_lock,
     bind_try_lock,
     try_advisory_lock,
 )
 from standard_annotation_backend.persistence.models import (
-    AnnotationRecord,
     JobRecord,
     OntologyMetadataRecord,
 )
 from standard_annotation_backend.persistence.repositories import (
-    AnnotationRepository,
     OntologyRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
@@ -90,7 +87,7 @@ FAILURE_GUARD_SECONDS = 5
 
 def _document(revision: str) -> OntologyDocument:
     return OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=revision.encode(),
         source_type="test",
         source_locator="fixture/go.obo",
@@ -192,7 +189,7 @@ def _active_state(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> tuple[str | None, str, int]:
     with unit_of_work_factory() as unit_of_work:
-        active = unit_of_work.ontologies.get_active(OntologyKey.GO)
+        active = unit_of_work.ontologies.get_active(GO_ONTOLOGY_KEY)
         annotation = unit_of_work.annotations.get(REPLACED_ANNOTATION_ID)
         assert active is not None
         assert annotation is not None
@@ -201,47 +198,6 @@ def _active_state(
             annotation.ontology_class_id,
             annotation.current_version,
         )
-
-
-def _wait_for_global_lock_contention(
-    observer: Session, *, holder_pid: int, waiter_pid: int
-) -> None:
-    lock_key = GLOBAL_ANNOTATION_WRITE_LOCK_KEY
-    class_id = (lock_key >> 32) & 0xFFFFFFFF
-    object_id = lock_key & 0xFFFFFFFF
-    expected = {
-        (holder_pid, "ExclusiveLock", True),
-        (waiter_pid, "ShareLock", False),
-    }
-    deadline = monotonic() + FAILURE_GUARD_SECONDS
-    observed: set[tuple[int, str, bool]] = set()
-    statement = text(
-        """
-        SELECT pid, mode, granted
-        FROM pg_locks
-        WHERE locktype = 'advisory'
-          AND classid = :class_id
-          AND objid = :object_id
-          AND objsubid = 1
-          AND pid IN (:holder_pid, :waiter_pid)
-        """
-    )
-    while monotonic() < deadline:
-        observed = {
-            (row.pid, row.mode, row.granted)
-            for row in observer.execute(
-                statement,
-                {
-                    "class_id": class_id,
-                    "object_id": object_id,
-                    "holder_pid": holder_pid,
-                    "waiter_pid": waiter_pid,
-                },
-            )
-        }
-        if observed == expected:
-            return
-    raise AssertionError(f"global annotation lock contention not observed: {observed}")
 
 
 def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
@@ -255,7 +211,7 @@ def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
     calls: list[datetime] = []
 
     def record_pruning(
-        _repository: OntologyRepository, key: OntologyKey, pruned_at: datetime
+        _repository: OntologyRepository, key: str, pruned_at: datetime
     ) -> tuple[UUID, ...]:
         calls.append(pruned_at)
         return ()
@@ -263,14 +219,14 @@ def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
     monkeypatch.setattr(OntologyRepository, "prune_candidates", record_pruning)
 
     with try_advisory_lock(
-        database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+        database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
     ) as acquired:
         assert acquired is True
         with pytest.raises(WorkerTaskUnavailableError):
-            prune_ontology_snapshots.run(OntologyKey.GO.value)
+            prune_ontology_snapshots.run(GO_ONTOLOGY_KEY)
         assert calls == []
 
-    prune_ontology_snapshots.run(OntologyKey.GO.value)
+    prune_ontology_snapshots.run(GO_ONTOLOGY_KEY)
 
     assert len(calls) == 1
 
@@ -312,7 +268,7 @@ def test_refresh_task_retries_while_the_ontology_lock_is_held_then_succeeds(
 
     try:
         with try_advisory_lock(
-            database_engine, LockNamespace.ONTOLOGY, OntologyKey.GO.value
+            database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
         ) as acquired:
             assert acquired is True
             with pytest.raises(WorkerTaskUnavailableError):
@@ -340,93 +296,32 @@ def test_refresh_task_retries_while_the_ontology_lock_is_held_then_succeeds(
         assert record.status == JobStatus.SUCCEEDED.value
 
 
-def test_activation_is_atomically_visible_and_blocks_ordinary_writes(
+def test_activation_does_not_wait_for_annotation_writes(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Readers see complete states while an ordinary writer waits for activation."""
+    """An activation completes while an annotation write is in progress.
+
+    The writer holds the shared global annotation-write lock, as every annotation
+    write does, on its own connection for the whole activation. The new snapshot
+    becomes active and the annotation on its obsolete term is left unchanged.
+    """
     job, document = _prepare_load(unit_of_work_factory, session_factory)
     service = OntologyRefreshService(
-        unit_of_work_factory, bind_try_lock(database_engine), None
+        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
     )
-    update_flushed = Event()
-    allow_activation_commit = Event()
-    writer_started = Event()
-    activation_pid: list[int] = []
-    writer_pid: list[int] = []
-    original = AnnotationRepository.apply_system_update
-
-    def pause_after_update(
-        self: AnnotationRepository,
-        record: AnnotationRecord,
-        annotation: Annotation,
-        *,
-        actor_id: str,
-        change_source: ChangeSource,
-    ) -> AnnotationRecord:
-        updated = original(
-            self,
-            record,
-            annotation,
-            actor_id=actor_id,
-            change_source=change_source,
-        )
-        pid = self.session.scalar(text("SELECT pg_backend_pid()"))
-        assert pid is not None
-        activation_pid.append(pid)
-        update_flushed.set()
-        if not allow_activation_commit.wait(FAILURE_GUARD_SECONDS):
-            raise TimeoutError("activation test was not released")
-        return updated
-
-    def ordinary_write(session: Session) -> str:
-        pid = session.scalar(text("SELECT pg_backend_pid()"))
-        assert pid is not None
-        writer_pid.append(pid)
-        writer_started.set()
-        acquire_global_annotation_write_lock(session)
-        observed = AnnotationRepository(session).get(REPLACED_ANNOTATION_ID)
-        assert observed is not None
-        other = AnnotationRepository(session).get(OTHER_ANNOTATION_ID)
-        assert other is not None
-        changed_data = dict(other.annotation_data)
-        changed_data["assigned_by"] = "Writer_After_Load"
-        AnnotationRepository(session).update(
-            OTHER_ANNOTATION_ID,
-            Annotation.model_validate(changed_data),
-            expected_version=1,
-            actor_id="writer",
-        )
-        session.commit()
-        return observed.ontology_class_id
-
-    monkeypatch.setattr(AnnotationRepository, "apply_system_update", pause_after_update)
-    with (
-        session_factory() as writer_session,
-        session_factory() as observer_session,
-        ThreadPoolExecutor(max_workers=2) as executor,
-    ):
+    with session_factory() as writer, ThreadPoolExecutor(max_workers=1) as executor:
+        acquire_global_annotation_write_lock(writer)
         activation = executor.submit(service.apply, job, document, ignore_progress)
-        assert update_flushed.wait(FAILURE_GUARD_SECONDS)
-        assert _active_state(unit_of_work_factory) == ("old", OLD_TERM, 1)
+        try:
+            activation.result(timeout=FAILURE_GUARD_SECONDS)
+        finally:
+            # Release the lock even on timeout, so a waiting activation fails
+            # the test instead of blocking the executor's shutdown.
+            writer.rollback()
 
-        writer = executor.submit(ordinary_write, writer_session)
-        assert writer_started.wait(FAILURE_GUARD_SECONDS)
-        _wait_for_global_lock_contention(
-            observer_session,
-            holder_pid=activation_pid[0],
-            waiter_pid=writer_pid[0],
-        )
-        assert not writer.done()
-        allow_activation_commit.set()
-        outcome = activation.result(timeout=FAILURE_GUARD_SECONDS)
-        observed_by_writer = writer.result(timeout=FAILURE_GUARD_SECONDS)
-
-    assert outcome.result["annotation_update_count"] == 1
-    assert observed_by_writer == NEW_TERM
-    assert _active_state(unit_of_work_factory) == (REVISION, NEW_TERM, 2)
+    assert _active_state(unit_of_work_factory) == (REVISION, OLD_TERM, 1)
 
 
 def test_failed_activation_never_exposes_partial_state(
@@ -438,33 +333,22 @@ def test_failed_activation_never_exposes_partial_state(
     """A reader during and after a failed activation sees the prior complete state."""
     job, document = _prepare_load(unit_of_work_factory, session_factory)
     service = OntologyRefreshService(
-        unit_of_work_factory, bind_try_lock(database_engine), None
+        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
     )
     update_flushed = Event()
     allow_failure = Event()
-    original = AnnotationRepository.apply_system_update
+    original = OntologyRepository.activate
 
-    def fail_after_update(
-        self: AnnotationRepository,
-        record: AnnotationRecord,
-        annotation: Annotation,
-        *,
-        actor_id: str,
-        change_source: ChangeSource,
-    ) -> AnnotationRecord:
-        original(
-            self,
-            record,
-            annotation,
-            actor_id=actor_id,
-            change_source=change_source,
-        )
+    def fail_after_activation(
+        self: OntologyRepository, version_id: UUID
+    ) -> OntologyMetadataRecord:
+        original(self, version_id)
         update_flushed.set()
         if not allow_failure.wait(FAILURE_GUARD_SECONDS):
             raise TimeoutError("failure test was not released")
         raise RuntimeError("injected activation failure")
 
-    monkeypatch.setattr(AnnotationRepository, "apply_system_update", fail_after_update)
+    monkeypatch.setattr(OntologyRepository, "activate", fail_after_activation)
     with ThreadPoolExecutor(max_workers=1) as executor:
         activation = executor.submit(service.apply, job, document, ignore_progress)
         assert update_flushed.wait(FAILURE_GUARD_SECONDS)

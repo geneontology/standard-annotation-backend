@@ -29,6 +29,7 @@ from standard_annotation_backend.workers import tasks
 
 ROUTES = {
     "/admin/authorization-refreshes": ("authorization_refresh", ["go-site"], "go-site"),
+    "/admin/rules-refreshes": ("rules_refresh", ["go-site"], "go-site"),
     "/admin/ontology-refreshes": ("ontology_refresh", ["go"], "go"),
     "/admin/entity-refreshes": ("entity_refresh", ["mgi", "rgd"], "rgd"),
     "/admin/annotation-refreshes": (
@@ -39,12 +40,14 @@ ROUTES = {
 }
 CUTOVER_ROUTE = "/admin/annotation-cutovers"
 AUTHORIZATION_ROUTE = "/admin/authorization-refreshes"
-SOURCE_KEY_ROUTES = sorted(path for path in ROUTES if path != AUTHORIZATION_ROUTE)
+RULES_ROUTE = "/admin/rules-refreshes"
+SINGLE_SOURCE_ROUTES = (AUTHORIZATION_ROUTE, RULES_ROUTE)
+SOURCE_KEY_ROUTES = sorted(path for path in ROUTES if path not in SINGLE_SOURCE_ROUTES)
 
 
 def _refresh_all_body(path: str) -> dict[str, object] | None:
-    """Return the body that refreshes every source; authorization takes none."""
-    return None if path == AUTHORIZATION_ROUTE else {}
+    """Return the body that refreshes every source; single-source routes take none."""
+    return None if path in SINGLE_SOURCE_ROUTES else {}
 
 
 @pytest.fixture
@@ -146,20 +149,26 @@ def test_invalid_bodies_are_rejected(
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
-def test_authorization_refresh_needs_no_body_and_reuses_its_unfinished_job(
-    integration_api_client: TestClient, dispatched: list[Job]
+@pytest.mark.parametrize("path", SINGLE_SOURCE_ROUTES)
+def test_single_source_refresh_needs_no_body_and_reuses_its_unfinished_job(
+    integration_api_client: TestClient, dispatched: list[Job], path: str
 ) -> None:
-    """The single authorization source is refreshed without naming it."""
-    first = integration_api_client.post(AUTHORIZATION_ROUTE)
-    second = integration_api_client.post(AUTHORIZATION_ROUTE)
+    """A kind with one source is refreshed without naming it.
+
+    A second request while the first job is unfinished returns that same job.
+    """
+    job_type, _, key = ROUTES[path]
+
+    first = integration_api_client.post(path)
+    second = integration_api_client.post(path)
 
     assert first.status_code == second.status_code == status.HTTP_202_ACCEPTED
     [job] = first.json()["jobs"]
-    assert job["job_type"] == "authorization_refresh"
+    assert job["job_type"] == job_type
     assert [job["job_id"] for job in second.json()["jobs"]] == [job["job_id"]]
     assert [sent.parameters for sent in dispatched] == [
-        {"source_key": "go-site"},
-        {"source_key": "go-site"},
+        {"source_key": key},
+        {"source_key": key},
     ]
 
 
@@ -185,7 +194,7 @@ def test_only_global_admins_can_refresh_and_denial_precedes_lookup(
     """Every other context gets 403, even for an unknown key, and no job."""
     app.dependency_overrides[get_authenticated_context] = lambda: _context(role, scope)
 
-    body = None if path == AUTHORIZATION_ROUTE else {"source_key": "missing"}
+    body = None if path in SINGLE_SOURCE_ROUTES else {"source_key": "missing"}
 
     response = integration_api_client.post(path, json=body)
 
@@ -231,7 +240,7 @@ def test_dispatch_failure_returns_failed_job_without_broker_details(
 
     monkeypatch.setattr(tasks, "dispatch_refresh_job", fail)
 
-    body = None if path == AUTHORIZATION_ROUTE else {"source_key": key}
+    body = None if path in SINGLE_SOURCE_ROUTES else {"source_key": key}
 
     response = integration_api_client.post(path, json=body)
 

@@ -34,7 +34,20 @@ class LockNamespace(Enum):
             group key.
         AUTHORIZATION_REFRESH: Replacement of users and grants. Used without a
             value.
+        RULES_REFRESH: Activation of a stored copy of the go-site files that GO
+            Rules read. Used without a value.
         REFRESH_START: Creation of refresh jobs of every kind. Used without a
+            value.
+        QC_REPORT: Running of a QC report. Keyed by group key for a report on
+            one group, or used without a value for a report on all groups, so
+            two reports on the same group, or two on all groups, never run at
+            once.
+        QC_REPORT_START: Creation of QC report jobs. Used without a value.
+        TERM_REPLACEMENT: Running of a term replacement job. Keyed by group key
+            for a job on one group, or used without a value for a job on all
+            groups, so two jobs on the same group, or two on all groups, never
+            run at once.
+        TERM_REPLACEMENT_START: Creation of term replacement jobs. Used without a
             value.
     """
 
@@ -43,7 +56,12 @@ class LockNamespace(Enum):
     ENTITY_CATALOG = b"SABEENT"
     ANNOTATION_GROUP = b"SABEGPAD"
     AUTHORIZATION_REFRESH = b"SABEAUTH"
+    RULES_REFRESH = b"SABERULES"
     REFRESH_START = b"SABERSTRT"
+    QC_REPORT = b"SABEQC"
+    QC_REPORT_START = b"SABEQCSTRT"
+    TERM_REPLACEMENT = b"SABETERM"
+    TERM_REPLACEMENT_START = b"SABETRPLS"
 
 
 def lock_key(namespace: LockNamespace, value: str | UUID | None = None) -> int:

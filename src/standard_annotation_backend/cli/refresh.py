@@ -5,7 +5,8 @@
 are recorded the same way. Instead of sending each job to a Celery worker, it
 runs the job in this process and waits for it. This is the supported way to load
 authorization into a new database, before anyone holds a token for the admin API.
-Annotation cutovers are available only through the admin API.
+Annotation cutovers are available only through the admin API. After the
+refreshes, any term replacement jobs they queued also run in this process.
 """
 
 import argparse
@@ -33,6 +34,9 @@ from standard_annotation_backend.services.refresh_start_service import (
 from standard_annotation_backend.workers.runtime import WorkerRuntime, worker_runtime
 
 logger = logging.getLogger(__name__)
+
+_SINGLE_SOURCE_KINDS = frozenset({RefreshKindName.AUTHORIZATION, RefreshKindName.RULES})
+"""Kinds with exactly one configured source, which take no `source_key`."""
 
 
 def run_refreshes(
@@ -78,6 +82,31 @@ def run_refreshes(
     return tuple(runtime.jobs.find(job.job_id) for job in started)
 
 
+def run_replacements(runtime: WorkerRuntime, queued: Sequence[Job]) -> tuple[Job, ...]:
+    """Run each queued term replacement job once, in this process.
+
+    Ontology activations and annotation publications queue these jobs, which a
+    Celery worker would otherwise run. Several refreshes can queue the same job,
+    so each distinct job runs once. A job that raises is logged and reported in
+    whatever state it reached.
+
+    Returns:
+        The state of every replacement job after it ran.
+    """
+    ran: list[Job] = []
+    for job_id in dict.fromkeys(job.job_id for job in queued):
+        try:
+            runtime.term_replacement.run(job_id)
+        except Exception as error:
+            logger.error(
+                "Term replacement job stopped before finishing: job_id=%s failure_type=%s",
+                job_id,
+                type(error).__name__,
+            )
+        ran.append(runtime.jobs.find(job_id))
+    return tuple(ran)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments, run the refreshes, and print one line per job.
 
@@ -95,18 +124,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         nargs="?",
         help=(
             "Refresh one ontology, entity, or annotation source. Omit it to refresh "
-            "every configured source. Authorization has a single source and takes "
-            "none."
+            "every configured source. Authorization and rules each have a single "
+            "source and take none."
         ),
     )
     arguments = parser.parse_args(argv)
     kind = RefreshKindName(arguments.kind)
-    if kind is RefreshKindName.AUTHORIZATION and arguments.source_key is not None:
-        parser.error("authorization has a single source; omit source_key")
+    if kind in _SINGLE_SOURCE_KINDS and arguments.source_key is not None:
+        parser.error(f"{kind.value} has a single source; omit source_key")
     try:
         # Without `enqueue_prune`, ontology pruning also runs in this process.
-        with worker_runtime() as runtime:
+        replacements: list[Job] = []
+        with worker_runtime(dispatch_replacement=replacements.append) as runtime:
             jobs = run_refreshes(runtime, kind, arguments.source_key)
+            jobs += run_replacements(runtime, replacements)
             sources_configured = bool(runtime.settings.sources.keys(kind))
     except UnknownSourceError:
         print(f"No {kind.value} source is configured with that key", file=sys.stderr)
@@ -143,10 +174,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _describe(job: Job) -> str:
-    """Return `<job type> <source key> <status> <job id> [failure code]`."""
+    """Return `<job type> <source key or scope> <status> <job id> [failure code]`."""
+    scope = job.parameters.get("source_key")
+    if job.job_type is JobType.TERM_REPLACEMENT:
+        scope = job.parameters.get("group_key", "all")
     parts = [
         job.job_type.value,
-        str(job.parameters.get("source_key")),
+        str(scope),
         job.status.value,
         str(job.job_id),
     ]

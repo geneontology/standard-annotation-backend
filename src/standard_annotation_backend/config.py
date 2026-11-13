@@ -57,9 +57,11 @@ class Settings(LoggingSettings):
     github_oauth_client_secret: SecretStr | None = None
     github_oauth_callback_url: str | None = None
     authorization_refresh_cron: TrimmedNonBlankString = "0 0 * * *"
+    rules_refresh_cron: TrimmedNonBlankString = "0 1 * * *"
     ontology_refresh_cron: TrimmedNonBlankString = "0 2 * * 1,3,5"
     entity_refresh_cron: TrimmedNonBlankString = "0 3 * * *"
     annotation_refresh_cron: TrimmedNonBlankString = "0 4 * * *"
+    qc_report_cron: TrimmedNonBlankString = "0 6 * * *"
     sources_file: Path = Path("config/sources.yaml")
     source_connect_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
     source_read_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
@@ -67,9 +69,11 @@ class Settings(LoggingSettings):
 
     @field_validator(
         "authorization_refresh_cron",
+        "rules_refresh_cron",
         "ontology_refresh_cron",
         "entity_refresh_cron",
         "annotation_refresh_cron",
+        "qc_report_cron",
     )
     @classmethod
     def validate_cron(cls, value: str) -> str:

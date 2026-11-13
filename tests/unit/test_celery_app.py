@@ -30,7 +30,7 @@ def test_tasks_are_redelivered_after_worker_loss_and_retried_without_a_cap() -> 
 
 
 def test_beat_schedules_each_kind_on_its_own_cron_setting() -> None:
-    """Beat starts each kind through `sabe.refresh.schedule` on that kind's cron."""
+    """Beat starts each refresh kind and the all-groups QC report on its own cron."""
     with patch.dict(os.environ, {}, clear=True):
         settings = Settings(
             _env_file=None,
@@ -43,18 +43,28 @@ def test_beat_schedules_each_kind_on_its_own_cron_setting() -> None:
             ontology_refresh_cron="2 0 * * *",
             entity_refresh_cron="3 0 * * *",
             annotation_refresh_cron="4 0 * * *",
+            rules_refresh_cron="5 0 * * *",
+            qc_report_cron="6 0 * * *",
         )
 
     assert beat_schedule(settings) == {
-        f"{kind}-refresh": {
-            "task": "sabe.refresh.schedule",
-            "schedule": crontab(minute=minute, hour="0"),
-            "args": (kind,),
-        }
-        for kind, minute in (
-            ("authorization", "1"),
-            ("ontology", "2"),
-            ("entity", "3"),
-            ("annotation", "4"),
-        )
+        "annotation-qc-report": {
+            "task": "sabe.qc_report.schedule",
+            "schedule": crontab(minute="6", hour="0"),
+            "args": (),
+        },
+        **{
+            f"{kind}-refresh": {
+                "task": "sabe.refresh.schedule",
+                "schedule": crontab(minute=minute, hour="0"),
+                "args": (kind,),
+            }
+            for kind, minute in (
+                ("authorization", "1"),
+                ("ontology", "2"),
+                ("entity", "3"),
+                ("annotation", "4"),
+                ("rules", "5"),
+            )
+        },
     }

@@ -26,22 +26,31 @@ def _settings(**overrides: object) -> Settings:
 
 
 def test_refresh_schedules_default_to_the_documented_times() -> None:
-    """Authorization refreshes daily at 00:00, ontologies Mon/Wed/Fri 02:00, entities 03:00."""
+    """Each kind refreshes, and the QC report runs, on its documented UTC schedule.
+
+    Authorization runs daily at 00:00, GO Rule data at 01:00, ontologies on Monday,
+    Wednesday, and Friday at 02:00, entities at 03:00, annotations at 04:00, and
+    the all-groups QC report at 06:00.
+    """
     settings = _settings()
 
     assert settings.authorization_refresh_cron == "0 0 * * *"
+    assert settings.rules_refresh_cron == "0 1 * * *"
     assert settings.ontology_refresh_cron == "0 2 * * 1,3,5"
     assert settings.entity_refresh_cron == "0 3 * * *"
     assert settings.annotation_refresh_cron == "0 4 * * *"
+    assert settings.qc_report_cron == "0 6 * * *"
 
 
 @pytest.mark.parametrize(
     "setting",
     [
         "authorization_refresh_cron",
+        "rules_refresh_cron",
         "ontology_refresh_cron",
         "entity_refresh_cron",
         "annotation_refresh_cron",
+        "qc_report_cron",
     ],
 )
 @pytest.mark.parametrize("value", ["", "* * *", "60 * * * *", "0 0 30 2 *"])
@@ -66,7 +75,7 @@ def test_settings_expose_the_shipped_sources_file() -> None:
     settings = _settings()
 
     assert settings.sources_file == Path("config/sources.yaml")
-    assert settings.sources.keys(RefreshKindName.ONTOLOGY) == ("go",)
+    assert "go" in settings.sources.keys(RefreshKindName.ONTOLOGY)
     assert settings.source_connect_timeout_seconds == 10
     assert settings.source_read_timeout_seconds == 60
 

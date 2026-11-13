@@ -38,6 +38,8 @@ class PermissionAction(StrEnum):
     CHANGE_SET_PROPOSE = "change_set.propose"
     CHANGE_SET_REVIEW = "change_set.review"
     JOB_READ = "job.read"
+    QC_REPORT_CREATE = "qc_report.create"
+    QC_REPORT_READ = "qc_report.read"
     REFRESH_CREATE = "refresh.create"
 
 
@@ -107,6 +109,7 @@ _READ_ACTIONS = frozenset(
     {
         PermissionAction.ANNOTATION_READ,
         PermissionAction.CHANGE_SET_READ,
+        PermissionAction.QC_REPORT_READ,
     }
 )
 _EDIT_ACTIONS = frozenset(

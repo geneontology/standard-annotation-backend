@@ -95,14 +95,31 @@ def test_only_global_admins_may_start_refreshes(
             authorize_role(context, PermissionAction.REFRESH_CREATE)
 
 
+@pytest.mark.parametrize("role", list(AuthorizationRole))
+@pytest.mark.parametrize("scope", list(AuthorizationScope))
+def test_admins_of_every_scope_may_start_qc_reports(
+    role: AuthorizationRole, scope: AuthorizationScope
+) -> None:
+    """The admin role starts QC reports with any scope; other roles cannot."""
+    context = _context(role, scope)
+
+    if role is AuthorizationRole.ADMIN:
+        authorize_role(context, PermissionAction.QC_REPORT_CREATE)
+    else:
+        with pytest.raises(PermissionDeniedError):
+            authorize_role(context, PermissionAction.QC_REPORT_CREATE)
+
+
 @pytest.mark.parametrize(
     "action",
     [
         PermissionAction.ANNOTATION_READ,
         PermissionAction.CHANGE_SET_READ,
+        PermissionAction.QC_REPORT_READ,
     ],
 )
 def test_read_role_allows_each_read_action(action: PermissionAction) -> None:
+    """The read role may read annotations, change sets, and QC reports."""
     authorize(
         _context(AuthorizationRole.READ, AuthorizationScope.GROUP),
         action,

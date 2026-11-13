@@ -22,6 +22,7 @@ from standard_annotation_backend.api.models import ApiErrorResponse
 from standard_annotation_backend.domain.annotations import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
+    InvalidAnnotationPayloadError,
 )
 from standard_annotation_backend.domain.auth import (
     AuthenticationRequiredError,
@@ -30,9 +31,9 @@ from standard_annotation_backend.domain.comments import InvalidCommentError
 from standard_annotation_backend.domain.errors import (
     BadRequestError,
     ConflictError,
-    DuplicatePeers,
     ErrorDetails,
     ForbiddenError,
+    GoneError,
     InternalServerError,
     InvalidInputError,
     MethodNotAllowedError,
@@ -67,12 +68,9 @@ class _Bad(InvalidInputError):
         return ("body", "thing")
 
 
-class _Duplicate(ConflictError):
-    code = "duplicate_thing"
+class _Conflict(ConflictError):
+    code = "conflicting_thing"
     message = "Thing conflicts"
-
-    def details(self) -> ErrorDetails:
-        return DuplicatePeers(peer_ids=(ANNOTATION_ID,))
 
 
 def _body(error: SabeError) -> dict[str, Any]:
@@ -88,6 +86,7 @@ def test_each_base_maps_to_one_status() -> None:
         NotFoundError: status.HTTP_404_NOT_FOUND,
         MethodNotAllowedError: status.HTTP_405_METHOD_NOT_ALLOWED,
         ConflictError: status.HTTP_409_CONFLICT,
+        GoneError: status.HTTP_410_GONE,
         PreconditionFailedError: status.HTTP_412_PRECONDITION_FAILED,
         InvalidInputError: status.HTTP_422_UNPROCESSABLE_CONTENT,
         PreconditionRequiredError: status.HTTP_428_PRECONDITION_REQUIRED,
@@ -127,7 +126,6 @@ def test_invalid_input_reports_one_located_issue_by_default() -> None:
 
 def test_details_values_serialize_to_existing_shapes() -> None:
     """Domain details become the existing public detail models."""
-    assert _body(_Duplicate())["error"]["details"] == {"peer_ids": [str(ANNOTATION_ID)]}
 
     class _Stale(PreconditionFailedError):
         code = "stale"
@@ -166,12 +164,36 @@ def test_details_values_serialize_to_existing_shapes() -> None:
 
 def test_error_responses_group_codes_by_status() -> None:
     """Route docs list every code each status can carry."""
-    responses = error_responses(_Missing, _Bad, _Duplicate)
+    responses = error_responses(_Missing, _Bad, _Conflict)
 
     assert set(responses) == {404, 409, 422}
     assert responses[404]["model"] is ApiErrorResponse
     assert "`thing_not_found`" in responses[404]["description"]
     assert "`bad_thing`" in responses[422]["description"]
+
+
+def test_issue_details_are_included_only_when_present() -> None:
+    """An issue with details shows them; an issue without has no details key."""
+    error = InvalidAnnotationPayloadError(
+        (
+            {
+                "location": ("annotation", "db_object_id"),
+                "message": "Unknown",
+                "type": "unknown_entity",
+            },
+            {
+                "location": ("annotation", "ontology_class_id"),
+                "message": "Obsolete",
+                "type": "obsolete_term",
+                "details": {"replaced_by": ["GO:1"], "consider": []},
+            },
+        )
+    )
+
+    first, second = _body(error)["error"]["details"]
+
+    assert "details" not in first
+    assert second["details"] == {"replaced_by": ["GO:1"], "consider": []}
 
 
 def test_deleted_and_missing_annotations_are_indistinguishable() -> None:
@@ -355,7 +377,7 @@ def test_every_default_issue_location_starts_with_an_allowed_root() -> None:
         if issubclass(error_type, InvalidInputError)
         and error_type.issue_location is not InvalidInputError.issue_location
     ]
-    assert len(located) >= 10
+    assert len(located) >= 9
     roots = {
         error_type.__name__: _representative(error_type).issue_location()[0]
         for error_type in located

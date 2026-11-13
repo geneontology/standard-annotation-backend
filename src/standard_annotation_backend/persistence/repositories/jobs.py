@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import cast, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.jobs import (
@@ -108,6 +109,46 @@ class JobRepository:
             )
             .order_by(JobRecord.created_at, JobRecord.job_id)
             .limit(1)
+        )
+
+    def lock_qc_report_starts(self) -> None:
+        """Make QC report job creation run one request at a time.
+
+        The lock is held until the transaction ends, so two requests cannot both
+        find no queued report and both create one.
+        """
+        acquire_transaction_lock(self.session, LockNamespace.QC_REPORT_START)
+
+    def lock_term_replacement_starts(self) -> None:
+        """Make term replacement job creation run one request at a time.
+
+        The lock is held until the transaction ends, so two requests cannot both
+        find no queued job and both create one.
+        """
+        acquire_transaction_lock(self.session, LockNamespace.TERM_REPLACEMENT_START)
+
+    def find_queued(
+        self, *, job_type: JobType, parameters: dict[str, object]
+    ) -> JobRecord | None:
+        """Lock and return the oldest queued job with this type and these parameters.
+
+        Callers use this to reuse a queued job instead of creating another. The
+        parameters must match exactly. The row stays locked until the
+        transaction ends, so the job cannot start until the caller that reused it
+        commits. A job whose start has already committed is running, not queued,
+        and is not returned.
+        """
+        return self.session.scalar(
+            select(JobRecord)
+            .where(
+                JobRecord.job_type == job_type,
+                JobRecord.status == JobStatus.QUEUED,
+                JobRecord.parameters == cast(parameters, JSONB),
+            )
+            .order_by(JobRecord.created_at, JobRecord.job_id)
+            .limit(1)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
 
     def get(self, job_id: UUID) -> JobRecord | None:

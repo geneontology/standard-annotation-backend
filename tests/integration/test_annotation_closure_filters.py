@@ -7,11 +7,12 @@ from uuid import UUID
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from seeding import SeedTerm
 
 from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
     OntologyClosureRow,
     OntologyDocument,
-    OntologyKey,
     OntologySnapshot,
     OntologyTerm,
 )
@@ -68,7 +69,7 @@ def _load_active_ontology(unit_of_work_factory: UnitOfWorkFactory) -> None:
     now = datetime(2026, 9, 28, tzinfo=UTC)
     job_id = UUID("00000000-0000-0000-0000-000000000071")
     document = OntologyDocument(
-        ontology_key=OntologyKey.GO,
+        ontology_key=GO_ONTOLOGY_KEY,
         content=b"fixture",
         source_type="test",
         source_locator="fixture/go.obo",
@@ -218,8 +219,15 @@ def test_closure_filter_rejects_predicate_not_loaded_by_active_snapshot(
 def test_closure_filter_combines_descendants_with_other_filters(
     integration_api_client: TestClient,
     unit_of_work_factory: UnitOfWorkFactory,
+    reference_data: Callable[..., None],
 ) -> None:
     """The public filter combines descendants, pagination, and ordinary filters."""
+    reference_data(
+        *(
+            SeedTerm(term_id, parents=("GO:0008150",))
+            for term_id in ("GO:1", "GO:2", "GO:3", "GO:4")
+        )
+    )
     direct_id = _create(
         integration_api_client,
         "UniProtKB:C1",

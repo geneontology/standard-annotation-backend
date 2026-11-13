@@ -40,13 +40,14 @@ from standard_annotation_backend.domain.annotation_search import (
 from standard_annotation_backend.domain.annotations import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
-    DuplicateAnnotationError,
     EmptyAnnotationPatchError,
     InvalidAnnotationPayloadError,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.domain.auth import RequestContext
-from standard_annotation_backend.domain.entities import UnknownDbObjectIdError
+from standard_annotation_backend.domain.semantic_validation.facts import (
+    ReferenceDataUnavailableError,
+)
 from standard_annotation_backend.services.annotation_service import AnnotationService
 
 router = APIRouter(
@@ -154,11 +155,13 @@ def list_annotations(
                 },
             }
         },
+        # Route-level entries replace the router's entries for the same status, so
+        # the bearer errors are listed again here.
         **error_responses(
-            DuplicateAnnotationError,
+            *BEARER_ERRORS,
             InvalidAnnotationPayloadError,
-            UnknownDbObjectIdError,
             RequestValidationFailedError,
+            ReferenceDataUnavailableError,
         ),
     },
 )
@@ -228,17 +231,19 @@ def get_annotation(
     openapi_extra=IF_MATCH_OPENAPI,
     responses={
         status.HTTP_200_OK: {"headers": {"ETag": _ETAG_RESPONSE_HEADER}},
+        # Route-level entries replace the router's entries for the same status, so
+        # the bearer errors are listed again here.
         **error_responses(
+            *BEARER_ERRORS,
             AnnotationNotFoundError,
             AnnotationDeletedError,
-            DuplicateAnnotationError,
             StaleAnnotationVersionError,
             IfMatchRequiredError,
             MalformedIfMatchError,
             EmptyAnnotationPatchError,
             InvalidAnnotationPayloadError,
-            UnknownDbObjectIdError,
             RequestValidationFailedError,
+            ReferenceDataUnavailableError,
         ),
     },
 )

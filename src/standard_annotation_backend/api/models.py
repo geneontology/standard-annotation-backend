@@ -12,7 +12,7 @@ from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 from standard_annotation_backend.api.dependencies import PageLimit, PageOffset
 from standard_annotation_backend.api.examples import CHANGE_SET_PROPOSAL_EXAMPLES
@@ -31,6 +31,13 @@ from standard_annotation_backend.domain.change_sets import (
     ChangeSetState,
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.qc_reports import (
+    STORED_QC_REPORT_RESULT,
+    IssueType,
+    QcFinding,
+    issue_type_link,
+    issue_type_title,
+)
 from standard_annotation_backend.domain.tokens import TokenMetadata
 from standard_annotation_backend.refresh.sources import SourceKey
 from standard_annotation_backend.services.annotation_service import (
@@ -45,12 +52,17 @@ from standard_annotation_backend.services.change_set_service import (
 from standard_annotation_backend.services.comment_service import AnnotationComment
 from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.pagination import ResultPage
+from standard_annotation_backend.services.qc_report_service import (
+    QcReportListing,
+    QcReportSummary,
+)
 from standard_annotation_backend.services.token_service import (
     CreatedToken,
     TokenContext,
     TokenCreateInput,
 )
 from standard_annotation_backend.validation_types import (
+    ExactNonBlankString,
     NonBlankString,
 )
 
@@ -298,7 +310,9 @@ class JobResource(BaseModel):
             "100 issues (line number, category, and invalid fields) for invalid "
             "rows. Completed refresh jobs, except entity retirement, include "
             "unchanged, which is true when the source document was already "
-            "active so nothing was applied."
+            "active so nothing was applied. Term replacement and QC report jobs "
+            "include a phase and running counts; when they fail, they include "
+            "phase='failed' and a failure_code."
         ),
         examples=[
             {
@@ -533,11 +547,19 @@ class AnnotationVersionPageResponse(PageResource[AnnotationVersionResource]):
 
 
 class ApiValidationIssue(BaseModel):
-    """Describe one invalid value in a request or annotation."""
+    """Describe one invalid value in a request or annotation.
+
+    `details` gives more information about the problem, such as the suggested
+    replacements for an obsolete term or the IDs of duplicate annotations. It is
+    omitted when there is none.
+    """
 
     location: tuple[str | int, ...]
     message: str
     type: str
+    details: dict[str, object] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ChangeSetPreviewResource(BaseModel):
@@ -555,7 +577,6 @@ class ChangeSetPreviewResource(BaseModel):
     annotation: dict[str, object] | None
     is_deleted: bool
     validation_errors: tuple[ApiValidationIssue, ...]
-    duplicate_peer_ids: tuple[UUID, ...]
     is_stale: bool
     can_accept: bool
 
@@ -607,12 +628,6 @@ class AcceptedChangeSetResource(BaseModel):
         return cls.model_validate(result, from_attributes=True)
 
 
-class DuplicateAnnotationDetails(BaseModel):
-    """List active annotations that conflict with a requested change."""
-
-    peer_ids: tuple[UUID, ...]
-
-
 class StaleAnnotationVersionDetails(BaseModel):
     """Explain that an annotation changed after the client last read it."""
 
@@ -631,10 +646,7 @@ class StaleChangeSetDetails(BaseModel):
 
 
 type ApiErrorDetails = (
-    list[ApiValidationIssue]
-    | DuplicateAnnotationDetails
-    | StaleAnnotationVersionDetails
-    | StaleChangeSetDetails
+    list[ApiValidationIssue] | StaleAnnotationVersionDetails | StaleChangeSetDetails
 )
 
 
@@ -722,3 +734,245 @@ class TokenListResponse(BaseModel):
     """List the user's token history with safe metadata only."""
 
     items: list[TokenResource]
+
+
+class QcReportRequest(BaseModel):
+    """Choose the scope of a QC report."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    owning_group_id: Annotated[
+        ExactNonBlankString | None,
+        Field(
+            description=(
+                "Report on this group only. Global admins may omit it to report on "
+                "all groups. A group admin's report always covers its own group, "
+                "and naming a different group is refused."
+            ),
+        ),
+    ] = None
+
+
+def _issue_type_description(issue_type: IssueType) -> str:
+    """Return an issue type's title, followed by its GO Rule link if it has one."""
+    link = issue_type_link(issue_type)
+    title = issue_type_title(issue_type)
+    return title if link is None else f"{title} ({link})"
+
+
+IssueTypeParameter = Annotated[
+    IssueType,
+    WithJsonSchema(
+        {
+            "type": "string",
+            "title": "IssueType",
+            "enum": [member.value for member in IssueType],
+            "x-enum-descriptions": [
+                _issue_type_description(member) for member in IssueType
+            ],
+            "description": (
+                "An issue type a QC report counts. `structural` covers every "
+                "issue found by Standard Annotation schema validation; GO Rule "
+                "types link to the rule."
+            ),
+        }
+    ),
+]
+"""An issue type, documented with each value's title and GO Rule link."""
+
+
+class QcFindingQuery(BaseModel):
+    """Filter and page a report's findings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    issue_type: Annotated[
+        IssueTypeParameter | None,
+        Field(description="Only findings with at least one issue of this type."),
+    ] = None
+    owning_group_id: Annotated[
+        NonBlankString | None,
+        Field(description="Only findings for this group's annotations."),
+    ] = None
+    limit: PageLimit = 50
+    offset: PageOffset = 0
+
+
+class QcGroupCountsResource(BaseModel):
+    """Count one group's annotations in a report."""
+
+    annotations_checked: int
+    annotations_with_issues: int
+
+
+class QcOntologySnapshotResource(BaseModel):
+    """Identify one ontology snapshot a report read."""
+
+    ontology_key: str
+    version_id: UUID
+    document_version: str | None
+    source_revision: str | None
+
+
+class QcEntityCatalogResource(BaseModel):
+    """Identify one entity catalog snapshot a report read."""
+
+    source_key: str
+    snapshot_id: UUID
+
+
+class QcReferenceDataResource(BaseModel):
+    """Identify one set of reference data a report validated against."""
+
+    ontologies: list[QcOntologySnapshotResource]
+    go_site_revision: str | None
+    entity_catalogs: list[QcEntityCatalogResource]
+
+
+class QcReportResource(BaseModel):
+    """Describe a QC report: status, scope, timing, versions, and counts.
+
+    Counts cover only the groups the reader may see. While a report runs, they
+    are the counts recorded so far.
+    """
+
+    report_id: UUID
+    status: JobStatus
+    owning_group_id: str | None = Field(
+        description="The group the report covers, or null for all groups."
+    )
+    requested_by: str
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    error: str | None
+    annotations_checked: int
+    annotations_with_issues: int
+    by_issue_type: dict[str, int] = Field(
+        description="The number of annotations with each issue type, by type."
+    )
+    by_group: dict[str, QcGroupCountsResource]
+    reference_data: list[QcReferenceDataResource] = Field(
+        description=(
+            "Every set of reference data the report used, in the order first "
+            "used. Empty until the report succeeds."
+        )
+    )
+    sabe_version: str | None = Field(
+        description="The SABE release that ran the report, once it succeeds."
+    )
+    schema_version: str | None = Field(
+        description="The Standard Annotation schema version, once it succeeds."
+    )
+
+    @classmethod
+    def from_service(cls, summary: QcReportSummary) -> Self:
+        """Convert a service summary to the public resource."""
+        result = summary.result
+        stored = None if result is None else STORED_QC_REPORT_RESULT.dump(result)
+        return cls.model_validate(
+            {
+                "report_id": summary.job.job_id,
+                "status": summary.job.status,
+                "owning_group_id": summary.owning_group_id,
+                "requested_by": summary.job.requested_by,
+                "created_at": summary.job.created_at,
+                "started_at": summary.job.started_at,
+                "completed_at": summary.job.completed_at,
+                "error": summary.job.error,
+                "annotations_checked": summary.annotations_checked,
+                "annotations_with_issues": summary.annotations_with_issues,
+                "by_issue_type": dict(summary.by_issue_type),
+                "by_group": {
+                    group: {
+                        "annotations_checked": counts.annotations_checked,
+                        "annotations_with_issues": counts.annotations_with_issues,
+                    }
+                    for group, counts in summary.by_group.items()
+                },
+                "reference_data": [] if stored is None else stored["reference_data"],
+                "sabe_version": None if result is None else result.sabe_version,
+                "schema_version": None if result is None else result.schema_version,
+            }
+        )
+
+
+class QcFindingResource(BaseModel):
+    """Describe one annotation's issues in a report, in the same format as writes."""
+
+    annotation_id: UUID
+    annotation_version: int = Field(description="The version that was checked.")
+    owning_group_id: str
+    issues: list[ApiValidationIssue]
+
+
+class QcFindingPageResponse(PageResource[QcFindingResource]):
+    """Represent one requested page of a report's findings."""
+
+    @classmethod
+    def from_service(cls, result: ResultPage[QcFinding]) -> Self:
+        """Build a response page from a QC report service result."""
+        return cls.from_result_page(
+            result,
+            lambda finding: QcFindingResource(
+                annotation_id=finding.annotation_id,
+                annotation_version=finding.annotation_version,
+                owning_group_id=finding.owning_group_id,
+                issues=[
+                    ApiValidationIssue.model_validate(issue) for issue in finding.issues
+                ],
+            ),
+        )
+
+
+class QcReportListQuery(BaseModel):
+    """Filter and page the list of QC reports."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Annotated[
+        JobStatus | None, Field(description="Only reports in this state.")
+    ] = None
+    limit: PageLimit = 50
+    offset: PageOffset = 0
+
+
+class QcReportListItemResource(BaseModel):
+    """Identify one QC report in a list, and whether its findings can be read."""
+
+    report_id: UUID
+    status: JobStatus
+    owning_group_id: str | None = Field(
+        description="The group the report covers, or null for all groups."
+    )
+    requested_by: str
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    findings_available: bool = Field(
+        description=(
+            "True when the report succeeded and no later report of its scope has "
+            "replaced its findings."
+        )
+    )
+
+
+class QcReportPageResponse(PageResource[QcReportListItemResource]):
+    """Represent one requested page of QC reports."""
+
+    @classmethod
+    def from_service(cls, result: ResultPage[QcReportListing]) -> Self:
+        """Build a response page from a QC report service result."""
+        return cls.from_result_page(
+            result,
+            lambda listing: QcReportListItemResource(
+                report_id=listing.job.job_id,
+                status=listing.job.status,
+                owning_group_id=listing.owning_group_id,
+                requested_by=listing.job.requested_by,
+                created_at=listing.job.created_at,
+                started_at=listing.job.started_at,
+                completed_at=listing.job.completed_at,
+                findings_available=listing.findings_available,
+            ),
+        )

@@ -1,5 +1,6 @@
 """Define supported asynchronous job types, lifecycle states, and job errors."""
 
+from collections.abc import Mapping
 from enum import StrEnum
 from uuid import UUID
 
@@ -10,11 +11,14 @@ class JobType(StrEnum):
     """List asynchronous operations that workers can execute."""
 
     ANNOTATION_CUTOVER = "annotation_cutover"
+    ANNOTATION_QC_REPORT = "annotation_qc_report"
     ANNOTATION_REFRESH = "annotation_refresh"
     AUTHORIZATION_REFRESH = "authorization_refresh"
     ENTITY_REFRESH = "entity_refresh"
     ENTITY_RETIREMENT = "entity_retirement"
     ONTOLOGY_REFRESH = "ontology_refresh"
+    RULES_REFRESH = "rules_refresh"
+    TERM_REPLACEMENT = "term_replacement"
 
 
 class JobStatus(StrEnum):
@@ -31,6 +35,34 @@ ACTIVE_JOB_STATUSES = frozenset({JobStatus.QUEUED, JobStatus.RUNNING})
 
 TERMINAL_JOB_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED})
 """States of a finished job, which never changes state again."""
+
+
+def group_scope_parameters(group_key: str | None) -> dict[str, object]:
+    """Return job parameters for one owning group, or for all groups when `None`."""
+    return {} if group_key is None else {"group_key": group_key}
+
+
+def group_scope(parameters: Mapping[str, object]) -> str | None:
+    """Return the owning group a job's parameters name, or `None` for all groups.
+
+    Term replacement and QC report jobs store their scope in this form, which
+    `group_scope_parameters` writes.
+
+    Raises:
+        ValueError: If the parameters are neither `{}` nor `{"group_key": key}`
+            with a non-blank key and no surrounding whitespace.
+    """
+    if not parameters:
+        return None
+    group_key = parameters.get("group_key")
+    if (
+        set(parameters) != {"group_key"}
+        or not isinstance(group_key, str)
+        or not group_key
+        or group_key != group_key.strip()
+    ):
+        raise ValueError("job scope parameters must be {} or {group_key}")
+    return group_key
 
 
 class JobNotFoundError(NotFoundError):

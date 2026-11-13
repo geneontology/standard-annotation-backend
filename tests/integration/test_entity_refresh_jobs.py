@@ -218,7 +218,6 @@ def test_entity_refresh_job_records_progress_and_result(
         "retained_count": 0,
         "removed_count": 0,
         "warning_count": 0,
-        "removal_impact_count": 0,
         "unchanged": False,
     }
     assert stored.warnings == []
