@@ -137,7 +137,7 @@ class StaleAnnotationVersionError(PreconditionFailedError):
 
 
 class InvalidAnnotationPayloadError(InvalidInputError):
-    """Report an annotation payload that fails schema validation.
+    """Report an annotation that fails structural or semantic validation.
 
     Issue locations start with `annotation`, because they describe the annotation
     the request would produce rather than one part of the request.

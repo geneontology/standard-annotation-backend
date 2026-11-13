@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
-from seeding import insert_annotation
+from seeding import insert_annotation, unvalidated_update
 from sqlalchemy import event
 
 from standard_annotation_backend.domain.annotation_search import (
@@ -209,7 +209,8 @@ def test_version_page_total_and_items_share_one_database_snapshot(
             writer_calls += 1
             with unit_of_work_factory() as writer:
                 writer.annotations.update(
-                    writer.annotations.prepare_update(
+                    unvalidated_update(
+                        writer.annotations,
                         annotation_id,
                         _changed(validated_annotation, assigned_by="MGI"),
                         expected_version=1,

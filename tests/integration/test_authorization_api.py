@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
+from seeding import unvalidated_create
 from source_provenance import github_provenance
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -131,7 +132,7 @@ def _seed(
                 "db_object_id": f"UniProtKB:{name}"
             }
             record = uow.annotations.create(
-                uow.annotations.prepare_create(Annotation.model_validate(payload)),
+                unvalidated_create(uow.annotations, Annotation.model_validate(payload)),
                 actor_id=creator,
                 owning_group_id=group,
             )

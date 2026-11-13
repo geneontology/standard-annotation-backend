@@ -1,6 +1,6 @@
 """Read and write annotations in caller-managed transactions."""
 
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import batched
@@ -173,14 +173,31 @@ def _ownership_conditions(scope: OwnershipScope) -> list[ColumnElement[bool]]:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedCreate:
-    """Hold a new annotation after `AnnotationRepository.prepare_create` locked it.
+class PeerQuery:
+    """Ask which active annotations duplicate one annotation.
+
+    Attributes:
+        key: The annotation's duplicate key.
+        exclude_id: A stored annotation to leave out of the answer: the
+            annotation itself, or the annotation an update replaces. `None` for
+            a new annotation.
+    """
+
+    key: DuplicateKey
+    exclude_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LockedCreate:
+    """Hold a new annotation after `AnnotationRepository.lock_for_create` locked it.
+
+    `create` does not accept this value; it needs a `ValidatedCreate`, which
+    shows that the annotation also passed validation while the locks were held.
 
     Attributes:
         data: The annotation's stored form and duplicate lookup values.
         duplicate_peer_ids: Active annotations that duplicate it.
-        session: The session whose transaction holds the locks. `create` accepts
-            the value only in this session.
+        session: The session whose transaction holds the locks.
     """
 
     data: AnnotationPersistenceData
@@ -189,16 +206,18 @@ class PreparedCreate:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedUpdate:
-    """Hold a locked annotation and its replacement after `prepare_update` checks.
+class LockedUpdate:
+    """Hold a locked annotation and its replacement after `lock_for_update`.
+
+    `update` does not accept this value; it needs a `ValidatedUpdate`, which
+    shows that the replacement also passed validation while the locks were held.
 
     Attributes:
         record: The current annotation, locked for update.
         data: The replacement's stored form and duplicate lookup values.
         duplicate_peer_ids: Other active annotations that duplicate the
             replacement.
-        session: The session whose transaction holds the locks. `update` accepts
-            the value only in this session.
+        session: The session whose transaction holds the locks.
     """
 
     record: AnnotationRecord
@@ -207,20 +226,54 @@ class PreparedUpdate:
     session: Session = field(repr=False, compare=False)
 
 
+@dataclass(frozen=True, slots=True)
+class ValidatedCreate:
+    """A locked new annotation that passed every validation check.
+
+    `create` accepts only this type, so no create can skip validation. In
+    application code only `AnnotationValidator.prepare_create` builds one, after
+    the annotation passed every check while the locks in `locked` were held.
+
+    Attributes:
+        locked: The annotation's stored form, duplicate peers, and the session
+            whose transaction holds its locks.
+    """
+
+    locked: LockedCreate
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedUpdate:
+    """A locked replacement annotation that passed every validation check.
+
+    `update` accepts only this type, so no update can skip validation. In
+    application code only `AnnotationValidator.prepare_update` builds one, after
+    the replacement passed every check while the locks in `locked` were held.
+
+    Attributes:
+        locked: The current record, the replacement's stored form, its
+            duplicate peers, and the session whose transaction holds the locks.
+    """
+
+    locked: LockedUpdate
+
+
 class AnnotationRepository:
     """Read and write annotations in a caller-managed transaction.
 
     The repository flushes changes so database errors are raised promptly, but
     the caller remains responsible for committing or rolling back the session.
 
-    Creates and updates happen in two steps. `prepare_create` and
-    `prepare_update` take the locks a write needs and return the annotation's
-    duplicate peers, the other active annotations it would duplicate. The caller
-    validates the annotation, and then `create` or `update` writes it. Each
-    accepts only a value prepared in the same session, so no write can skip the
-    locks. `soft_delete` checks the expected version and takes its locks itself.
-    All of them use shared private helpers for the underlying database writes so
-    annotations and their version histories remain consistent.
+    Creates and updates happen in three steps. `lock_for_create` and
+    `lock_for_update` take the locks a write needs and find the annotation's
+    duplicate peers, the other active annotations it would duplicate.
+    `AnnotationValidator` then checks the annotation and wraps the locked value
+    in a `ValidatedCreate` or `ValidatedUpdate`. Only those are accepted by
+    `create` and `update`, and only in the session that took the locks, so no
+    write can skip the locks or the checks. `soft_delete` checks the expected
+    version and takes its locks itself. All of them use shared private helpers
+    for the underlying database writes so annotations and their version
+    histories remain consistent.
 
     Args:
         session: Session used for every query and write.
@@ -365,72 +418,29 @@ class AnnotationRepository:
             )
         )
 
-    def find_duplicate_peer_ids(
-        self,
-        duplicate_base_signature: str,
-        canonical_references: Iterable[str],
-        *,
-        exclude_annotation_id: UUID | None = None,
-    ) -> tuple[UUID, ...]:
-        """Find active annotations that may duplicate a candidate annotation.
+    def duplicate_peers(
+        self, queries: Sequence[PeerQuery]
+    ) -> tuple[tuple[UUID, ...], ...]:
+        """Return the active duplicate peers of each queried annotation.
+
+        A peer shares the annotation's signature and at least one of its
+        references. Lookups are batched, so one call can answer one query or
+        thousands. Nothing is locked here: a write takes its signature locks
+        first, so the answer cannot change before it commits; any other caller
+        gets an answer that may already be out of date.
 
         Args:
-            duplicate_base_signature: Signature for the candidate's normalized
-                non-reference fields.
-            canonical_references: Normalized references from the candidate.
-            exclude_annotation_id: Annotation to leave out of the results, such
-                as the annotation currently being updated.
+            queries: The annotations to look up.
 
         Returns:
-            Matching annotation identifiers in stable order.
-        """
-        references = tuple(set(canonical_references))
-        if not references:
-            return ()
-
-        statement = (
-            select(AnnotationDuplicateReferenceRecord.annotation_id)
-            .join(
-                AnnotationRecord,
-                AnnotationRecord.annotation_id
-                == AnnotationDuplicateReferenceRecord.annotation_id,
-            )
-            .where(
-                AnnotationRecord.status == AnnotationStatus.ACTIVE,
-                AnnotationDuplicateReferenceRecord.duplicate_base_signature
-                == duplicate_base_signature,
-                AnnotationDuplicateReferenceRecord.canonical_reference.in_(references),
-            )
-            .distinct()
-            .order_by(AnnotationDuplicateReferenceRecord.annotation_id)
-        )
-        if exclude_annotation_id is not None:
-            statement = statement.where(
-                AnnotationDuplicateReferenceRecord.annotation_id
-                != exclude_annotation_id
-            )
-        return tuple(self.session.scalars(statement))
-
-    def duplicate_peers_for(
-        self, keys: Mapping[UUID, DuplicateKey]
-    ) -> dict[UUID, tuple[UUID, ...]]:
-        """Return each annotation's active duplicate peers, for a whole batch.
-
-        Peers share the annotation's signature and at least one of its
-        references, as in `find_duplicate_peer_ids`. Nothing is locked, so use
-        this for reports, not for writes.
-
-        Args:
-            keys: Each annotation's duplicate key, keyed by annotation ID.
-
-        Returns:
-            Each annotation's peers, in ID order, excluding itself.
+            For each query, in the same order, its peers' IDs in ascending order,
+            without the query's `exclude_id`.
         """
         pairs = sorted(
             {
-                (key.signature, reference)
-                for key in keys.values()
-                for reference in key.references
+                (query.key.signature, reference)
+                for query in queries
+                for reference in query.key.references
             }
         )
         holders: dict[tuple[str, str], set[UUID]] = {}
@@ -456,19 +466,19 @@ class AnnotationRepository:
             )
             for signature, reference, annotation_id in rows:
                 holders.setdefault((signature, reference), set()).add(annotation_id)
-        return {
-            annotation_id: tuple(
+        return tuple(
+            tuple(
                 sorted(
                     {
                         peer
-                        for reference in key.references
-                        for peer in holders.get((key.signature, reference), ())
+                        for reference in query.key.references
+                        for peer in holders.get((query.key.signature, reference), ())
                     }
-                    - {annotation_id}
+                    - {query.exclude_id}
                 )
             )
-            for annotation_id, key in keys.items()
-        }
+            for query in queries
+        )
 
     def creators(self, annotation_ids: Collection[UUID]) -> dict[UUID, str]:
         """Return the actor who created each annotation, from its first version.
@@ -490,14 +500,15 @@ class AnnotationRepository:
             found.update({annotation_id: actor for annotation_id, actor in rows})
         return found
 
-    def prepare_create(self, annotation: Annotation) -> PreparedCreate:
+    def lock_for_create(self, annotation: Annotation) -> LockedCreate:
         """Take the locks a create needs and find the annotation's duplicates.
 
         The global annotation-write lock is taken in shared mode, which lets other
         ordinary writes run but waits for exclusive operations such as a GPAD
         publication. The annotation's signature lock is also taken. Both are held
         until the transaction ends, so no concurrent write can create a duplicate
-        of the annotation before this transaction commits.
+        of the annotation before this transaction commits. `create` accepts the
+        result only after `AnnotationValidator` has checked the annotation.
 
         Raises:
             TypeError: If `annotation` is not a validated `Annotation`.
@@ -505,33 +516,41 @@ class AnnotationRepository:
         data = prepare_annotation_for_persistence(annotation)
         acquire_global_annotation_write_lock(self.session)
         acquire_signature_locks(self.session, [data.duplicate_base_signature])
-        return PreparedCreate(
-            data=data,
-            duplicate_peer_ids=self.find_duplicate_peer_ids(
-                data.duplicate_base_signature, data.canonical_references
-            ),
-            session=self.session,
+        (peers,) = self.duplicate_peers(
+            [
+                PeerQuery(
+                    DuplicateKey(
+                        data.duplicate_base_signature, data.canonical_references
+                    )
+                )
+            ]
         )
+        return LockedCreate(data=data, duplicate_peer_ids=peers, session=self.session)
 
     def create(
         self,
-        prepared: PreparedCreate,
+        validated: ValidatedCreate,
         *,
         actor_id: str,
         owning_group_id: str,
         change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
-        """Store a prepared annotation as version 1.
+        """Store a validated annotation as version 1.
 
         Args:
-            prepared: The result of `prepare_create` in this session.
+            validated: The result of `AnnotationValidator.prepare_create` in this
+                session.
             actor_id: Identifier for the person or process creating the annotation.
             owning_group_id: Identifier of the responsible group.
             change_source: Workflow recorded in version history; defaults to API.
 
         Raises:
-            ValueError: If `prepared` came from another session.
+            TypeError: If `validated` is not a `ValidatedCreate`.
+            ValueError: If `validated` came from another session.
         """
+        if not isinstance(validated, ValidatedCreate):
+            raise TypeError("create needs an annotation that passed validation")
+        prepared = validated.locked
         self._require_session(prepared.session)
         annotation_id = new_annotation_id()
         record = AnnotationRecord(
@@ -560,19 +579,21 @@ class AnnotationRepository:
         self.session.flush()
         return record
 
-    def prepare_update(
+    def lock_for_update(
         self,
         annotation_id: UUID,
         annotation: Annotation,
         *,
         expected_version: int,
-    ) -> PreparedUpdate:
+    ) -> LockedUpdate:
         """Lock an annotation for update and find its replacement's duplicates.
 
         Locks are taken in the order every annotation write uses: the shared
         global annotation-write lock, the annotation's row, then the signature
         locks of its current and replacement states. The expected version is
         checked after the row is locked, so it cannot change before the update.
+        `update` accepts the result only after `AnnotationValidator` has checked
+        the replacement.
 
         Raises:
             AnnotationNotFoundError: If the annotation does not exist.
@@ -594,34 +615,42 @@ class AnnotationRepository:
             raise StaleAnnotationVersionError(
                 annotation_id, expected_version, current.current_version
             )
-        return PreparedUpdate(
-            record=current,
-            data=data,
-            duplicate_peer_ids=self.find_duplicate_peer_ids(
-                data.duplicate_base_signature,
-                data.canonical_references,
-                exclude_annotation_id=annotation_id,
-            ),
-            session=self.session,
+        (peers,) = self.duplicate_peers(
+            [
+                PeerQuery(
+                    DuplicateKey(
+                        data.duplicate_base_signature, data.canonical_references
+                    ),
+                    exclude_id=annotation_id,
+                )
+            ]
+        )
+        return LockedUpdate(
+            record=current, data=data, duplicate_peer_ids=peers, session=self.session
         )
 
     def update(
         self,
-        prepared: PreparedUpdate,
+        validated: ValidatedUpdate,
         *,
         actor_id: str,
         change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
-        """Save a prepared replacement as the annotation's next version.
+        """Save a validated replacement as the annotation's next version.
 
         Args:
-            prepared: The result of `prepare_update` in this session.
+            validated: The result of `AnnotationValidator.prepare_update` in this
+                session.
             actor_id: Identifier for the person or process making the change.
             change_source: Workflow recorded in version history; defaults to API.
 
         Raises:
-            ValueError: If `prepared` came from another session.
+            TypeError: If `validated` is not a `ValidatedUpdate`.
+            ValueError: If `validated` came from another session.
         """
+        if not isinstance(validated, ValidatedUpdate):
+            raise TypeError("update needs an annotation that passed validation")
+        prepared = validated.locked
         self._require_session(prepared.session)
         return self._apply_update(
             prepared.record,
@@ -786,9 +815,9 @@ class AnnotationRepository:
         return record
 
     def _require_session(self, session: Session) -> None:
-        """Reject a prepared write from another session, which holds no locks here."""
+        """Reject a locked write from another session, which holds no locks here."""
         if session is not self.session:
-            raise ValueError("a prepared write must be used in its own session")
+            raise ValueError("a locked write must be used in its own session")
 
     @staticmethod
     def _raise_if_deleted(record: AnnotationRecord) -> None:

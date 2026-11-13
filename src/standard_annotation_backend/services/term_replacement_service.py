@@ -16,6 +16,7 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
     ChangeSource,
+    InvalidAnnotationPayloadError,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.domain.audit import AuditAction
@@ -40,13 +41,15 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
+from standard_annotation_backend.services.annotation_validator import (
+    AnnotationValidator,
+)
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import (
     Job,
     JobService,
     job_from_record,
 )
-from standard_annotation_backend.services.semantic_validator import SemanticValidator
 
 
 def queue_term_replacement(
@@ -128,7 +131,7 @@ class TermReplacementService:
         self._try_lock = try_lock
         self._jobs = JobService(unit_of_work_factory)
         self._ontologies = ontologies
-        self._validator = SemanticValidator(ontologies)
+        self._validator = AnnotationValidator(ontologies)
 
     def run(self, job_id: UUID) -> None:
         """Run one term replacement job to completion or failure.
@@ -247,8 +250,8 @@ class TermReplacementService:
         """
         with self._unit_of_work_factory() as unit_of_work:
             try:
-                prepared = unit_of_work.annotations.prepare_update(
-                    annotation_id, replaced, expected_version=version
+                validated = self._validator.prepare_update(
+                    unit_of_work, annotation_id, replaced, expected_version=version
                 )
             except (
                 StaleAnnotationVersionError,
@@ -256,12 +259,10 @@ class TermReplacementService:
                 AnnotationNotFoundError,
             ):
                 return "stale"
-            if self._validator.issues(
-                unit_of_work, replaced, prepared.duplicate_peer_ids
-            ):
+            except InvalidAnnotationPayloadError:
                 return "issues"
             updated = unit_of_work.annotations.update(
-                prepared,
+                validated,
                 actor_id=job.requested_by,
                 change_source=ChangeSource.TERM_REPLACEMENT,
             )

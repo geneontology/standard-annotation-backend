@@ -13,6 +13,7 @@ import pytest
 from annotation_refresh_helpers import gpad_bytes, gpad_row, gpad_text
 from psycopg import Cursor
 from refresh_helpers import TEST_SOURCES, ignore_progress, source_document
+from seeding import unvalidated_create
 from sqlalchemy import Engine, event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from test_annotation_refresh_service import GROUP, SOURCE, create_job, stage
@@ -192,7 +193,8 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
 
     def write_other_group() -> None:
         with unit_of_work_factory() as uow:
-            prepared = uow.annotations.prepare_create(
+            validated = unvalidated_create(
+                uow.annotations,
                 Annotation.model_validate(
                     {
                         "db_object_id": "UniProtKB:Q99999",
@@ -203,9 +205,9 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
                         "annotation_date": "2026-09-29",
                         "assigned_by": "RGD",
                     }
-                )
+                ),
             )
-            uow.annotations.create(prepared, actor_id="curator", owning_group_id="RGD")
+            uow.annotations.create(validated, actor_id="curator", owning_group_id="RGD")
             uow.commit()
 
     with (

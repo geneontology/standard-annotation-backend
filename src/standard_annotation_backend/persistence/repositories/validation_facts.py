@@ -95,8 +95,8 @@ class ValidationFactsRepository:
             annotations: Structurally valid annotations to describe.
             peers: Each annotation's duplicate peers, the IDs of other active
                 annotations it duplicates, in the same order. For a write they
-                come from `AnnotationRepository.prepare_create` or
-                `prepare_update`, which find them while holding the write locks.
+                come from `AnnotationRepository.lock_for_create` or
+                `lock_for_update`, which find them while holding the write locks.
             ontologies: The configured ontologies and the identifier prefixes each
                 owns.
             snapshots: Snapshots the caller already looked up with

@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from refresh_helpers import TEST_ONTOLOGIES
-from seeding import insert_annotation
+from seeding import insert_annotation, unvalidated_create, unvalidated_update
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -255,13 +255,16 @@ def test_repository_writes_default_to_api_change_source(
     with unit_of_work_factory() as unit_of_work:
         repository = unit_of_work.annotations
         target = repository.create(
-            repository.prepare_create(writable_annotation),
+            unvalidated_create(repository, writable_annotation),
             actor_id="writer",
             owning_group_id="group",
         )
         repository.update(
-            repository.prepare_update(
-                target.annotation_id, writable_annotation, expected_version=1
+            unvalidated_update(
+                repository,
+                target.annotation_id,
+                writable_annotation,
+                expected_version=1,
             ),
             actor_id="writer",
         )

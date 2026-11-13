@@ -18,6 +18,7 @@ from standard_annotation_backend.domain.annotations import (
     AnnotationDeletedError,
     AnnotationNotFoundError,
     ChangeSource,
+    InvalidAnnotationPayloadError,
     StaleAnnotationVersionError,
 )
 from standard_annotation_backend.domain.audit import AuditAction
@@ -40,7 +41,6 @@ from standard_annotation_backend.domain.change_sets import (
     StaleChangeSetError,
     apply_annotation_patch,
 )
-from standard_annotation_backend.domain.duplicate_policy import duplicate_key
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.domain.validation import (
@@ -61,11 +61,14 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
+from standard_annotation_backend.services.annotation_validator import (
+    AnnotationValidator,
+    Candidate,
+)
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.resource_authorization import (
     load_authorized_annotation,
 )
-from standard_annotation_backend.services.semantic_validator import SemanticValidator
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
 
 
@@ -207,7 +210,7 @@ class ChangeSetService:
         self, unit_of_work_factory: UnitOfWorkFactory, ontologies: OntologyCatalog
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
-        self._validator = SemanticValidator(ontologies)
+        self._validator = AnnotationValidator(ontologies)
 
     def propose_create(
         self,
@@ -613,7 +616,7 @@ def _accept_proposal(
     record: ChangeSetRecord,
     context: RequestContext,
     review_reason: str | None,
-    validator: SemanticValidator,
+    validator: AnnotationValidator,
 ) -> AcceptedChangeSet:
     """Apply the repository's write policy and record acceptance without committing.
 
@@ -632,14 +635,14 @@ def _accept_proposal(
     if validation.annotation is None:
         raise InvalidChangeSetError(validation.errors)
     if record.operation == ChangeSetOperation.CREATE:
-        prepared_create = unit_of_work.annotations.prepare_create(validation.annotation)
-        issues = validator.issues(
-            unit_of_work, validation.annotation, prepared_create.duplicate_peer_ids
-        )
-        if issues:
-            raise InvalidChangeSetError(issues)
+        try:
+            validated_create = validator.prepare_create(
+                unit_of_work, validation.annotation
+            )
+        except InvalidAnnotationPayloadError as error:
+            raise InvalidChangeSetError(error.errors) from None
         changed = unit_of_work.annotations.create(
-            prepared_create,
+            validated_create,
             owning_group_id=record.owning_group_id,
             actor_id=record.proposed_by,
             change_source=ChangeSource.CHANGE_SET,
@@ -647,20 +650,17 @@ def _accept_proposal(
     else:
         assert record.annotation_id is not None and record.base_version is not None
         if record.operation == ChangeSetOperation.UPDATE:
-            prepared_update = unit_of_work.annotations.prepare_update(
-                record.annotation_id,
-                validation.annotation,
-                expected_version=record.base_version,
-            )
-            issues = validator.issues(
-                unit_of_work,
-                validation.annotation,
-                prepared_update.duplicate_peer_ids,
-            )
-            if issues:
-                raise InvalidChangeSetError(issues)
+            try:
+                validated_update = validator.prepare_update(
+                    unit_of_work,
+                    record.annotation_id,
+                    validation.annotation,
+                    expected_version=record.base_version,
+                )
+            except InvalidAnnotationPayloadError as error:
+                raise InvalidChangeSetError(error.errors) from None
             changed = unit_of_work.annotations.update(
-                prepared_update,
+                validated_update,
                 actor_id=record.proposed_by,
                 change_source=ChangeSource.CHANGE_SET,
             )
@@ -782,7 +782,7 @@ def _candidate(
 def _build_preview(
     unit_of_work: SqlAlchemyUnitOfWork,
     record: ChangeSetRecord,
-    validator: SemanticValidator,
+    validator: AnnotationValidator,
 ) -> ChangeSetPreview:
     """Describe the candidate, its validation issues, and whether its target changed.
 
@@ -795,11 +795,9 @@ def _build_preview(
     annotation = validation.annotation
     issues = validation.errors
     if annotation is not None and record.operation != ChangeSetOperation.DELETE:
-        key = duplicate_key(annotation)
-        peers = repository.find_duplicate_peer_ids(
-            key.signature, key.references, exclude_annotation_id=record.annotation_id
+        (issues,) = validator.check(
+            unit_of_work, [Candidate(annotation, record.annotation_id)]
         )
-        issues = validator.issues(unit_of_work, annotation, peers)
     current_version = None
     if record.annotation_id is not None:
         current_version = _current_target(

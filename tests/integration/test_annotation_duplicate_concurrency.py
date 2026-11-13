@@ -13,7 +13,7 @@ from uuid import UUID
 
 import pytest
 from refresh_helpers import TEST_ONTOLOGIES
-from seeding import insert_annotation
+from seeding import insert_annotation, unvalidated_create, unvalidated_update
 from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -64,17 +64,17 @@ def _changed(annotation: Annotation, **changes: object) -> Annotation:
 
 
 class _DuplicateFound(Exception):
-    """Stop a mutation whose prepared write has duplicate peers."""
+    """Stop a mutation whose locked write has duplicate peers."""
 
 
 def _create(annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
         repository = AnnotationRepository(session)
-        prepared = repository.prepare_create(annotation)
-        if prepared.duplicate_peer_ids:
+        validated = unvalidated_create(repository, annotation)
+        if validated.locked.duplicate_peer_ids:
             raise _DuplicateFound
         repository.create(
-            prepared, actor_id="concurrent-creator", owning_group_id="group-1"
+            validated, actor_id="concurrent-creator", owning_group_id="group-1"
         )
 
     return mutate
@@ -83,12 +83,12 @@ def _create(annotation: Annotation) -> Mutation:
 def _update(annotation_id: UUID, annotation: Annotation) -> Mutation:
     def mutate(session: Session) -> None:
         repository = AnnotationRepository(session)
-        prepared = repository.prepare_update(
-            annotation_id, annotation, expected_version=1
+        validated = unvalidated_update(
+            repository, annotation_id, annotation, expected_version=1
         )
-        if prepared.duplicate_peer_ids:
+        if validated.locked.duplicate_peer_ids:
             raise _DuplicateFound
-        repository.update(prepared, actor_id="concurrent-editor")
+        repository.update(validated, actor_id="concurrent-editor")
 
     return mutate
 
@@ -362,7 +362,8 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
             with session_factory() as writer:
                 repository = AnnotationRepository(writer)
                 repository.update(
-                    repository.prepare_update(
+                    unvalidated_update(
+                        repository,
                         annotation_id,
                         _changed(writable_annotation, assigned_by="Concurrent"),
                         expected_version=1,
