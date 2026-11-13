@@ -5,9 +5,8 @@ package its rows were checked with, so an unchanged file is imported again after
 schema upgrade. Existing imports get `unknown`, which matches no real version, so
 the next refresh of each group imports its file again. Downgrading drops the column.
 
-Until a group is imported again, any of its stored annotations that the new schema
-rejects cannot be loaded. Reading them fails, and so does ontology activation, which
-loads every active annotation. Refresh every annotation source after upgrading.
+Until a group is imported again, reading any of its stored annotations that the new
+schema rejects fails. Refresh every annotation source after upgrading.
 
 Revision ID: 184f7be9fc74
 Revises: 11a0f613e2f8

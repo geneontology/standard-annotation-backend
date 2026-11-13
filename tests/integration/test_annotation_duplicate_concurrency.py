@@ -228,6 +228,10 @@ def test_conflicting_creates_cannot_both_succeed(
     session_factory: sessionmaker[Session],
     writable_annotation: Annotation,
 ) -> None:
+    """Of two concurrent creates of the same annotation, only one is stored.
+
+    The second waits for the first to commit, then finds it as a duplicate peer.
+    """
     # Removing create's signature lock allows both uncommitted creates.
     outcomes, blocked = _run_coordinated_mutations(
         session_factory, _create(writable_annotation), _create(writable_annotation)
@@ -249,6 +253,11 @@ def test_distinct_record_updates_cannot_introduce_the_same_duplicate(
     session_factory: sessionmaker[Session],
     writable_annotation: Annotation,
 ) -> None:
+    """Concurrent updates of two annotations cannot make them duplicates.
+
+    The second update waits for the first to commit, finds it as a peer, and
+    leaves its own annotation at version 1.
+    """
     with session_factory() as session:
         first = insert_annotation(
             session,
@@ -284,6 +293,11 @@ def test_same_record_update_race_rejects_the_stale_version(
     session_factory: sessionmaker[Session],
     writable_annotation: Annotation,
 ) -> None:
+    """Of two concurrent updates from version 1 of one annotation, only one applies.
+
+    The waiting update rereads the annotation after the first commits and is
+    rejected as stale, even though its session had already loaded version 1.
+    """
     with session_factory() as session:
         record = insert_annotation(
             session, writable_annotation, actor_id="seed", owning_group_id="group-1"
@@ -321,6 +335,12 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
     session_factory: sessionmaker[Session],
     writable_annotation: Annotation,
 ) -> None:
+    """A patch is rejected when its expected version differs from the one it merged.
+
+    Another writer commits version 2 after the patch reads version 1. The patch
+    expects version 2 but merged its changes into version 1, so it is rejected as
+    stale and the other writer's version stays current.
+    """
     with session_factory() as session:
         record = insert_annotation(
             session,

@@ -1,9 +1,9 @@
 """Load YAML documents strictly, rejecting mapping keys that repeat.
 
 PyYAML keeps the last value when a mapping repeats a key, so a mistake in a
-hand-edited file can silently replace an earlier value. Every YAML document SABE
-reads from go-site or from `config/sources.yaml` is loaded here, so a repeated key
-fails instead.
+hand-edited file can silently replace an earlier value. `load_yaml` reads
+`config/sources.yaml`, go-site's `users.yaml`, and the go-site metadata files that
+GO Rules use, so a repeated key in any of them is an error.
 """
 
 import yaml
@@ -14,7 +14,7 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
     """Reject mapping keys that would otherwise silently overwrite earlier values."""
 
     def construct_mapping(self, node: Node, deep: bool = False) -> dict[object, object]:
-        """Build a mapping after rejecting duplicate or unhashable keys.
+        """Build a mapping after rejecting repeated or unhashable keys.
 
         Args:
             node: YAML node representing the mapping.
@@ -24,7 +24,8 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
             Parsed mapping with unique keys.
 
         Raises:
-            yaml.YAMLError: If a key is duplicated or cannot be compared.
+            yaml.YAMLError: If a key repeats, or cannot be hashed, such as a key
+                written as a list.
         """
         if isinstance(node, MappingNode):
             self.flatten_mapping(node)

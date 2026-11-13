@@ -3,14 +3,13 @@ and `assigned_by` names a known group."""
 
 from dataclasses import replace
 
-from gorule_cases import RULE_DATA, annotation, facts, found
+from gorule_cases import RULE_DATA, annotation, facts, found, go_rule
 
-from standard_annotation_backend.domain.semantic_validation.gorules.metadata import (
-    gorule_0000027,
-)
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     DatabaseEntry,
 )
+
+rule = go_rule("gorule_0000027")
 
 DATA = replace(
     RULE_DATA,
@@ -32,7 +31,7 @@ def test_unknown_prefixes_are_reported_at_each_identifier() -> None:
         ],
     )
 
-    assert found(gorule_0000027(subject, facts(rule_data=DATA))) == [
+    assert found(rule(subject, facts(rule_data=DATA))) == [
         ("gorule_0000027", ("annotation", "with_or_from", 0)),
         ("gorule_0000027", ("annotation", "with_or_from", 1)),
         (
@@ -52,17 +51,17 @@ def test_a_local_identifier_must_match_one_of_the_databases_syntaxes() -> None:
         ],
     )
 
-    assert found(gorule_0000027(wrong, facts(rule_data=DATA))) == [
+    assert found(rule(wrong, facts(rule_data=DATA))) == [
         ("gorule_0000027", ("annotation", "db_object_id"))
     ]
-    assert found(gorule_0000027(fits, facts(rule_data=DATA))) == []
+    assert found(rule(fits, facts(rule_data=DATA))) == []
 
 
 def test_assigned_by_must_be_a_group_shorthand() -> None:
     """An unknown group is reported at `assigned_by`; nothing fires without rule data."""
     subject = annotation(assigned_by="Unknown_Group")
 
-    assert found(gorule_0000027(subject, facts(rule_data=DATA))) == [
+    assert found(rule(subject, facts(rule_data=DATA))) == [
         ("gorule_0000027", ("annotation", "assigned_by"))
     ]
-    assert found(gorule_0000027(subject, facts(rule_data=None))) == []
+    assert found(rule(subject, facts(rule_data=None))) == []

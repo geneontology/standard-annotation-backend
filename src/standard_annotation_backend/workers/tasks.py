@@ -1,6 +1,6 @@
 """Create and run reference data refresh jobs and QC reports with Celery.
 
-Four tasks make up the refresh pipeline:
+Four tasks handle reference data refreshes:
 
 - `sabe.refresh.schedule(kind)` is published by Celery Beat once per refresh kind.
   It starts a job for every configured source of that kind through
@@ -14,10 +14,10 @@ Four tasks make up the refresh pipeline:
   schedules it after each ontology job finishes.
 
 Ontology activations and annotation publications queue term replacement jobs,
-which `sabe.term_replacement.run(job_id)` runs. QC reports follow the same
-pattern: `sabe.qc_report.schedule` is published by Celery Beat and starts the
-nightly all-groups report, and `sabe.qc_report.run(job_id)` runs one report,
-whether scheduled or started through the API.
+which `sabe.term_replacement.run(job_id)` runs. QC reports are scheduled and run
+the same way as refreshes: Celery Beat publishes `sabe.qc_report.schedule`, which
+starts the all-groups report, and `sabe.qc_report.run(job_id)` runs one report,
+whether it was scheduled or started through the API.
 
 Scheduling and execution are separate tasks so that a job exists in PostgreSQL
 before any worker is asked to run it. If publishing a message fails, the job is
@@ -25,11 +25,12 @@ already recorded and can be found, retried, or reported; if execution fails
 midway, Celery redelivers only the execution task, and the schedule is not
 repeated.
 
-Messages carry only a job ID (or a kind or ontology key). Everything else, such
-as parameters, progress, and results, is read from and written to PostgreSQL.
-Redis carries the Celery messages but holds no job state, and a message never
-contains data that could go stale or leak through the broker.
-`RefreshRunner` makes redelivered messages safe to run again.
+Messages carry at most a job ID, a refresh kind, or an ontology key. Everything
+else, such as parameters, progress, and results, is read from and written to
+PostgreSQL. Redis carries the Celery messages but holds no job state, and a
+message never contains data that could become outdated or be exposed through the
+broker. `RefreshRunner`, `TermReplacementService`, and `QcReportRunner` make
+redelivered messages safe to run again.
 
 Every task retries on unexpected errors, logging only the exception type, so
 infrastructure details such as connection strings never reach Celery's logs.
@@ -212,8 +213,9 @@ def schedule_refresh(task: Task, kind: str) -> None:
 def run_term_replacement(task: Task, job_id: str) -> None:
     """Run one term replacement job.
 
-    A job whose scope is busy, and any unexpected error, is retried after 30
-    seconds like `run_refresh`; the job's committed replacements are kept.
+    If another job of the same scope is running, or an unexpected error occurs,
+    the task is retried after 30 seconds, as `run_refresh` is. Replacements the
+    job already committed are kept.
     """
     failure_type: str | None = None
     try:
@@ -232,8 +234,10 @@ def run_term_replacement(task: Task, job_id: str) -> None:
 def run_qc_report(task: Task, job_id: str) -> None:
     """Run one QC report.
 
-    A report whose scope is busy, and any unexpected error, is retried after 30
-    seconds like `run_refresh`; a retried report starts again from empty rows.
+    If another report of the same scope is running, or an unexpected error
+    occurs, the task is retried after 30 seconds, as `run_refresh` is. A report
+    that had started deletes the findings and counts it stored and checks every
+    annotation again.
     """
     failure_type: str | None = None
     try:
@@ -251,17 +255,19 @@ def run_qc_report(task: Task, job_id: str) -> None:
 def dispatch_qc_report(job: Job) -> None:
     """Send a queued QC report to its Celery task.
 
-    `QcReportService.start` calls this after committing the job.
+    `QcReportService.start` calls this after committing the job, both for API
+    requests and for the schedule.
     """
     run_qc_report.delay(str(job.job_id))
 
 
 @celery_app.task(bind=True, max_retries=None, name="sabe.qc_report.schedule")
 def schedule_qc_report(task: Task) -> None:
-    """Start the nightly all-groups QC report.
+    """Start the scheduled all-groups QC report.
 
-    Celery Beat runs this task on `qc_report_cron`. If a report of all groups
-    is already queued, it is joined and sent again instead of duplicated.
+    Celery Beat runs this task on `qc_report_cron`. If an all-groups report is
+    already queued, that report is sent to a worker again instead of a new one
+    being created. Unexpected errors are retried after 30 seconds.
     """
     failure_type: str | None = None
     try:

@@ -5,7 +5,8 @@ skip a file that matches the group's last import, when that import was checked
 with the installed schema package version and the group has not changed since.
 `annotation_cutover` jobs never skip, require every record to be imported,
 and move the group to `sabe_managed` permanently. One service runs both job types.
-Staging and publication commit in separate transactions.
+Staging and publication commit in separate transactions. Each publication also
+queues a term replacement job for the group.
 """
 
 import logging
@@ -87,8 +88,8 @@ class AnnotationRefreshService:
             group.
         try_lock: Takes the per-group lock.
         dispatch_replacement: Sends a queued term replacement job to a worker
-            after a publication commits. `None` leaves the job queued for the caller to
-            run.
+            after a publication commits. `None` leaves the job queued without
+            sending it.
     """
 
     def __init__(
@@ -317,9 +318,10 @@ class AnnotationRefreshService:
     def _publish(self, *, job_id: UUID, actor_id: str) -> AnnotationRefreshResult:
         """Publish a job's staged import with its audit event, then commit.
 
-        A queued term replacement job for the group is committed with the
-        publication and then dispatched. If the job already published, its stored
-        result is returned and no audit event or replacement job is added.
+        The publication also queues a term replacement job for the group in the
+        same transaction, and sends that job to a worker after the commit. If
+        this job already published, its stored result is returned and no audit
+        event or replacement job is added.
 
         Raises:
             AnnotationImportConflictError: If the job does not exist, is not a
@@ -354,7 +356,8 @@ class AnnotationRefreshService:
     def _dispatch(self, job: Job) -> None:
         """Send a replacement job to a worker, leaving it queued if sending fails.
 
-        The next trigger joins the queued job and sends it again.
+        A failure is logged. The next publication for the same group reuses the
+        queued job and sends it again.
         """
         if self._dispatch_replacement is None:
             return

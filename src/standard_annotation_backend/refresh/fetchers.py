@@ -2,9 +2,9 @@
 
 There is one fetcher per source type. Each returns a `SourceDocument`: the
 downloaded bytes plus provenance that identifies exactly what was fetched. The
-GO Rule source is several files read at one commit, which
-`GitHubSourceFetcher.fetch_files` packs into one document. Each refresh service
-decodes the bytes itself. Failures raise `SourceError` with a fixed code;
+`rules` source is several files from one commit of a GitHub repository, which
+`GitHubSourceFetcher.fetch_files` combines into one document. Each refresh
+service decodes the bytes itself. Failures raise `SourceError` with a fixed code;
 messages and logs never include URLs or content.
 """
 
@@ -110,10 +110,12 @@ class GitHubSourceFetcher:
         )
 
     def fetch_files(self, source_key: str, source: GitHubRulesSource) -> SourceDocument:
-        """Resolve the ref once, then download every path at the resolved commit.
+        """Download every file in `source.paths` from one commit of the repository.
 
-        The files are packed into one document with `pack_source_files`, so they
-        share one revision and one checksum.
+        The branch, tag, or commit named by `source.ref` is resolved to a commit
+        once, and every file is read at that commit. The files are combined into
+        one document with `pack_source_files`, so they share one revision and one
+        checksum.
 
         Raises:
             SourceError: With `source_error` if GitHub cannot supply the commit or

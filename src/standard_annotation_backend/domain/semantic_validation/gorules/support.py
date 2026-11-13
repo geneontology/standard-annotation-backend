@@ -31,7 +31,10 @@ def _reference_location(index: int) -> tuple[str | int, ...]:
 def gorule_0000016(
     annotation: Annotation, facts: AnnotationFacts
 ) -> Iterator[ValidationIssue]:
-    """Report IC evidence without a GO identifier, other than the term, in `with_or_from`."""
+    """Report IC evidence without a GO term in `with_or_from`.
+
+    The annotated term itself does not count.
+    """
     if evidence_code(annotation) != "IC":
         return
     inferred_from = [
@@ -124,7 +127,11 @@ def gorule_0000033(
 def gorule_0000037(
     annotation: Annotation, facts: AnnotationFacts
 ) -> Iterator[ValidationIssue]:
-    """Report IBA evidence not from `GO_Central` or not citing only `GO_REF:0000033`."""
+    """Report IBA evidence with the wrong `assigned_by` or references.
+
+    IBA annotations must have `assigned_by` set to `GO_Central` and cite
+    `GO_REF:0000033` as their only reference.
+    """
     if evidence_code(annotation) != "IBA":
         return
     if annotation.assigned_by != "GO_Central" or set(annotation.references) != {

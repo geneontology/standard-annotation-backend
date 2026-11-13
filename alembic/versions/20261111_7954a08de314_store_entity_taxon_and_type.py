@@ -1,8 +1,9 @@
 """Store each entity source record's taxon and type in their own columns.
 
-Adds `db_object_taxon_id` and `db_object_type` to `entity_source_record`, fills
-them from each record's stored entity, and adds a check that keeps them equal to
-it. Downgrading drops the check and the columns.
+Adds `db_object_taxon_id` and `db_object_type` to `entity_source_record`, so
+validation can read them without parsing the stored `entity` JSON. Fills them from
+each record's `entity` and adds a check that keeps them equal to it. Downgrading
+drops the check and the columns.
 
 Revision ID: 7954a08de314
 Revises: 1d87c729df70

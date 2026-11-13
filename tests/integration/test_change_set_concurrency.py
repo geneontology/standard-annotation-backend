@@ -59,15 +59,6 @@ def active_concurrent_subjects(
 
 
 GUARD_SECONDS = 10
-
-
-def _duplicate_peer_ids(error: InvalidChangeSetError) -> object:
-    """Return the peer IDs of an acceptance error's only issue, a duplicate."""
-    (issue,) = error.errors
-    assert issue["type"] == "duplicate_annotation"
-    return issue.get("details", {})["peer_ids"]
-
-
 OBSERVATION_SECONDS = 3
 PROPOSER = RequestContext(
     actor_id="proposer",
@@ -94,6 +85,13 @@ SECOND_REVIEWER = RequestContext(
     group_id=None,
 )
 Operation = Callable[[UnitOfWorkFactory], object]
+
+
+def _duplicate_peer_ids(error: InvalidChangeSetError) -> object:
+    """Return the peer IDs of an acceptance error's only issue, a duplicate."""
+    (issue,) = error.errors
+    assert issue["type"] == "duplicate_annotation"
+    return issue.get("details", {})["peer_ids"]
 
 
 def _prepare_session(session: Session) -> int:

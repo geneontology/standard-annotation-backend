@@ -66,9 +66,9 @@ def test_unknown_subject_returns_exact_error_without_writes(
 
     The subject is either removed from the catalog or changed by the write to an
     identifier that was never in it. Each operation returns only the
-    `unknown_entity` issue and leaves annotations, versions, audit events, and the change set's
-    review state unchanged. Publishing the subject lets the same change set be
-    accepted.
+    `unknown_entity` issue and leaves annotations, versions, audit events, and the
+    change set's review state unchanged. Publishing the subject lets the same
+    change set be accepted.
     """
     client = integration_api_client
     imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)

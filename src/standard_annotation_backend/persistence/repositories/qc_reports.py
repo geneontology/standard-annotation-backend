@@ -1,4 +1,12 @@
-"""Store and read QC report findings and counts in the caller's transaction."""
+"""Store and read QC report findings and counts in the caller's transaction.
+
+A QC (quality control) report is a job that checks stored annotations. For each
+annotation with issues it stores a finding that lists them, and it counts
+annotations and issue types by owning group. A report's scope is the set of
+annotations it checks: one owning group's, or every group's. The scope is stored
+as the job's parameters, `{"group_key": key}` or `{}`, so reports with equal
+parameters have the same scope.
+"""
 
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
@@ -45,7 +53,7 @@ class QcReportRepository:
         self.session = session
 
     def clear(self, job_id: UUID) -> None:
-        """Delete a report's findings and counts, for a fresh start or a failure."""
+        """Delete a report's findings and counts, when it starts over or fails."""
         for model in (
             QcReportFindingRecord,
             QcReportGroupCountRecord,
@@ -62,7 +70,7 @@ class QcReportRepository:
         """Store a batch's findings and add its counts to the report's totals.
 
         Args:
-            job_id: The report.
+            job_id: The report's job ID.
             findings: One finding for each annotation in the batch with issues.
             checked_by_group: The number of annotations checked in the batch,
                 for each owning group.
@@ -136,12 +144,13 @@ class QcReportRepository:
     def expire_findings_of_older_reports(
         self, job_id: UUID, parameters: dict[str, object]
     ) -> None:
-        """Delete the findings of succeeded reports of the scope ordered before this one.
+        """Delete the findings of earlier succeeded reports with the same scope.
 
-        Reports of a scope are ordered by completion time, then by job ID, the
-        same order `has_newer_report` uses, so a report's findings are deleted
-        exactly when a later report exists. Call this in the transaction that
-        marks `job_id` succeeded.
+        Reports are ordered by completion time, then by job ID, the same order
+        `has_newer_report` and `superseded` use, so findings are deleted for
+        exactly the reports those methods treat as replaced. Group and issue
+        counts are kept. Call this in the transaction that marks `job_id`
+        succeeded.
 
         Args:
             job_id: The report that just succeeded.
@@ -170,10 +179,15 @@ class QcReportRepository:
     def has_newer_report(
         self, job_id: UUID, parameters: dict[str, object], completed_at: datetime
     ) -> bool:
-        """Return whether a report of the same scope is ordered after this one.
+        """Return whether a later succeeded report with the same scope exists.
 
-        Reports are ordered by completion time, then by job ID. A later report
-        has replaced this report's findings.
+        Reports are ordered by completion time, then by job ID. A later report's
+        success deletes this report's findings.
+
+        Args:
+            job_id: The report's job ID.
+            parameters: Its job parameters, which name its scope.
+            completed_at: When the report completed.
         """
         return bool(
             self.session.scalar(
@@ -233,10 +247,11 @@ class QcReportRepository:
         )
 
     def superseded(self, job_ids: Collection[UUID]) -> set[UUID]:
-        """Return the reports among `job_ids` that a later report of their scope replaced.
+        """Return the reports in `job_ids` that a later report has replaced.
 
-        Uses the same order as `has_newer_report`: completion time, then job ID.
-        A report that has not completed is never superseded.
+        A report is replaced when a later report with the same scope succeeds,
+        using the same order as `has_newer_report`: completion time, then job ID.
+        A report that has not completed is never replaced.
         """
         if not job_ids:
             return set()
@@ -259,10 +274,10 @@ class QcReportRepository:
     def group_counts(
         self, job_id: UUID, owning_group_id: str | None
     ) -> dict[str, QcGroupCounts]:
-        """Return each group's counts, in group order.
+        """Return each group's annotation counts in a report, ordered by group key.
 
         Args:
-            job_id: The report.
+            job_id: The report's job ID.
             owning_group_id: Only this group's counts, if given.
         """
         statement = select(QcReportGroupCountRecord).where(
@@ -283,14 +298,15 @@ class QcReportRepository:
         }
 
     def issue_counts(self, job_id: UUID, owning_group_id: str | None) -> dict[str, int]:
-        """Return the number of annotations with each issue type.
+        """Return the number of annotations in a report with each issue type.
 
-        Catalog types come first, in catalog order. Counts are kept permanently,
-        so a stored type no longer in the catalog is still returned, after them,
-        in alphabetical order.
+        Types that `IssueType` defines come first, in the order it defines them.
+        Counts are kept for every report, even after its findings are deleted, so
+        a type that an earlier SABE release recorded and `IssueType` no longer
+        defines is still returned, after them, in alphabetical order.
 
         Args:
-            job_id: The report.
+            job_id: The report's job ID.
             owning_group_id: Only this group's annotations, if given.
         """
         statement = select(
@@ -321,7 +337,7 @@ class QcReportRepository:
         """Return one page of a report's findings, in annotation ID order.
 
         Args:
-            job_id: The report.
+            job_id: The report's job ID.
             owning_group_id: Only this group's findings, if given.
             created_by: Only findings for annotations this actor created, if given.
             issue_type: Only findings with this issue type, if given.

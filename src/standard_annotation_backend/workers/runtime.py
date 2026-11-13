@@ -68,7 +68,7 @@ def create_refresh_runner(
     enqueue_prune: Callable[[str], None] | None = None,
     dispatch_replacement: Callable[[Job], None] | None = None,
 ) -> RefreshComponents:
-    """Build every refresh service and a runner that can run all of them.
+    """Build the refresh services and runner, and the term replacement and QC runners.
 
     Args:
         engine: Engine for advisory locks held on dedicated connections.
@@ -77,9 +77,11 @@ def create_refresh_runner(
         fetchers: Fetches sources.
         enqueue_prune: Schedules ontology pruning after an ontology job finishes.
             `None` prunes in the calling process instead (used by the CLI).
-        dispatch_replacement: Sends a term replacement job, queued by an
-            ontology activation or an annotation publication, to a worker. `None`
-            leaves it queued for the caller (used by the CLI).
+        dispatch_replacement: Receives each term replacement job that an
+            ontology activation or an annotation publication queues, after the
+            job is committed. Celery tasks send the job to a worker; the CLI
+            collects the jobs and runs them afterward. `None` leaves the jobs
+            queued without sending them.
     """
     try_lock = bind_try_lock(engine)
     jobs = JobService(unit_of_work_factory)
@@ -140,8 +142,8 @@ def worker_runtime(
     Args:
         enqueue_prune: Schedules ontology pruning after an ontology job ends.
             See `create_refresh_runner`.
-        dispatch_replacement: Sends queued term replacement jobs to a worker.
-            See `create_refresh_runner`.
+        dispatch_replacement: Receives each queued term replacement job. See
+            `create_refresh_runner`.
     """
     settings = get_settings()
     engine = create_database_engine(settings.database_url)

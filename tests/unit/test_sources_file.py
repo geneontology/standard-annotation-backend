@@ -60,7 +60,10 @@ def _file(**sections: object) -> dict[str, object]:
 
 
 def test_shipped_sources_file_is_valid() -> None:
-    """The committed sources file is valid and configures every needed ontology."""
+    """The committed sources file loads with the go-site and ontology sources it ships.
+
+    GO is read with its expected `ontology: go` header.
+    """
     sources = RefreshSources(load_sources_file(SHIPPED_FILE))
 
     assert sources.keys(RefreshKindName.AUTHORIZATION) == ("go-site",)

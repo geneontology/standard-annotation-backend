@@ -153,7 +153,10 @@ def test_invalid_bodies_are_rejected(
 def test_single_source_refresh_needs_no_body_and_reuses_its_unfinished_job(
     integration_api_client: TestClient, dispatched: list[Job], path: str
 ) -> None:
-    """A kind with one source is refreshed without naming it."""
+    """A kind with one source is refreshed without naming it.
+
+    A second request while the first job is unfinished returns that same job.
+    """
     job_type, _, key = ROUTES[path]
 
     first = integration_api_client.post(path)

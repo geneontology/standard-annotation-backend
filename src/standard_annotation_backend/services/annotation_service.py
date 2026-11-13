@@ -96,8 +96,8 @@ class AnnotationService:
     Args:
         unit_of_work_factory: Callable that opens a transaction containing the
             annotation repositories used by each operation.
-        sources: Configured sources, which name the ontologies validation
-            enforces.
+        sources: Configured sources, which name the ontologies that
+            validation checks identifiers against.
     """
 
     def __init__(
@@ -125,9 +125,9 @@ class AnnotationService:
             The newly created annotation at version 1.
 
         Raises:
-            InvalidAnnotationPayloadError: If the annotation fails structural or
-                semantic validation; the error lists every issue of the stage
-                that failed.
+            InvalidAnnotationPayloadError: If the annotation fails structural
+                (schema) validation, or passes it and fails semantic validation.
+                The error lists every issue that the failing check found.
             ReferenceDataUnavailableError: If reference data needed for
                 validation has never been loaded.
             PermissionDeniedError: If the role or requested creation group is denied.
@@ -211,9 +211,9 @@ class AnnotationService:
             EmptyAnnotationPatchError: If `changes` contains no fields.
             AnnotationNotFoundError: If the annotation is missing or deleted.
             AnnotationDeletedError: If it is deleted after the initial read.
-            InvalidAnnotationPayloadError: If the annotation fails structural or
-                semantic validation; the error lists every issue of the stage
-                that failed.
+            InvalidAnnotationPayloadError: If the annotation fails structural
+                (schema) validation, or passes it and fails semantic validation.
+                The error lists every issue that the failing check found.
             ReferenceDataUnavailableError: If reference data needed for
                 validation has never been loaded.
             StaleAnnotationVersionError: If `expected_version` is no longer current.

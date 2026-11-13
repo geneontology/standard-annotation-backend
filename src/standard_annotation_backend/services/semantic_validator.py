@@ -1,4 +1,4 @@
-"""Run semantic validation for the services that write annotations."""
+"""Check annotations against stored reference data before they are written."""
 
 from uuid import UUID
 
@@ -15,8 +15,12 @@ from standard_annotation_backend.refresh.sources import RefreshSources
 class SemanticValidator:
     """Check structurally valid annotations against the active reference data.
 
-    Every configured ontology is enforced: an identifier whose prefix one owns must
-    be a current term of it.
+    Structural validation checks an annotation against the Standard Annotation
+    schema. This class runs the semantic checks, which need stored data: the
+    annotation's entity must be in an active entity catalog, its terms must be
+    current, it must not duplicate another active annotation, and it must pass
+    the GO Rules. Every configured ontology is checked, so an identifier with
+    one of an ontology's prefixes must be a current term of that ontology.
 
     Args:
         sources: Configured sources, which name the ontologies and their prefixes.
@@ -34,17 +38,18 @@ class SemanticValidator:
         annotation: Annotation,
         duplicate_peer_ids: tuple[UUID, ...],
     ) -> tuple[ValidationIssue, ...]:
-        """Return every semantic issue of one annotation, in a stable order.
+        """Return every semantic issue of one annotation, always in the same order.
 
         Args:
             unit_of_work: The transaction to read reference data in.
             annotation: A structurally valid annotation.
-            duplicate_peer_ids: Active annotations that duplicate it. A write
-                passes the peers its prepare step found under locks.
+            duplicate_peer_ids: IDs of active annotations that duplicate it. A
+                write passes the IDs that `prepare_create` or `prepare_update`
+                found while holding the locks that prevent concurrent duplicates.
 
         Raises:
             ReferenceDataUnavailableError: If a configured ontology or the go-site
-                rule data has no active snapshot.
+                rule data has never been loaded, so it has no active snapshot.
         """
         (facts,) = unit_of_work.validation_facts.gather(
             [annotation], [duplicate_peer_ids], self._ontologies

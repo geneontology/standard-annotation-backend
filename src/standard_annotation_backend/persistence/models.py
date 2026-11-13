@@ -380,8 +380,10 @@ class JobRecord(Base):
 class QcReportFindingRecord(Base):
     """Store one annotation's issues in one QC report.
 
-    Rows are kept only for the most recent completed report of each scope;
-    `QcReportRepository.expire_findings_of_older_reports` deletes the rest.
+    A report checks one owning group's annotations or every group's. When a report
+    succeeds, `QcReportRepository.expire_findings_of_older_reports` deletes the
+    findings of earlier succeeded reports with the same scope: the same single
+    group, or all groups. Their group and issue counts are kept.
     """
 
     __tablename__ = "qc_report_finding"
@@ -411,7 +413,11 @@ class QcReportFindingRecord(Base):
 
 
 class QcReportGroupCountRecord(Base):
-    """Count one group's checked annotations and annotations with issues in a report."""
+    """Store one group's annotation counts in one QC report.
+
+    `annotations_checked` counts the group's annotations the report checked, and
+    `annotations_with_issues` counts those with at least one issue.
+    """
 
     __tablename__ = "qc_report_group_count"
 
@@ -426,7 +432,7 @@ class QcReportGroupCountRecord(Base):
 
 
 class QcReportIssueCountRecord(Base):
-    """Count one group's annotations with one issue type in a report."""
+    """Store how many of one group's annotations have one issue type in a QC report."""
 
     __tablename__ = "qc_report_issue_count"
 
@@ -545,9 +551,11 @@ class EntityMembershipRecord(Base):
 
     Annotations deliberately have no foreign key to this table. Replacing or
     retiring a catalog must be able to remove an identifier while existing
-    annotations and their version history stay unchanged. Semantic validation
-    reads whether an identifier is active when an annotation is written; no lock
-    holds it active until the write commits.
+    annotations and their version history stay unchanged. When an annotation is
+    created or updated, validation checks that its `db_object_id` is active, but
+    nothing locks the identifier, so a catalog change that commits during the write
+    can still remove it. A later QC report lists such annotations as
+    `unknown_entity`.
     """
 
     __tablename__ = "entity_membership"
@@ -569,8 +577,10 @@ class EntityMembershipRecord(Base):
 class EntitySourceRecord(Base):
     """Store the source file record of an active entity identifier.
 
-    Each identifier appears on one line of its source file. The record is deleted
-    with its membership row when the catalog is replaced or retired.
+    A catalog lists each identifier on one line. A catalog published before
+    repeated identifiers were rejected may still have several records for one
+    identifier, one per line. Records are deleted with their membership row when
+    the catalog is replaced or retired.
 
     The entity's taxon and type are copied out of `entity` into their own columns,
     so validation can read them without parsing the stored entity. A check keeps
@@ -713,8 +723,9 @@ class OntologyAltIdRecord(Base):
             ["ontology_term.version_id", "ontology_term.term_id"],
             ondelete="CASCADE",
         ),
-        # Deleting a term looks up its alternative identifiers by term, so pruning
-        # a snapshot does not scan every alternative identifier for each term.
+        # Deleting a term deletes its alternative identifiers through the foreign
+        # key. This index lets PostgreSQL find them by term, so pruning a snapshot
+        # does not scan the whole table for each deleted term.
         Index("ix_ontology_alt_id_term", "version_id", "term_id"),
     )
 
@@ -763,9 +774,11 @@ class OntologyClosureRecord(Base):
 class RulesSnapshotRecord(Base):
     """Store one snapshot of the go-site files that GO Rules read.
 
+    A snapshot is the parsed content of the files from one `rules` refresh.
     `rule_data` holds five of the files as validated `RuleData` JSON, and
-    `RetractedPublicationRecord` rows hold the sixth. At most one snapshot is
-    active. Activation keeps the snapshot it replaces and deletes older ones.
+    `RetractedPublicationRecord` rows hold the PMIDs listed in the sixth,
+    `retracted-publications.txt`. At most one snapshot is active. Activating a new
+    snapshot keeps the one it replaces and deletes all older ones.
     """
 
     __tablename__ = "rules_snapshot"
@@ -810,7 +823,8 @@ class RulesSnapshotRecord(Base):
 class RetractedPublicationRecord(Base):
     """Store one PMID that a snapshot's `retracted-publications.txt` lists.
 
-    The primary key serves lookups of an annotation's PMIDs within one snapshot.
+    The primary key also serves as the index for looking up an annotation's PMIDs
+    in one snapshot.
     """
 
     __tablename__ = "retracted_publication"

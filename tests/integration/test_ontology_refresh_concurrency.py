@@ -11,6 +11,7 @@ from uuid import UUID
 import httpx2
 import pytest
 from refresh_helpers import (
+    REVISION,
     TEST_SOURCES,
     OboTerm,
     go_document,
@@ -300,23 +301,27 @@ def test_activation_does_not_wait_for_annotation_writes(
     session_factory: sessionmaker[Session],
     database_engine: Engine,
 ) -> None:
-    """Activation completes while another transaction holds the annotation lock.
+    """An activation completes while an annotation write is in progress.
 
     The writer holds the shared global annotation-write lock, as every annotation
-    write does, on its own connection for the whole activation.
+    write does, on its own connection for the whole activation. The new snapshot
+    becomes active and the annotation on its obsolete term is left unchanged.
     """
     job, document = _prepare_load(unit_of_work_factory, session_factory)
     service = OntologyRefreshService(
         unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
     )
-    with session_factory() as writer:
+    with session_factory() as writer, ThreadPoolExecutor(max_workers=1) as executor:
         acquire_global_annotation_write_lock(writer)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            activation = executor.submit(service.apply, job, document, ignore_progress)
-            outcome = activation.result(timeout=FAILURE_GUARD_SECONDS)
-        writer.rollback()
+        activation = executor.submit(service.apply, job, document, ignore_progress)
+        try:
+            activation.result(timeout=FAILURE_GUARD_SECONDS)
+        finally:
+            # Release the lock even on timeout, so a waiting activation fails
+            # the test instead of blocking the executor's shutdown.
+            writer.rollback()
 
-    assert outcome.result["ontology_version_id"] is not None
+    assert _active_state(unit_of_work_factory) == (REVISION, OLD_TERM, 1)
 
 
 def test_failed_activation_never_exposes_partial_state(

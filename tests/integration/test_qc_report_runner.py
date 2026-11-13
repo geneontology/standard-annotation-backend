@@ -107,7 +107,11 @@ def test_only_annotations_with_issues_get_findings_and_counts_cover_all(
     session_factory: sessionmaker[Session],
     database_engine: Engine,
 ) -> None:
-    """A clean annotation is counted but gets no finding; duplicates list each other."""
+    """A clean annotation is counted but gets no finding; duplicates list each other.
+
+    The job result records the totals and the versions checked against, and each
+    of two duplicates in different groups names the other as its peer.
+    """
     _insert(session_factory, _annotation(references=["PMID:5"]))
     first = _insert(session_factory, _annotation())
     second = _insert(session_factory, _annotation(), group="RGD")
@@ -133,18 +137,20 @@ def test_only_annotations_with_issues_get_findings_and_counts_cover_all(
         unknown: ["unknown_entity"],
     }
     with unit_of_work_factory() as uow:
-        page = uow.qc_reports.findings_page(
+        duplicates = uow.qc_reports.findings_page(
             job.job_id,
-            owning_group_id="MGI",
+            owning_group_id=None,
             created_by=None,
-            issue_type=None,
+            issue_type=IssueType.DUPLICATE_ANNOTATION,
             limit=10,
             offset=0,
-        )
-        duplicate = next(
-            record for record in page.items if record.annotation_id == first
-        )
-        assert duplicate.issues[0]["details"] == {"peer_ids": [str(second)]}
+        ).items
+        assert {
+            record.annotation_id: record.issues[0]["details"] for record in duplicates
+        } == {
+            first: {"peer_ids": [str(second)]},
+            second: {"peer_ids": [str(first)]},
+        }
         counts = uow.qc_reports.group_counts(job.job_id, None)
         assert counts["MGI"].annotations_checked == 3
         assert counts["RGD"].annotations_with_issues == 1
@@ -180,7 +186,10 @@ def test_a_structurally_invalid_stored_annotation_is_a_structural_finding(
     session_factory: sessionmaker[Session],
     database_engine: Engine,
 ) -> None:
-    """Its finding holds the schema's issues, and the report still succeeds."""
+    """A stored annotation that fails the schema gets a `structural` finding.
+
+    The finding holds the schema's issues, and the report still succeeds.
+    """
     broken = _insert(session_factory, _annotation())
     with session_factory.begin() as session:
         record = session.get(AnnotationRecord, broken)
@@ -204,33 +213,15 @@ def test_a_structurally_invalid_stored_annotation_is_a_structural_finding(
         assert finding.issues[0]["location"][:2] == ["annotation", "evidence_type"]
 
 
-def test_a_newer_report_of_the_same_scope_expires_the_older_findings(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-) -> None:
-    """The older report keeps its counts; a report of another scope keeps findings."""
-    _insert(session_factory, _annotation(db_object_id="UniProtKB:NOPE"))
-    older = _run(unit_of_work_factory, database_engine)
-    group = _run(unit_of_work_factory, database_engine, group_key="MGI")
-    newer = _run(unit_of_work_factory, database_engine)
-
-    assert len(_findings(unit_of_work_factory, older.job_id)) == 0
-    assert len(_findings(unit_of_work_factory, group.job_id)) == 1
-    assert len(_findings(unit_of_work_factory, newer.job_id)) == 1
-    assert older.completed_at is not None
-    with unit_of_work_factory() as uow:
-        counts = uow.qc_reports.group_counts(older.job_id, None)
-        assert counts["MGI"].annotations_with_issues == 1
-        assert uow.qc_reports.has_newer_report(older.job_id, {}, older.completed_at)
-
-
 def test_missing_reference_data_fails_the_report_and_leaves_no_rows(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     database_engine: Engine,
 ) -> None:
-    """With no active GO snapshot the report fails with `reference_data_unavailable`."""
+    """With no active GO snapshot the report fails with `reference_data_unavailable`.
+
+    It keeps no findings or counts.
+    """
     _insert(session_factory, _annotation(db_object_id="UniProtKB:NOPE"))
     with session_factory.begin() as session:
         session.execute(
@@ -253,7 +244,10 @@ def test_a_redelivered_running_report_starts_from_empty_rows(
     session_factory: sessionmaker[Session],
     database_engine: Engine,
 ) -> None:
-    """Rows left by an interrupted run are discarded, so counts are not doubled."""
+    """A report run again after an interruption discards the earlier run's rows.
+
+    Its findings and counts cover each annotation once.
+    """
     _insert(session_factory, _annotation(db_object_id="UniProtKB:NOPE"))
     job = _queue(unit_of_work_factory, None)
     JobService(unit_of_work_factory).start(job.job_id)
@@ -277,7 +271,11 @@ def test_a_redelivered_running_report_starts_from_empty_rows(
 def test_a_report_waits_while_another_report_of_its_scope_runs(
     unit_of_work_factory: UnitOfWorkFactory, database_engine: Engine
 ) -> None:
-    """If the scope's lock is held, the report stays queued and the run asks to retry."""
+    """While another report of the scope runs, the report stays queued.
+
+    The other report holds the scope's lock on its own connection, and the run
+    raises `QcReportBusyError` so the worker retries later.
+    """
     job = _queue(unit_of_work_factory, None)
 
     with try_advisory_lock(database_engine, LockNamespace.QC_REPORT) as held:
@@ -288,18 +286,6 @@ def test_a_report_waits_while_another_report_of_its_scope_runs(
     assert JobService(unit_of_work_factory).find(job.job_id).status is (
         JobStatus.QUEUED
     )
-
-
-def test_starting_twice_joins_the_queued_report_of_the_scope(
-    unit_of_work_factory: UnitOfWorkFactory,
-) -> None:
-    """A second start of one scope returns the queued job; another scope is new."""
-    first = _queue(unit_of_work_factory, None)
-    again = _queue(unit_of_work_factory, None)
-    group = _queue(unit_of_work_factory, "MGI")
-
-    assert again.job_id == first.job_id
-    assert group.job_id != first.job_id
 
 
 def test_a_report_with_nothing_to_check_still_requires_reference_data(

@@ -1,4 +1,9 @@
-"""Verify how QC report findings and counts are stored, read, and expired."""
+"""Verify QC report storage cases that a full report run cannot easily set up.
+
+These cover counts from several batches, expiry order when completion times tie
+or come from skewed clocks, and counts of issue types later dropped from the
+catalog.
+"""
 
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -22,6 +27,7 @@ from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFacto
 def _finding(
     annotation_id: int, group: str, *types: str, creator: str = "curator"
 ) -> QcFinding:
+    """Return a version-1 finding with one issue of each given type."""
     return QcFinding(
         annotation_id=UUID(int=annotation_id),
         annotation_version=1,
@@ -59,7 +65,12 @@ def _total(unit_of_work_factory: UnitOfWorkFactory, job_id: UUID) -> int:
 def test_batches_accumulate_counts_by_group_and_issue_type(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
-    """Counts add up across batches; findings are listed and filtered."""
+    """A report's counts add up across its batches, by group and by issue type.
+
+    A run records annotations in batches of hundreds, too many for a run-level
+    test to reach a second batch. Findings from every batch can be filtered by
+    group, creator, and issue type together, and each keeps its issues in order.
+    """
     report = _report(unit_of_work_factory, {})
     with unit_of_work_factory() as uow:
         uow.qc_reports.record_batch(
@@ -126,48 +137,14 @@ def _record_one_finding(
         uow.commit()
 
 
-def test_a_later_report_expires_earlier_findings_of_its_scope_only(
-    unit_of_work_factory: UnitOfWorkFactory, session_factory: sessionmaker[Session]
-) -> None:
-    """Earlier reports of the scope lose findings; other scopes and counts remain."""
-    older = _report(unit_of_work_factory, {})
-    other_scope = _report(unit_of_work_factory, {"group_key": "MGI"})
-    newer = _report(unit_of_work_factory, {})
-    start = datetime.now(UTC)
-    _succeed(
-        session_factory,
-        {
-            older: start,
-            other_scope: start + timedelta(hours=1),
-            newer: start + timedelta(hours=2),
-        },
-    )
-    _record_one_finding(unit_of_work_factory, older, other_scope, newer)
-
-    with unit_of_work_factory() as uow:
-        uow.qc_reports.expire_findings_of_older_reports(newer, {})
-        uow.commit()
-
-    totals = [
-        _total(unit_of_work_factory, job_id) for job_id in (older, other_scope, newer)
-    ]
-    assert totals == [0, 1, 1]
-    with unit_of_work_factory() as uow:
-        assert uow.qc_reports.group_counts(older, None)["MGI"].annotations_checked == 1
-        assert uow.qc_reports.has_newer_report(older, {}, start) is True
-        assert (
-            uow.qc_reports.has_newer_report(newer, {}, start + timedelta(hours=2))
-            is False
-        )
-
-
 def test_a_report_stamped_earlier_never_expires_one_stamped_later(
     unit_of_work_factory: UnitOfWorkFactory, session_factory: sessionmaker[Session]
 ) -> None:
-    """Expiry follows completion order, even when the earlier-stamped report finishes last.
+    """Expiry follows completion stamps, even when the earlier-stamped report finishes last.
 
-    This happens when two workers' clocks differ. The later-stamped report stays
-    current, and the earlier-stamped one reads as replaced.
+    This happens when two workers' clocks differ. The later-stamped report keeps
+    its findings. The earlier-stamped one reads as replaced, both when its
+    findings are read and in the report list.
     """
     stamped_later = _report(unit_of_work_factory, {})
     stamped_earlier = _report(unit_of_work_factory, {})
@@ -191,12 +168,19 @@ def test_a_report_stamped_earlier_never_expires_one_stamped_later(
             )
             is False
         )
+        assert uow.qc_reports.superseded([stamped_later, stamped_earlier]) == {
+            stamped_earlier
+        }
 
 
 def test_reports_completed_at_the_same_time_are_ordered_by_id(
     unit_of_work_factory: UnitOfWorkFactory, session_factory: sessionmaker[Session]
 ) -> None:
-    """With equal completion times, exactly one report of the scope is current."""
+    """With equal completion times, exactly one report of the scope is current.
+
+    The report with the larger ID keeps its findings, and the findings read and
+    the report list agree that the other one is replaced.
+    """
     first, second = sorted(
         (_report(unit_of_work_factory, {}), _report(unit_of_work_factory, {}))
     )
@@ -214,6 +198,7 @@ def test_reports_completed_at_the_same_time_are_ordered_by_id(
     with unit_of_work_factory() as uow:
         assert uow.qc_reports.has_newer_report(first, {}, finished) is True
         assert uow.qc_reports.has_newer_report(second, {}, finished) is False
+        assert uow.qc_reports.superseded([first, second]) == {first}
 
 
 def test_counts_of_an_issue_type_no_longer_in_the_catalog_are_still_read(

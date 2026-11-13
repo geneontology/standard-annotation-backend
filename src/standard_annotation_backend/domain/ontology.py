@@ -1,4 +1,11 @@
-"""Define ontology documents, snapshots, closures, and refresh results."""
+"""Define ontology documents, snapshots, closures, and refresh results.
+
+A snapshot is the set of terms and relationships SABE read from one fetched
+ontology file. Each ontology has at most one active snapshot, which validation and
+search use. A closure lists, for each term, every term it reaches by following one
+kind of relationship any number of steps, such as all of a term's `is_a`
+ancestors.
+"""
 
 from __future__ import annotations
 
@@ -20,20 +27,20 @@ from standard_annotation_backend.domain.stored_json import StoredJson
 GO_ONTOLOGY_KEY = "go"
 """Key of the GO ontology in `config/sources.yaml`.
 
-Every deployment configures GO. Code that needs GO itself, such as closure search on
-`ontology_class_id`, looks it up by this key.
+Every deployment configures GO. Code that works with GO specifically, such as
+searching annotations by a GO term and its descendants, finds GO's data by this key.
 """
 
 SUBCLASS_PREDICATE = "rdfs:subClassOf"
-"""Closure predicate for OBO `is_a` relationships."""
+"""Predicate SABE uses for OBO `is_a` relationships when computing closure."""
 
 REQUIRED_GO_SUBSETS = ("gocheck_do_not_annotate", "gocheck_obsoletion_candidate")
 """GO subsets that GO Rules check annotations against.
 
 GORULE:0000008 uses `gocheck_do_not_annotate` and GORULE:0000065 uses
-`gocheck_obsoletion_candidate`. A GO file that does not declare them would make
-those rules stop finding anything, so GO's entry in `config/sources.yaml` must
-list both in its `required_subsets`.
+`gocheck_obsoletion_candidate`. If a GO file did not declare them, those rules
+would silently find nothing, so GO's entry in `config/sources.yaml` must list both
+in its `required_subsets`.
 """
 
 
@@ -54,8 +61,8 @@ class OntologyDefinition:
         closure_predicates: Relationships whose closure SABE computes, such as
             `rdfs:subClassOf`. Empty when the ontology is loaded as a term list.
         document_ontology_id: The `ontology:` header value the file must declare.
-        required_subsets: Subsets the file must declare. A file that lacks one is
-            refused.
+        required_subsets: Subsets the file must declare. A refresh fails when the
+            file lacks one.
     """
 
     key: str
@@ -116,11 +123,14 @@ class OntologySnapshot:
         document: The fetched document the snapshot was parsed from.
         document_version: The document's `data-version`, if it declares one.
         closure_predicates: Relationships whose closure SABE computes.
-        identifier_prefixes: Identifier prefixes the snapshot was read with.
+        identifier_prefixes: The ontology's identifier prefixes when the file was
+            read. Only terms with these prefixes are included.
         terms: The ontology's terms by identifier.
         edges: Direct relationships used to compute closure.
-        alt_ids: The primary term of each alternative identifier. Ontologies keep
-            the identifiers of merged terms as alternative identifiers.
+        alt_ids: Each alternative identifier mapped to its primary term. When an
+            ontology merges terms, it keeps the identifiers of the merged terms as
+            alternative identifiers of the remaining one. Only alternative
+            identifiers that name exactly one term are included.
         declared_subsets: Subset names the document's header declares.
     """
 
@@ -164,7 +174,7 @@ def ontology_refresh_warnings(
     """Return warnings for `consider` targets the snapshot should define but does not.
 
     Only targets with one of the ontology's own prefixes are checked. A suggestion
-    that points into another ontology cannot be checked against this snapshot.
+    that names a term of another ontology cannot be checked against this snapshot.
     """
     return tuple(
         OntologyRefreshWarning(
@@ -218,7 +228,11 @@ class OntologyVersion:
 
 @dataclass(frozen=True, slots=True)
 class OntologyRefreshResult:
-    """Summarize an ontology activation and the warnings about its snapshot."""
+    """Summarize an ontology refresh: the snapshot it activated, if any, and warnings.
+
+    `ontology_version` is `None` when the fetched document matched the active
+    snapshot, so nothing was activated.
+    """
 
     ontology_version: OntologyVersion | None
     document: OntologyDocument | None = None

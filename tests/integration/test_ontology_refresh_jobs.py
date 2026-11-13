@@ -8,16 +8,11 @@ from uuid import UUID
 
 import httpx2
 import pytest
-from seeding import create_job, insert_annotation
+from seeding import create_job
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.config import get_settings
-from standard_annotation_backend.domain.annotations import (
-    Annotation,
-    AnnotationOrigin,
-    ChangeSource,
-)
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.models import (
@@ -374,39 +369,12 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
     monkeypatch: pytest.MonkeyPatch,
     finalization_method: str,
 ) -> None:
-    """A finalization retry reuses the stored result without activating again.
+    """A finalization retry reports the first attempt's result without reapplying.
 
-    The annotation keeps its terms, because activation changes no annotations.
+    The retry does not fetch the source again. The job succeeds with the snapshot
+    the first attempt activated, and only that snapshot and one
+    `ontology.refreshed` audit event exist.
     """
-    annotation_id = UUID("00000000-0000-0000-0000-000000000081")
-    annotation = Annotation.model_validate(
-        {
-            "db_object_id": "UniProtKB:RECOVERY",
-            "relation": "RO:0002331",
-            "ontology_class_id": "GO:0000002",
-            "references": ["PMID:recovery"],
-            "evidence_type": "ECO:0000314",
-            "annotation_date": "2026-09-28",
-            "assigned_by": "GO_Central",
-            "annotation_extensions": [
-                {
-                    "extension_relation": "BFO:0000050",
-                    "extension_term": "GO:9999999",
-                }
-            ],
-        }
-    )
-    with unit_of_work_factory() as uow:
-        insert_annotation(
-            uow.annotations.session,
-            annotation=annotation,
-            actor_id="creator",
-            change_source=ChangeSource.API,
-            owning_group_id="group-1",
-            record_origin=AnnotationOrigin.DIRECT,
-            annotation_id=annotation_id,
-        )
-        uow.commit()
     job_id = _create_job(unit_of_work_factory)
     requests = _install_source(monkeypatch, _source_responses())
     original_finalization = getattr(JobService, finalization_method)
@@ -426,16 +394,10 @@ def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
     assert recovered.status == JobStatus.SUCCEEDED.value
     assert recovered.result is not None
     assert len(requests) == 2
-    with unit_of_work_factory() as uow:
-        record = uow.annotations.get(annotation_id)
-        assert record is not None
-        assert record.current_version == 1
-        assert record.ontology_class_id == "GO:0000002"
     with session_factory() as session:
-        assert (
-            session.scalar(select(func.count()).select_from(OntologyMetadataRecord))
-            == 1
-        )
+        (snapshot,) = session.scalars(select(OntologyMetadataRecord)).all()
+        assert snapshot.active is True
+        assert recovered.result["ontology_version_id"] == str(snapshot.version_id)
         assert (
             session.scalar(
                 select(func.count())

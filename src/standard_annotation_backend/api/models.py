@@ -311,7 +311,7 @@ class JobResource(BaseModel):
             "rows. Completed refresh jobs, except entity retirement, include "
             "unchanged, which is true when the source document was already "
             "active so nothing was applied. Term replacement and QC report jobs "
-            "report a phase and running counts, and when they fail, "
+            "include a phase and running counts; when they fail, they include "
             "phase='failed' and a failure_code."
         ),
         examples=[
@@ -549,8 +549,9 @@ class AnnotationVersionPageResponse(PageResource[AnnotationVersionResource]):
 class ApiValidationIssue(BaseModel):
     """Describe one invalid value in a request or annotation.
 
-    `details` gives facts about the problem, such as an obsolete term's suggested
-    replacements or a duplicate's peers, and is omitted when there are none.
+    `details` gives more information about the problem, such as the suggested
+    replacements for an obsolete term or the IDs of duplicate annotations. It is
+    omitted when there is none.
     """
 
     location: tuple[str | int, ...]
@@ -745,7 +746,8 @@ class QcReportRequest(BaseModel):
         Field(
             description=(
                 "Report on this group only. Global admins may omit it to report on "
-                "all groups; a group admin's report always covers its own group."
+                "all groups. A group admin's report always covers its own group, "
+                "and naming a different group is refused."
             ),
         ),
     ] = None
@@ -847,7 +849,7 @@ class QcReportResource(BaseModel):
     annotations_checked: int
     annotations_with_issues: int
     by_issue_type: dict[str, int] = Field(
-        description="The number of annotations with each issue type."
+        description="The number of annotations with each issue type, by type."
     )
     by_group: dict[str, QcGroupCountsResource]
     reference_data: list[QcReferenceDataResource] = Field(
@@ -896,7 +898,7 @@ class QcReportResource(BaseModel):
 
 
 class QcFindingResource(BaseModel):
-    """Describe one annotation's issues in a report, in the format writes use."""
+    """Describe one annotation's issues in a report, in the same format as writes."""
 
     annotation_id: UUID
     annotation_version: int = Field(description="The version that was checked.")

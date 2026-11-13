@@ -69,7 +69,7 @@ def load_json_schema() -> dict[str, object]:
 
 
 class _PermissibleValue(BaseModel):
-    """One allowed value of an enum, as written in a LinkML value set file.
+    """Read one allowed value of an enum in a LinkML value set file.
 
     Only `aliases` is read. Other keys, such as `title` and `meaning`, are ignored.
     """
@@ -78,13 +78,13 @@ class _PermissibleValue(BaseModel):
 
 
 class _ValueSetEnum(BaseModel):
-    """One enum in a LinkML value set file, with its allowed values by name."""
+    """Read one enum in a LinkML value set file, with its allowed values by name."""
 
     permissible_values: dict[str, _PermissibleValue]
 
 
 class _ValueSet(BaseModel):
-    """The enums defined in a LinkML value set file, by enum name."""
+    """Read the enums defined in a LinkML value set file, by enum name."""
 
     enums: dict[str, _ValueSetEnum]
 

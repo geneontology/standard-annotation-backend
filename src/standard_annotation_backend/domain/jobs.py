@@ -38,14 +38,15 @@ TERMINAL_JOB_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED})
 
 
 def group_scope_parameters(group_key: str | None) -> dict[str, object]:
-    """Return the parameters of a job for one owning group, or for all groups."""
+    """Return job parameters for one owning group, or for all groups when `None`."""
     return {} if group_key is None else {"group_key": group_key}
 
 
 def group_scope(parameters: Mapping[str, object]) -> str | None:
     """Return the owning group a job's parameters name, or `None` for all groups.
 
-    Term replacement and QC report jobs are scoped this way.
+    Term replacement and QC report jobs store their scope in this form, which
+    `group_scope_parameters` writes.
 
     Raises:
         ValueError: If the parameters are neither `{}` nor `{"group_key": key}`

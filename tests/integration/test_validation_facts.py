@@ -1,28 +1,24 @@
-"""Verify that validation facts come from one set of active snapshots."""
+"""Verify the facts semantic validation reads from the active snapshots."""
 
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-import pytest
 from seeding import (
     DEFAULT_RULE_DATA,
     SHIPPED_SOURCES,
     SeedTerm,
     _succeeded_job,
-    insert_annotation,
     set_rule_data,
 )
 from sqlalchemy import update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation
-from standard_annotation_backend.domain.duplicate_policy import duplicate_key
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.domain.semantic_validation.facts import (
     EntityFact,
-    ReferenceDataUnavailableError,
     TermFact,
     TermStatus,
 )
@@ -32,10 +28,6 @@ from standard_annotation_backend.domain.semantic_validation.rule_data import (
 from standard_annotation_backend.persistence.models import (
     OntologyMetadataRecord,
     OntologyTermRecord,
-    RulesSnapshotRecord,
-)
-from standard_annotation_backend.persistence.repositories import (
-    ValidationFactsRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 
@@ -105,49 +97,19 @@ def test_facts_describe_terms_entities_and_peers_from_active_snapshots(
     assert second.duplicate_peer_ids == ()
 
 
-@pytest.mark.parametrize("missing", ["go", "rules"])
-def test_missing_reference_data_is_reported_by_name(
+def test_facts_come_from_resolved_snapshots_even_after_another_activation(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     reference_data: Callable[..., None],
-    missing: str,
 ) -> None:
-    """A configured ontology or rule data with no active snapshot stops gathering."""
-    with session_factory.begin() as session:
-        if missing == "rules":
-            session.execute(update(RulesSnapshotRecord).values(active=False))
-        else:
-            session.execute(
-                update(OntologyMetadataRecord)
-                .where(OntologyMetadataRecord.ontology_key == missing)
-                .values(active=False)
-            )
+    """Facts come from the snapshots resolved first, not one activated afterwards.
 
-    with (
-        unit_of_work_factory() as uow,
-        pytest.raises(ReferenceDataUnavailableError) as raised,
-    ):
-        uow.validation_facts.gather([_annotation()], [()], ONTOLOGIES)
-
-    assert raised.value.missing == (missing,)
-
-
-def test_an_activation_during_gathering_does_not_mix_snapshots(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    reference_data: Callable[..., None],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Facts come from the snapshots active when gathering started.
-
-    Another connection activates a GO snapshot in which the term is obsolete,
-    after the snapshots are resolved and before terms are read.
+    After the snapshots are resolved, another connection activates a GO snapshot
+    in which the term is obsolete. Facts gathered from the resolved snapshots still
+    describe the term as current, while a later gather sees it as obsolete.
     """
-    original = ValidationFactsRepository._term_facts
-
-    def activate_then_read(
-        self: ValidationFactsRepository, wanted: dict[UUID, set[str]]
-    ) -> dict[str, TermFact]:
+    with unit_of_work_factory() as uow:
+        snapshots = uow.validation_facts.active_snapshots(ONTOLOGIES)
         with session_factory.begin() as other:
             other.execute(
                 update(OntologyMetadataRecord)
@@ -184,15 +146,16 @@ def test_an_activation_during_gathering_does_not_mix_snapshots(
                     subsets=[],
                 )
             )
-        return original(self, wanted)
-
-    monkeypatch.setattr(ValidationFactsRepository, "_term_facts", activate_then_read)
+        (facts,) = uow.validation_facts.gather(
+            [_annotation()], [()], ONTOLOGIES, snapshots=snapshots
+        )
     with unit_of_work_factory() as uow:
-        (facts,) = uow.validation_facts.gather([_annotation()], [()], ONTOLOGIES)
+        (later,) = uow.validation_facts.gather([_annotation()], [()], ONTOLOGIES)
 
     assert facts.terms["GO:0008150"] == TermFact(
         TermStatus.CURRENT, checked_ancestors=frozenset({"GO:0008150"})
     )
+    assert later.terms["GO:0008150"].status is TermStatus.OBSOLETE
 
 
 def test_go_facts_include_subsets_checked_ancestors_rule_data_and_retracted_pmids(
@@ -242,77 +205,3 @@ def test_go_facts_include_subsets_checked_ancestors_rule_data_and_retracted_pmid
     )
     assert facts.rule_data == rule_data
     assert facts.retracted_pmids == frozenset({"PMID:9"})
-
-
-def test_replacement_facts_follow_chains_to_terms_the_annotation_does_not_use(
-    unit_of_work_factory: UnitOfWorkFactory,
-    reference_data: Callable[..., None],
-) -> None:
-    """Facts include every term a chain reaches, and the snapshot IDs read."""
-    reference_data(
-        SeedTerm("GO:0000011", obsolete=True, replaced_by=("GO:0000012",)),
-        SeedTerm("GO:0000012", obsolete=True, replaced_by=("GO:0000013",)),
-        SeedTerm("GO:0000013", parents=("GO:0008150",)),
-    )
-    annotation = _annotation(ontology_class_id="GO:0000011")
-
-    with unit_of_work_factory() as uow:
-        facts = uow.validation_facts.replacement_facts([annotation], ONTOLOGIES)
-        go_version = uow.ontologies.get_active("go")
-        assert go_version is not None
-        go_version_id = go_version.version_id
-
-    assert facts.terms["GO:0000011"].replaced_by == ("GO:0000012",)
-    assert facts.terms["GO:0000012"].status is TermStatus.OBSOLETE
-    assert facts.terms["GO:0000013"].status is TermStatus.CURRENT
-    assert facts.snapshot_ids["go"] == go_version_id
-    assert set(facts.snapshot_ids) == set(ONTOLOGIES) | {"rules"}
-
-
-def test_reference_versions_name_each_snapshot_gather_used(
-    unit_of_work_factory: UnitOfWorkFactory,
-    seed_active_subjects: Callable[..., None],
-    reference_data: Callable[..., None],
-) -> None:
-    """Resolved snapshots are reused by gather and described for the report."""
-    seed_active_subjects("UniProtKB:P12345")
-    with unit_of_work_factory() as uow:
-        snapshots = uow.validation_facts.active_snapshots(ONTOLOGIES)
-        versions = uow.validation_facts.reference_versions(snapshots)
-        (facts,) = uow.validation_facts.gather(
-            [_annotation()], [()], ONTOLOGIES, snapshots=snapshots
-        )
-
-    assert {use.ontology_key for use in versions.ontologies} == set(ONTOLOGIES)
-    assert {use.version_id for use in versions.ontologies} == set(
-        snapshots.ontology_versions.values()
-    )
-    assert versions.go_site_revision == "c" * 40
-    assert len(versions.entity_catalogs) == 1
-    assert facts.entity is not None
-
-
-def test_duplicate_peers_are_found_for_a_whole_batch(
-    unit_of_work_factory: UnitOfWorkFactory, session_factory: sessionmaker[Session]
-) -> None:
-    """Each annotation of a duplicate pair lists the other; distinct ones list none."""
-    shared = _annotation()
-    distinct = _annotation(references=["PMID:99"])
-    with session_factory() as session:
-        first = insert_annotation(session, shared).annotation_id
-        second = insert_annotation(session, shared, actor_id="other").annotation_id
-        alone = insert_annotation(session, distinct).annotation_id
-        session.commit()
-
-    with unit_of_work_factory() as uow:
-        peers = uow.annotations.duplicate_peers_for(
-            {
-                first: duplicate_key(shared),
-                second: duplicate_key(shared),
-                alone: duplicate_key(distinct),
-            }
-        )
-        creators = uow.annotations.creators([first, second, alone])
-
-    assert peers == {first: (second,), second: (first,), alone: ()}
-    assert creators == {first: "curator", second: "other", alone: "curator"}

@@ -1,11 +1,14 @@
 """Run `rules` refresh jobs for `RefreshRunner` from six go-site metadata files.
 
-The fetched document packs the six files from one go-site commit. All six are
-validated before anything changes, and the snapshot activates in one transaction
-with its retracted publications and audit event, so the files always activate
-together. An invalid or undecodable file fails the job and leaves the previous
-snapshot active. There is no staging: a redelivered job finds the snapshot it
-stored by its job ID.
+The fetcher reads the six files from one go-site commit and combines them into
+one source document with `pack_source_files`. All six are validated before
+anything is stored. The new snapshot (one stored version of the rule data), its
+list of retracted publications, and its audit event are committed in one
+transaction, so the six files always become active together. A file that is
+invalid or cannot be decoded fails the job and leaves the previous snapshot
+active. Unlike some other kinds, a rules refresh writes no intermediate staging
+rows. If Celery delivers the same job again after an interruption, the job
+finds the snapshot it already stored by its job ID.
 """
 
 from dataclasses import dataclass
@@ -53,7 +56,7 @@ class RulesRefreshResult:
         source_type: `github`.
         source_locator: `github:<repository>`.
         source_revision: The commit the files were read from.
-        source_checksum: SHA-256 of the packed files.
+        source_checksum: SHA-256 checksum of the combined source document.
         fetched_at: When the files were fetched.
         refreshed_at: When the snapshot was stored.
         database_count: Databases in `db-xrefs.yaml`.
@@ -64,8 +67,8 @@ class RulesRefreshResult:
         extension_constraint_count: Entries in `extensions-constraints.yaml`.
         unrecognized_extension_namespaces: `extensions-constraints.yaml`
             namespaces that are neither a configured ontology prefix nor a
-            `db-xrefs.yaml` database, checked against the configuration of the
-            run that reports them.
+            `db-xrefs.yaml` database, checked against the ontologies configured
+            when this result was built.
     """
 
     snapshot_id: UUID
@@ -94,8 +97,8 @@ class RulesRefreshService:
 
     Args:
         unit_of_work_factory: Opens the transactions for snapshots and audit.
-        sources: Configured sources, whose ontology prefixes the drift warning
-            accepts.
+        sources: Configured sources. An `extensions-constraints.yaml` namespace
+            that matches one of their ontology prefixes produces no warning.
     """
 
     def __init__(
@@ -115,7 +118,7 @@ class RulesRefreshService:
         return frozenset({JobType.RULES_REFRESH})
 
     def recover(self, job: Job) -> RefreshOutcome | None:
-        """Return the outcome of the snapshot this job stored, if it is retained."""
+        """Return the outcome of the snapshot this job stored, if it still exists."""
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.rules.get_by_job(job.job_id)
             if record is None:
@@ -125,18 +128,19 @@ class RulesRefreshService:
     def apply(
         self, job: Job, document: SourceDocument, report: ProgressReporter
     ) -> RefreshOutcome:
-        """Validate the six files, then activate them as one snapshot.
+        """Validate the six files, then store and activate them as one snapshot.
 
-        Files identical to the active snapshot's are not stored again, even when
-        they come from a newer commit, as long as the snapshot already holds what
-        they parse to. The files are always parsed first, so a SABE release that
-        reads them differently stores them again on its first refresh.
+        Files identical to those of the active snapshot are not stored again, even
+        when they come from a newer commit, provided the snapshot already holds
+        the data they parse to. The files are always parsed before this check, so
+        after an upgrade to a SABE release that parses them differently, the
+        first refresh stores them again.
 
         Raises:
             SourceError: With `invalid_gzip` or `invalid_utf8` if a file cannot be
                 decoded.
-            TerminalRefreshError: With `invalid_document` if the content is not
-                packed files, or a file is missing or invalid.
+            TerminalRefreshError: With `invalid_document` if the content was not
+                written by `pack_source_files`, or a file is missing or invalid.
         """
         try:
             files = unpack_source_files(document.content)
@@ -180,7 +184,7 @@ class RulesRefreshService:
         return outcome
 
     def discard_staging(self, uow: SqlAlchemyUnitOfWork, job_id: UUID) -> None:
-        """Do nothing; rules refreshes have no staging."""
+        """Do nothing; rules refreshes write no staging rows."""
 
     def after_terminal(self, source_key: str) -> None:
         """Do nothing; rules refreshes have no follow-up work."""
@@ -190,8 +194,8 @@ class RulesRefreshService:
     ) -> RefreshOutcome:
         """Build the job's outcome from a stored snapshot.
 
-        The drift warning uses the ontologies configured now, so an ontology added
-        since the snapshot was stored clears its warning.
+        Warnings about unrecognized extension namespaces use the ontologies
+        configured now, so adding an ontology removes the warning for its prefix.
 
         Raises:
             StoredDataError: If the stored rule data is invalid.

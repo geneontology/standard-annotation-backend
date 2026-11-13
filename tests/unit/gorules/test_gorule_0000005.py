@@ -1,11 +1,9 @@
 """Verify GORULE:0000005: binding terms cannot use inferred evidence."""
 
 import pytest
-from gorule_cases import annotation, facts, found, term
+from gorule_cases import annotation, facts, found, go_rule, term
 
-from standard_annotation_backend.domain.semantic_validation.gorules.terms import (
-    gorule_0000005,
-)
+rule = go_rule("gorule_0000005")
 
 
 @pytest.mark.parametrize("code", ["IEA", "ISS", "ISO", "ISM", "ISA", "IBA"])
@@ -13,7 +11,7 @@ def test_binding_terms_reject_each_listed_evidence_code(code: str) -> None:
     """Each evidence code in the rule body is reported on `GO:0005515`."""
     subject = annotation(code, ontology_class_id="GO:0005515")
 
-    issues = gorule_0000005(subject, facts({"GO:0005515": term()}))
+    issues = rule(subject, facts({"GO:0005515": term()}))
 
     assert found(issues) == [("gorule_0000005", ("annotation",))]
 
@@ -26,4 +24,4 @@ def test_other_evidence_or_terms_pass(term_id: str, code: str) -> None:
     """Other evidence, including RCA, and other terms pass."""
     subject = annotation(code, ontology_class_id=term_id)
 
-    assert found(gorule_0000005(subject, facts({term_id: term()}))) == []
+    assert found(rule(subject, facts({term_id: term()}))) == []

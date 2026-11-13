@@ -119,6 +119,7 @@ def test_admins_of_every_scope_may_start_qc_reports(
     ],
 )
 def test_read_role_allows_each_read_action(action: PermissionAction) -> None:
+    """The read role may read annotations, change sets, and QC reports."""
     authorize(
         _context(AuthorizationRole.READ, AuthorizationScope.GROUP),
         action,

@@ -160,7 +160,11 @@ def test_writes_need_loaded_reference_data_but_reads_and_deletes_do_not(
     session_factory: sessionmaker[Session],
     missing: str,
 ) -> None:
-    """Without an active snapshot, creates and updates return 503."""
+    """Without an active snapshot, creates and updates return 503.
+
+    The error code is `reference_data_unavailable`. Reading and deleting an
+    annotation do not need reference data and still succeed.
+    """
     created = _create(integration_api_client, PAYLOAD)
     annotation_id = created.json()["annotation_id"]
     with session_factory.begin() as session:
@@ -188,6 +192,7 @@ def test_writes_need_loaded_reference_data_but_reads_and_deletes_do_not(
         create.status_code == patch.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
     )
     assert create.json()["error"]["code"] == "reference_data_unavailable"
+    assert patch.json()["error"]["code"] == "reference_data_unavailable"
     assert read.status_code == status.HTTP_200_OK
     assert delete.status_code == status.HTTP_204_NO_CONTENT
 
@@ -267,7 +272,6 @@ def test_preview_and_acceptance_report_the_same_semantic_issues(
 
     expected = [(["annotation", "ontology_class_id"], "unknown_term")]
     assert preview["can_accept"] is False
-    assert "duplicate_peer_ids" not in preview
     assert [
         (issue["location"], issue["type"]) for issue in preview["validation_errors"]
     ] == expected

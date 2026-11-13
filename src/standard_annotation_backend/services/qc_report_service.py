@@ -1,9 +1,13 @@
 """Queue, run, and read annotation QC reports.
 
-A report validates every active annotation in its scope, all groups or one
-owning group, with the same checks as client writes. It reads annotations in
-batches without locks, so an annotation edited during the run may be checked
-before or after the edit. Snapshots are resolved per batch.
+A QC report validates every active annotation in its scope, which is either all
+groups or one owning group, with the same checks that client writes use. It
+stores one finding for each annotation with issues. It reads annotations in
+batches without locking them, so an annotation edited during the run may be
+checked as it was before or after the edit. Each batch is checked against the
+reference data snapshots (the stored versions of ontologies, GO Rule data, and
+entity catalogs) that are active when the batch is read, and the report records
+every set of versions it used.
 """
 
 import logging
@@ -88,11 +92,13 @@ _FAILURE_MESSAGE = "QC report failed"
 def queue_qc_report(
     unit_of_work: SqlAlchemyUnitOfWork, *, group_key: str | None, requested_by: str
 ) -> Job:
-    """Return the queued QC report of a scope, creating one if needed.
+    """Return the queued QC report for a scope, creating one if none is queued.
 
-    Creation is serialized, and a queued report is joined while it is locked, so
-    a report cannot start until a caller that joined it commits. A running report
-    is never joined. The caller commits and then dispatches the job.
+    A lock held until the caller's transaction ends lets only one caller at a
+    time look for or create a report. A queued report that is found stays locked
+    for the same time, so it cannot start until the caller that reused it
+    commits. A report that is already running is never reused; a new report is
+    queued instead. The caller must commit and then send the job to a worker.
 
     Args:
         unit_of_work: The caller's transaction.
@@ -100,7 +106,7 @@ def queue_qc_report(
         requested_by: The actor recorded as the requester of a new report.
 
     Returns:
-        The queued report, new or joined.
+        The queued report, either new or already queued.
     """
     unit_of_work.jobs.lock_qc_report_starts()
     parameters = group_scope_parameters(group_key)
@@ -136,7 +142,9 @@ class QcReportRunner:
     Args:
         unit_of_work_factory: Opens the transactions for reading and storing.
         sources: Configured sources, which name the ontologies and their prefixes.
-        try_lock: Takes the job's lock and the scope's lock.
+        try_lock: Takes a PostgreSQL advisory lock only if it is free. The runner
+            locks the job, so only one process runs it, and the report's scope,
+            so only one report of a scope runs at a time.
     """
 
     def __init__(
@@ -156,13 +164,14 @@ class QcReportRunner:
     def run(self, job_id: UUID) -> None:
         """Run one QC report to completion or failure.
 
-        A report that another process is running, or that has finished, is left
-        alone. A report with invalid parameters fails with `invalid_parameters`,
-        and one that finds reference data missing fails with
-        `reference_data_unavailable` and keeps no findings or counts. A report
-        that starts again after an interruption discards its earlier rows. On
-        success, the findings of every older report of the same scope are
-        deleted in the same transaction.
+        Nothing happens if another process is running the report or the report
+        has finished. A report whose job parameters are invalid fails with
+        `invalid_parameters`. A report that finds required reference data
+        missing fails with `reference_data_unavailable`, and its findings and
+        counts are deleted. A report that starts again after an interruption
+        first deletes the findings and counts it stored earlier. When the report
+        succeeds, the findings of every older report of the same scope are
+        deleted in the transaction that records the success.
 
         Raises:
             QcReportBusyError: If another report of the same scope is running.
@@ -325,19 +334,20 @@ class QcReportSummary:
     """Describe a report as one reader may see it.
 
     Counts cover only the groups the reader may see: their own group, or every
-    group for a global reader.
+    group for a reader with global scope. While a report runs, its counts are
+    those recorded so far.
 
     Attributes:
         job: The report's job.
         owning_group_id: The group the report covers, or `None` for all groups.
         annotations_checked: Annotations validated, in the visible groups.
-        annotations_with_issues: Annotations given a finding, in the visible
-            groups.
+        annotations_with_issues: Annotations with at least one issue, in the
+            visible groups.
         by_issue_type: The number of visible annotations with each issue type,
             keyed by issue type value.
         by_group: The counts of each visible group.
         result: The stored result once the report has succeeded, otherwise
-            `None`. While a report runs, its counts are those recorded so far.
+            `None`.
     """
 
     job: Job
@@ -370,7 +380,7 @@ class QcReportService:
 
     Args:
         unit_of_work_factory: Opens transactions.
-        dispatch: Sends a queued report to a worker after its start commits.
+        dispatch: Sends a queued report to a worker after the job is committed.
     """
 
     def __init__(
@@ -382,10 +392,12 @@ class QcReportService:
         self._dispatch = dispatch
 
     def start(self, context: AuthorizationContext, owning_group_id: str | None) -> Job:
-        """Queue a report, or join the scope's queued one, and dispatch it.
+        """Queue a report, or reuse the scope's queued one, and send it to a worker.
 
         A global admin reports on one group or, without `owning_group_id`, on all
-        groups. A group-restricted admin always reports on its own group.
+        groups. An admin limited to one group always reports on that group. If
+        sending the job fails, the error is logged and the job stays queued; the
+        next start for the same scope reuses it and sends it again.
 
         Args:
             context: The caller's authorization.
@@ -416,8 +428,8 @@ class QcReportService:
         try:
             self._dispatch(job)
         except Exception as error:
-            # The job stays queued; the next start of the same scope joins it
-            # and dispatches it again.
+            # The job stays queued; the next start of the same scope reuses it
+            # and sends it again.
             logger.error(
                 "QC report dispatch failed: job_id=%s failure_type=%s",
                 job.job_id,
@@ -461,7 +473,7 @@ class QcReportService:
     def summary(
         self, context: AuthorizationContext, report_id: UUID
     ) -> QcReportSummary:
-        """Return a report's status, versions, and counts within the caller's groups.
+        """Return a report's status, versions, and counts for the caller's groups.
 
         Raises:
             QcReportNotFoundError: If `report_id` names no QC report.
@@ -504,8 +516,10 @@ class QcReportService:
     ) -> ResultPage[QcFinding]:
         """Return one page of a report's findings within the caller's ownership scope.
 
-        A self-scoped caller sees findings for the annotations they created; a
-        group-scoped caller sees their group's findings.
+        A caller with `self` scope sees findings only for the annotations they
+        created in their group, a caller with `group` scope sees their group's
+        findings, and a caller with `global` scope sees every finding. A group
+        filter outside the caller's scope returns an empty page.
 
         Args:
             context: The caller's authorization.

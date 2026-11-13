@@ -1,11 +1,12 @@
 """Refresh ontologies from configured OBO sources and prune old snapshots.
 
 A refresh parses the OBO file, stages a complete inactive snapshot, and then
-activates it. Activation changes no annotations. Only one process at a
-time may stage, activate, or prune snapshots of one ontology. Each ontology has
-a PostgreSQL advisory lock that a process takes only if it is free. A refresh
-that finds it held raises `OntologyRefreshBusyError`, and Celery retries the task
-later instead of waiting.
+activates it. Activation changes no annotations; it queues a term replacement job
+for all groups, which replaces obsolete terms and alternative IDs in annotations
+later. Only one process at a time may stage, activate, or prune snapshots of one
+ontology. Each ontology has a PostgreSQL advisory lock that a process takes only
+if it is free. A refresh that finds it held raises `OntologyRefreshBusyError`,
+and Celery retries the task later instead of waiting.
 """
 
 import logging
@@ -80,8 +81,8 @@ class OntologyRefreshService:
         enqueue_prune: Schedules pruning after a job finishes. `None` prunes in
             this process instead.
         dispatch_replacement: Sends a queued term replacement job to a worker
-            after an activation commits. `None` leaves the job queued for the caller to
-            run.
+            after an activation commits. `None` leaves the job queued without
+            sending it.
     """
 
     def __init__(
@@ -132,15 +133,16 @@ class OntologyRefreshService:
         """Parse, stage, and activate a new snapshot under the ontology's lock.
 
         A document that is already the active snapshot, read with the same
-        prefixes and closure predicates, is not applied. It is checked before
-        taking the lock, so it never waits on another job, and again once the lock
-        is held.
+        identifier prefixes and closure predicates, is not applied. This is
+        checked before taking the lock, so such a document never waits on another
+        job, and again once the lock is held.
 
         Raises:
             OntologyRefreshBusyError: If another process holds the lock. This is
                 not a terminal failure, so the run is retried later.
             TerminalRefreshError: With `invalid_document` if the OBO is invalid or
-                does not declare every subset in the entry's `required_subsets`.
+                does not declare every subset listed in the ontology's
+                `required_subsets` setting.
             OntologyCandidateConflictError: If the job already staged a different
                 source, or a snapshot staged after this job's is already active.
         """
@@ -312,7 +314,7 @@ class OntologyRefreshService:
         Activation changes no annotations and takes no annotation lock, so
         annotation writes continue while it runs. The activation, its stored
         result, its audit event, and a queued term replacement job for all groups
-        are committed together; the job is then dispatched.
+        are committed together, and the job is then sent to a worker.
 
         Raises:
             OntologyCandidateConflictError: If a snapshot staged after this job's
@@ -363,7 +365,8 @@ class OntologyRefreshService:
     def _dispatch(self, job: Job) -> None:
         """Send a replacement job to a worker, leaving it queued if sending fails.
 
-        The next trigger joins the queued job and sends it again.
+        A failure is logged. The next activation of any ontology reuses the queued
+        job and sends it again.
         """
         if self._dispatch_replacement is None:
             return

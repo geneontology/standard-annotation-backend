@@ -1,22 +1,23 @@
-"""Name the checked ancestors: GO terms the rules ask whether a term is under.
+"""Define the checked ancestors: the GO terms that GO Rules test other terms against.
 
-A term is under a checked ancestor when it is that term or one of its
-`rdfs:subClassOf` descendants in GO. Fact gathering looks up, for every current
-GO term an annotation uses and for the entity's type, which checked ancestors it
-falls under. Only this small set is looked up, so the rules never need the whole
+Many rules ask whether a term is under a particular GO term. A term is under
+another when it is that term or one of its `rdfs:subClassOf` descendants in GO.
+Before the rules run, SABE looks up which checked ancestors each current GO term in
+an annotation falls under, and which ones the subject entity's type falls under.
+Only this small set of terms is looked up, so the rules never need the whole GO
 hierarchy.
 """
 
 from standard_annotation_backend.domain.semantic_validation.rule_data import RuleData
 
 MF_ROOT = "GO:0003674"
-"""The molecular function root."""
+"""The root term of GO's molecular function terms."""
 
 BP_ROOT = "GO:0008150"
-"""The biological process root."""
+"""The root term of GO's biological process terms."""
 
 CC_ROOT = "GO:0005575"
-"""The cellular component root."""
+"""The root term of GO's cellular component terms."""
 
 GO_ROOTS = frozenset({MF_ROOT, BP_ROOT, CC_ROOT})
 """The three GO roots."""
@@ -58,8 +59,9 @@ FIXED_CHECKED_ANCESTORS = (
 def checked_ancestor_terms(rule_data: RuleData) -> frozenset[str]:
     """Return the fixed checked ancestors plus every extension constraint's root terms.
 
-    GORULE:0000058 asks whether the annotated term falls under an entry's
-    `primary_root_terms`, which come from the go-site rule data.
+    GORULE:0000058 asks whether the annotated term falls under an extension
+    constraint's `primary_root_terms`. Those terms come from the go-site rule data,
+    so they are added here rather than listed in `FIXED_CHECKED_ANCESTORS`.
     """
     return FIXED_CHECKED_ANCESTORS | {
         root

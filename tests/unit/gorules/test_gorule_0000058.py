@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import replace
 
-from gorule_cases import RULE_DATA, annotation, facts, found, term
+from gorule_cases import RULE_DATA, annotation, facts, found, go_rule, term
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.semantic_validation.checked_ancestors import (
@@ -11,12 +11,11 @@ from standard_annotation_backend.domain.semantic_validation.checked_ancestors im
     MF_ROOT,
 )
 from standard_annotation_backend.domain.semantic_validation.facts import TermFact
-from standard_annotation_backend.domain.semantic_validation.gorules.metadata import (
-    gorule_0000058,
-)
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     ExtensionConstraint,
 )
+
+rule = go_rule("gorule_0000058")
 
 OCCURS_IN = "BFO:0000066"
 DATA = replace(
@@ -39,7 +38,7 @@ def _extensions(*pairs: tuple[str, str]) -> list[dict[str, str]]:
 def _issues(
     subject: Annotation, terms: Mapping[str, TermFact] | None = None
 ) -> list[tuple[str, tuple[str | int, ...]]]:
-    return found(gorule_0000058(subject, facts(terms, rule_data=DATA)))
+    return found(rule(subject, facts(terms, rule_data=DATA)))
 
 
 def test_an_extension_meeting_one_entry_conforms() -> None:
@@ -102,4 +101,4 @@ def test_an_unknown_term_or_missing_rule_data_is_not_checked() -> None:
     subject = annotation(annotation_extensions=_extensions((OCCURS_IN, "CHEBI:1")))
 
     assert _issues(subject, {}) == []
-    assert found(gorule_0000058(subject, facts(rule_data=None))) == []
+    assert found(rule(subject, facts(rule_data=None))) == []

@@ -1,5 +1,6 @@
 """Verify staging, publication, and replacement of entity catalogs in PostgreSQL."""
 
+from collections.abc import Callable
 from dataclasses import replace
 from uuid import UUID
 
@@ -13,7 +14,6 @@ from refresh_helpers import (
 )
 from seeding import insert_annotation
 from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
@@ -30,6 +30,7 @@ from standard_annotation_backend.domain.entities import (
     EntityRefreshResult,
 )
 from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.domain.refresh import (
     SourceDocument,
     SourceProvenance,
@@ -42,7 +43,6 @@ from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     EntityCatalogSnapshotRecord,
     EntityMembershipRecord,
-    EntitySourceRecord,
     EntityStagingRecord,
 )
 from standard_annotation_backend.persistence.repositories.entities import (
@@ -119,6 +119,21 @@ def active_ids(session_factory: sessionmaker[Session]) -> list[str]:
                 )
             )
         )
+
+
+def _annotation_on(db_object_id: str) -> Annotation:
+    """Return a structurally valid annotation whose subject is `db_object_id`."""
+    return Annotation.model_validate(
+        {
+            "db_object_id": db_object_id,
+            "relation": "RO:0002331",
+            "ontology_class_id": "GO:0006915",
+            "references": ["PMID:1"],
+            "evidence_type": "ECO:0000314",
+            "annotation_date": "2026-09-29",
+            "assigned_by": "MGI",
+        }
+    )
 
 
 def test_publication_records_one_audit_event_and_a_durable_result(
@@ -424,11 +439,11 @@ def test_publication_spans_multiple_insert_batches_without_losing_records(
     assert len(active_ids(session_factory)) == 5001
 
 
-def test_publication_stores_each_entity_taxon_and_type(
+def test_validation_reads_each_published_entity_taxon_and_type(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
+    reference_data: Callable[..., None],
 ) -> None:
-    """Each published entity's taxon and type are stored in their own columns."""
+    """Validation reads the taxon and type each entity's GPI line gives."""
     service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
     text = (
         "!gpi-version: 2.0\n!generated-by: TestDB\n!date-generated: 2026-09-29\n"
@@ -439,40 +454,15 @@ def test_publication_stores_each_entity_taxon_and_type(
 
     service.apply(job, source_document("mgi", text.encode()), ignore_progress)
 
-    with session_factory() as session:
-        rows = session.execute(
-            select(
-                EntitySourceRecord.db_object_id,
-                EntitySourceRecord.db_object_taxon_id,
-                EntitySourceRecord.db_object_type,
-            ).order_by(EntitySourceRecord.db_object_id)
-        ).all()
-    assert [tuple(row) for row in rows] == [
-        ("MGI:1", "NCBITaxon:10090", "PR:000000001"),
-        ("MGI:2", "NCBITaxon:9606", "GO:0032991"),
-    ]
-
-
-@pytest.mark.parametrize(
-    "values",
-    [
-        {"db_object_taxon_id": "NCBITaxon:10090"},
-        {"db_object_type": "SO:0000704"},
-        {"entity": EntitySourceRecord.entity.op("-")("db_object_type")},
-    ],
-    ids=["taxon", "type", "type-missing-from-entity"],
-)
-def test_entity_columns_cannot_disagree_with_the_stored_entity(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    values: dict[str, object],
-) -> None:
-    """PostgreSQL rejects a taxon or type column that differs from the entity.
-
-    That includes an entity that no longer has the value at all.
-    """
-    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    publish_catalog(service, unit_of_work_factory, "MGI:1")
-
-    with pytest.raises(IntegrityError), session_factory.begin() as session:
-        session.execute(update(EntitySourceRecord).values(**values))
+    with unit_of_work_factory() as uow:
+        facts = uow.validation_facts.gather(
+            [_annotation_on("MGI:1"), _annotation_on("MGI:2")],
+            [(), ()],
+            {GO_ONTOLOGY_KEY: ("GO",)},
+        )
+    assert [
+        None
+        if fact.entity is None
+        else (fact.entity.db_object_taxon_id, fact.entity.db_object_type)
+        for fact in facts
+    ] == [("NCBITaxon:10090", "PR:000000001"), ("NCBITaxon:9606", "GO:0032991")]

@@ -103,8 +103,8 @@ app = FastAPI(
         },
         {
             "name": "reports",
-            "description": "Annotation QC reports: start them and read their "
-            "summaries and findings.",
+            "description": "Annotation QC reports: start and list them, and read "
+            "their summaries and findings.",
         },
     ],
     version=get_application_version(),

@@ -1,9 +1,9 @@
 """Share the helpers GO Rules use to read an annotation and its facts.
 
 Every rule about the annotated term needs that term to be current. An unknown,
-obsolete, or alternative `ontology_class_id` is already its own issue, so those
-rules do not fire for it; fixing the term can reveal their issues on the next
-attempt.
+obsolete, or alternative `ontology_class_id` is already reported as its own issue,
+so those rules report nothing for it. Once the term is fixed, the next attempt may
+report issues from those rules.
 """
 
 from standard_annotation_backend.domain.annotations import Annotation

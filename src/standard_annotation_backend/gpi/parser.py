@@ -145,9 +145,10 @@ def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
         source metadata, and `source`.
 
     Raises:
-        GpiParseError: If the header or any data row is invalid. Lines containing
-            a NUL character, which PostgreSQL cannot store, are invalid. The error
-            describes each problem, including the rejected field values.
+        GpiParseError: If the header or any data row is invalid, or an identifier
+            appears on more than one line. Lines containing a NUL character, which
+            PostgreSQL cannot store, are invalid. The error describes each problem,
+            including the rejected field values.
     """
     try:
         nul_lines = nul_data_lines(text)
@@ -194,7 +195,7 @@ def parse_gpi(text: str, source: SourceProvenance) -> EntityCatalog:
 
 
 def _repeated_identifiers(records: tuple[EntityRecord, ...]) -> list[GpiRowIssue]:
-    """Return an issue for each record whose identifier an earlier record has."""
+    """Return a `duplicate` issue for each record that repeats an earlier identifier."""
     first_lines: dict[str, int] = {}
     issues: list[GpiRowIssue] = []
     for record in records:

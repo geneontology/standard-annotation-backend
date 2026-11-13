@@ -13,9 +13,6 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
     TermFact,
     TermStatus,
 )
-from standard_annotation_backend.domain.semantic_validation.identifiers import (
-    term_identifiers,
-)
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     DatabaseEntry,
     EcoUsageConstraint,
@@ -65,8 +62,12 @@ def _facts(
     )
 
 
-def test_identifiers_are_listed_in_field_order_with_their_locations() -> None:
-    """Every field that may hold an ontology term is listed where issues locate it."""
+def test_every_field_that_may_hold_a_term_is_checked_where_it_appears() -> None:
+    """Term issues are located at the value, in field order.
+
+    The class, extension terms, `with_or_from` values, and interacting taxa are
+    all checked.
+    """
     annotation = _annotation(
         annotation_extensions=[
             {"extension_relation": "BFO:0000066", "extension_term": "CL:0000000"},
@@ -74,20 +75,20 @@ def test_identifiers_are_listed_in_field_order_with_their_locations() -> None:
         with_or_from=["UniProtKB:Q1", "GO:0003674"],
         interacting_taxon_id=["NCBITaxon:10090"],
     )
+    unknown = TermFact(TermStatus.UNKNOWN)
+    terms = dict.fromkeys(
+        (TERM, "CL:0000000", "GO:0003674", "NCBITaxon:10090"), unknown
+    )
+
+    issues = validate_semantics(annotation, _facts(terms))
 
     assert [
-        (occurrence.identifier, occurrence.location, occurrence.prefix)
-        for occurrence in term_identifiers(annotation)
+        issue["location"] for issue in issues if issue["type"] == "unknown_term"
     ] == [
-        (TERM, ("annotation", "ontology_class_id"), "GO"),
-        (
-            "CL:0000000",
-            ("annotation", "annotation_extensions", 0, "extension_term"),
-            "CL",
-        ),
-        ("UniProtKB:Q1", ("annotation", "with_or_from", 0), "UniProtKB"),
-        ("GO:0003674", ("annotation", "with_or_from", 1), "GO"),
-        ("NCBITaxon:10090", ("annotation", "interacting_taxon_id", 0), "NCBITaxon"),
+        ("annotation", "ontology_class_id"),
+        ("annotation", "annotation_extensions", 0, "extension_term"),
+        ("annotation", "with_or_from", 1),
+        ("annotation", "interacting_taxon_id", 0),
     ]
 
 

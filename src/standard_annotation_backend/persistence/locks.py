@@ -34,15 +34,19 @@ class LockNamespace(Enum):
             group key.
         AUTHORIZATION_REFRESH: Replacement of users and grants. Used without a
             value.
-        RULES_REFRESH: Activation of go-site GO Rule data snapshots. Used without a
-            value.
+        RULES_REFRESH: Activation of a stored copy of the go-site files that GO
+            Rules read. Used without a value.
         REFRESH_START: Creation of refresh jobs of every kind. Used without a
             value.
-        QC_REPORT: One running QC report per scope, keyed by group key, or
-            without a value for all groups.
+        QC_REPORT: Running of a QC report. Keyed by group key for a report on
+            one group, or used without a value for a report on all groups, so
+            two reports on the same group, or two on all groups, never run at
+            once.
         QC_REPORT_START: Creation of QC report jobs. Used without a value.
-        TERM_REPLACEMENT: One running term replacement job per scope, keyed by
-            group key, or without a value for all groups.
+        TERM_REPLACEMENT: Running of a term replacement job. Keyed by group key
+            for a job on one group, or used without a value for a job on all
+            groups, so two jobs on the same group, or two on all groups, never
+            run at once.
         TERM_REPLACEMENT_START: Creation of term replacement jobs. Used without a
             value.
     """

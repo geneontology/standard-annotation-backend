@@ -147,8 +147,9 @@ class JobService:
         Args:
             job_id: Job to mark succeeded.
             result: JSON-compatible result to store.
-            finalize: Kind-specific work done in the same transaction, so it
-                commits only together with the success.
+            finalize: Work specific to the job type, such as deleting older
+                findings, done in the same transaction so that it commits only
+                together with the success.
         """
         with self._unit_of_work_factory() as unit_of_work:
             mutation = unit_of_work.jobs.succeed(

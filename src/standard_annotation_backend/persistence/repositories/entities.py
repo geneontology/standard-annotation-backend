@@ -542,6 +542,9 @@ def _source_record_values(row: dict[str, object]) -> dict[str, object]:
 
     The entity's taxon and type are copied into their own columns. Staging rows
     hold schema-validated entities, which always have both.
+
+    Raises:
+        EntityCandidateConflictError: If the row's entity is not a JSON object.
     """
     entity = row["entity"]
     if not isinstance(entity, dict):

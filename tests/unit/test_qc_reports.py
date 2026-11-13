@@ -1,7 +1,9 @@
-"""Verify the QC report issue catalog, findings, and stored results."""
+"""Verify the QC report issue catalog, findings, and stored results.
 
-from types import FunctionType
-from typing import cast
+Each GO Rule's tests in `tests/unit/gorules` also verify that the catalog lists the
+rule's issue type.
+"""
+
 from uuid import UUID
 
 import pytest
@@ -18,17 +20,6 @@ from standard_annotation_backend.domain.qc_reports import (
     issue_type_of,
     issue_type_title,
 )
-from standard_annotation_backend.domain.semantic_validation.rules import GO_RULES
-
-
-def test_the_catalog_lists_every_go_rule_the_validator_runs() -> None:
-    """Every registered GO Rule has an issue type, and no other GO Rule does.
-
-    Each rule function is named after the issue type it reports.
-    """
-    assert {cast(FunctionType, check).__name__ for check in GO_RULES} == {
-        issue_type.value for issue_type in IssueType if issue_type.startswith("gorule_")
-    }
 
 
 @pytest.mark.parametrize("issue_type", list(IssueType))

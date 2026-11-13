@@ -76,8 +76,9 @@ class ChangeSetPreview:
     A preview is advisory: acceptance repeats validation and repository checks.
     `annotation` is the candidate payload, or the snapshot to be deleted.
     `before_annotation` is the saved base snapshot for an update or deletion.
-    `validation_errors` holds the structural issues, or, for a structurally valid
-    annotation, its semantic issues.
+    `validation_errors` lists the candidate's structural (schema) issues. If there
+    are none and the operation is not a deletion, it lists the candidate's
+    semantic issues instead.
     """
 
     change_set_id: UUID
@@ -199,8 +200,8 @@ class ChangeSetService:
 
     Args:
         unit_of_work_factory: Factory opening repositories in one transaction.
-        sources: Configured sources, which name the ontologies validation
-            enforces.
+        sources: Configured sources, which name the ontologies that
+            validation checks identifiers against.
     """
 
     def __init__(
@@ -452,8 +453,9 @@ class ChangeSetService:
         """Repeat validation and repository checks, then accept and audit atomically.
 
         If a target has changed, commit the stale state and its audit event before
-        raising `StaleChangeSetError`, after the unit of work has closed. Other
-        validation or duplicate failures roll back and leave the proposal reviewable.
+        raising `StaleChangeSetError`, after the unit of work has closed. A
+        candidate that fails validation, including the duplicate check, rolls back
+        and leaves the proposal reviewable.
 
         Args:
             change_set_id: Identifier of the proposal to accept.
@@ -783,10 +785,11 @@ def _build_preview(
     record: ChangeSetRecord,
     validator: SemanticValidator,
 ) -> ChangeSetPreview:
-    """Describe the candidate, its issues, and any observed version drift.
+    """Describe the candidate, its validation issues, and whether its target changed.
 
-    Duplicate peers are looked up without locks; acceptance looks them up again
-    under locks before writing.
+    The target has changed when its current version differs from the proposal's
+    base version. Duplicates are looked up without locks, so the result is only
+    advisory; acceptance looks them up again under locks before writing.
     """
     repository = unit_of_work.annotations
     before, validation = _candidate(repository, record)

@@ -233,6 +233,12 @@ def test_update_locks_intervening_signature_for_retained_orm_object(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
+    """An update locks the stored duplicate signature, not one its session cached.
+
+    Another transaction changed the annotation after this session loaded it. The
+    update waits for the lock on the changed signature, so it cannot race a write
+    that duplicates the annotation's current state.
+    """
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     original_signature = prepare_annotation_for_persistence(
         validated_annotation
@@ -288,6 +294,11 @@ def test_soft_delete_locks_intervening_signature_for_retained_orm_object(
     session_factory: sessionmaker[Session],
     validated_annotation: Annotation,
 ) -> None:
+    """A deletion locks the stored duplicate signature, not one its session cached.
+
+    Another transaction changed the annotation after this session loaded it. The
+    deletion waits for the lock on the changed signature.
+    """
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     original_signature = prepare_annotation_for_persistence(
         validated_annotation
@@ -394,6 +405,11 @@ def test_missing_and_deleted_write_transitions_raise_focused_errors(
     unit_of_work_factory: UnitOfWorkFactory,
     validated_annotation: Annotation,
 ) -> None:
+    """Updating or deleting a deleted annotation, or a missing one, fails clearly.
+
+    A deleted annotation raises `AnnotationDeletedError`; an unknown ID raises
+    `AnnotationNotFoundError`.
+    """
     annotation_id = _create_annotation(unit_of_work_factory, validated_annotation)
     with unit_of_work_factory() as unit_of_work:
         unit_of_work.annotations.soft_delete(

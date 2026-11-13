@@ -1,11 +1,9 @@
 """Verify GORULE:0000033: references are PMID, DOI, or GO_REF identifiers."""
 
 import pytest
-from gorule_cases import annotation, facts, found
+from gorule_cases import annotation, facts, found, go_rule
 
-from standard_annotation_backend.domain.semantic_validation.gorules.support import (
-    gorule_0000033,
-)
+rule = go_rule("gorule_0000033")
 
 
 @pytest.mark.parametrize("reference", ["ISBN:123", "Reactome:R-HSA-1"])
@@ -13,7 +11,7 @@ def test_another_prefix_is_reported_at_the_reference(reference: str) -> None:
     """A reference with another prefix is located at itself."""
     subject = annotation(references=["PMID:1", reference])
 
-    assert found(gorule_0000033(subject, facts())) == [
+    assert found(rule(subject, facts())) == [
         ("gorule_0000033", ("annotation", "references", 1))
     ]
 
@@ -21,4 +19,4 @@ def test_another_prefix_is_reported_at_the_reference(reference: str) -> None:
 @pytest.mark.parametrize("reference", ["PMID:1", "DOI:10.1000/x", "GO_REF:0000033"])
 def test_each_allowed_prefix_passes(reference: str) -> None:
     """PMID, DOI, and GO_REF references pass."""
-    assert found(gorule_0000033(annotation(references=[reference]), facts())) == []
+    assert found(rule(annotation(references=[reference]), facts())) == []

@@ -133,8 +133,10 @@ def refresh_rules(
     summary="Refresh ontologies",
     description=(
         "Refresh configured ontologies from their OBO sources, activating a new "
-        "snapshot. Send {} to refresh every "
-        'configured ontology or {"source_key": "<key>"} for one. '
+        "snapshot. Activation changes no annotations; it queues a term "
+        "replacement job that replaces obsolete terms and alternative IDs in "
+        "annotations. Send {} to refresh every configured ontology or "
+        '{"source_key": "<key>"} for one. '
         f"{_SHARED_DESCRIPTION}"
     ),
     response_description=_RESPONSE_DESCRIPTION,
@@ -184,8 +186,11 @@ def refresh_entities(
     description=(
         "Replace a group's annotations with the contents of its configured GPAD "
         "file. Every successful refresh deletes all of the group's annotations, "
-        "including edits made in SABE, and imports the file; a file that is "
-        "unchanged while the group is untouched is skipped. Send {} to refresh "
+        "including edits made in SABE, and imports the file. A refresh is "
+        "skipped when the file and SABE's Standard Annotation schema version are "
+        "unchanged since the group's last import and the group has had no edits, "
+        "comments, or change sets since then. Each published import queues a "
+        "term replacement job for the group. Send {} to refresh "
         'every group that GPAD still manages, or {"source_key": "<key>"} for one. '
         f"{_SHARED_DESCRIPTION}"
     ),

@@ -18,5 +18,9 @@ ExactNonBlankString = Annotated[
     str,
     StringConstraints(pattern=r"^\S(?:.*\S)?$"),
 ]
-"""A non-blank string with no leading or trailing whitespace, rejected rather than
-stripped, for values such as group keys that are stored and matched exactly."""
+"""A non-blank string with no leading or trailing whitespace.
+
+Unlike `TrimmedNonBlankString`, surrounding whitespace is rejected instead of
+removed. Use it for values such as group keys, which are stored and compared
+exactly as given.
+"""

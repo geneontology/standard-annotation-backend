@@ -1,4 +1,4 @@
-"""Expose annotation QC reports: start and list them, and read summaries and findings."""
+"""Start, list, and read annotation QC reports and their findings."""
 
 from collections.abc import Callable
 from typing import Annotated
@@ -84,11 +84,12 @@ def _only_query_parameters(model: type[BaseModel]) -> Callable[[Request], None]:
     responses=error_responses(RequestValidationFailedError),
     summary="Start an annotation QC report",
     description=(
-        "Validate every active annotation in scope with the same checks as "
-        "writes, and keep one finding for each annotation with issues. Requires "
-        "the admin role: a global admin reports on one group or, with {}, on all "
-        "groups, and a group admin reports on its own group. A queued report of "
-        "the same scope is returned instead of duplicated."
+        "Validate every active annotation in the report's scope with the same "
+        "checks as writes, and keep one finding for each annotation with issues. "
+        "Requires the admin role: a global admin reports on one group or, with "
+        "{}, on all groups, and a group admin reports on its own group. If a "
+        "report of the same scope is already queued, that report is returned "
+        "instead of a new one."
     ),
     response_description="The created or reused report job",
 )
@@ -110,8 +111,9 @@ def start_qc_report(
     description=(
         "List QC reports newest first, with whether each report's findings can "
         "still be read. A global reader sees every report; other readers see "
-        "all-groups reports and their own group's reports. The list only narrows "
-        "discovery: any report can be read by ID. Requires the read role."
+        "all-groups reports and their own group's reports. This limit applies "
+        "only to the list: any report can be read by ID, with counts and "
+        "findings limited to the reader's scope. Requires the read role."
     ),
     response_description="One page of reports",
 )
@@ -164,7 +166,7 @@ def read_qc_report(
     description=(
         "List the findings of a succeeded report, in annotation ID order, within "
         "the caller's ownership scope as in annotation search. Findings are kept "
-        "only for the most recent completed report of each scope. Requires the "
+        "only for the most recent succeeded report of each scope. Requires the "
         "read role."
     ),
     response_description="One page of findings",

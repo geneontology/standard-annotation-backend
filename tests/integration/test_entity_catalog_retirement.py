@@ -124,7 +124,7 @@ def test_retirement_removes_membership_and_counts_identifiers(
 
     An annotation on a retired entity is kept unchanged.
     """
-    jobs, imports = services
+    _, imports = services
     _publish(imports, unit_of_work_factory, "mgi", "MGI:1", "MGI:2")
     _publish(imports, unit_of_work_factory, "rgd", "RGD:1")
     annotation_id = seed_annotation("MGI:1")  # active annotation on a retired entity
@@ -140,7 +140,9 @@ def test_retirement_removes_membership_and_counts_identifiers(
                 )
             )
         ) == ["RGD:1"]
-        assert session.get(AnnotationRecord, annotation_id) is not None
+        annotation = session.get(AnnotationRecord, annotation_id)
+        assert annotation is not None
+        assert annotation.current_version == 1
         audits = list(
             session.scalars(
                 select(AuditEventRecord).where(
@@ -150,7 +152,7 @@ def test_retirement_removes_membership_and_counts_identifiers(
         )
         assert len(audits) == 1
         retired_snapshot_id = audits[0].details["snapshot_id"]
-    with jobs._unit_of_work_factory() as uow:
+    with unit_of_work_factory() as uow:
         record = uow.jobs.get(job_id)
         assert record is not None
         assert record.status == JobStatus.SUCCEEDED.value

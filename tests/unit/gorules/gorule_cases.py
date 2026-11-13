@@ -7,6 +7,7 @@ its rule examines, so a failing assertion points at that rule.
 from collections.abc import Iterable, Mapping
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.qc_reports import issue_type_of
 from standard_annotation_backend.domain.schema_artifacts import load_evidence_codes
 from standard_annotation_backend.domain.semantic_validation.checked_ancestors import (
     BP_ROOT,
@@ -20,6 +21,10 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     DatabaseEntry,
     RuleData,
+)
+from standard_annotation_backend.domain.semantic_validation.rules import (
+    SemanticCheck,
+    validate_semantics,
 )
 from standard_annotation_backend.domain.validation import ValidationIssue
 
@@ -81,6 +86,25 @@ def facts(
         rule_data=rule_data,
         retracted_pmids=frozenset(retracted),
     )
+
+
+def go_rule(issue_type: str) -> SemanticCheck:
+    """Return a check that reports one GO Rule's issues from full validation.
+
+    The check runs `validate_semantics`, the validation that annotation writes and
+    QC reports use, and keeps the issues a QC report counts under `issue_type`. A
+    rule's tests therefore pass only if the validator runs the rule and the QC
+    report issue catalog lists the rule's issue type.
+    """
+
+    def check(subject: Annotation, facts: AnnotationFacts) -> list[ValidationIssue]:
+        return [
+            issue
+            for issue in validate_semantics(subject, facts)
+            if issue_type_of(issue) == issue_type
+        ]
+
+    return check
 
 
 def found(issues: Iterable[ValidationIssue]) -> list[tuple[str, tuple[str | int, ...]]]:

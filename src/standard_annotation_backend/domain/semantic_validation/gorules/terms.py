@@ -1,4 +1,8 @@
-"""Check the GO Rules about the annotated term, evidence, and relation."""
+"""Check the GO Rules about the annotated term, evidence, and relation.
+
+A term is under another GO term when it is that term or one of its
+`rdfs:subClassOf` descendants.
+"""
 
 from collections.abc import Iterator
 
@@ -32,7 +36,10 @@ from standard_annotation_backend.domain.validation import (
 )
 
 BINDING_TERMS = frozenset({"GO:0005488", "GO:0005515"})
-"""Binding and protein binding, which GORULE:0000002 and 0000005 name directly."""
+"""Binding and protein binding, which GORULE:0000002 and GORULE:0000005 name.
+
+These rules match the two terms exactly, not their descendants.
+"""
 
 _INFERRED_BINDING_EVIDENCE = frozenset({"IEA", "ISS", "ISO", "ISM", "ISA", "IBA"})
 _TERM_LOCATION = (ANNOTATION_ROOT, "ontology_class_id")
@@ -95,7 +102,7 @@ def gorule_0000005(
 def gorule_0000006(
     annotation: Annotation, facts: AnnotationFacts
 ) -> Iterator[ValidationIssue]:
-    """Report IEP or HEP evidence on a term not under the BP root."""
+    """Report IEP or HEP evidence on a term that is not a biological process term."""
     term = annotated_term(annotation, facts)
     if (
         term is not None
@@ -147,12 +154,12 @@ def gorule_0000011(
 def gorule_0000015(
     annotation: Annotation, facts: AnnotationFacts
 ) -> Iterator[ValidationIssue]:
-    """Report interacting taxa on the wrong term, or equal to the entity's taxon.
+    """Report disallowed interacting taxa, or ones equal to the entity's taxon.
 
     Interacting taxa are allowed only for terms under `GO:0044419`,
     `GO:0043903`, or `GO:0018995`. A taxon equal to the entity's own
-    `db_object_taxon_id` is reported at that taxon; it cannot be checked when
-    the entity is unknown.
+    `db_object_taxon_id` is reported at its position in `interacting_taxon_id`.
+    That part is not checked when the entity is unknown.
     """
     taxa = annotation.interacting_taxon_id or []
     if not taxa:
@@ -177,7 +184,10 @@ def gorule_0000015(
 def gorule_0000039(
     annotation: Annotation, facts: AnnotationFacts
 ) -> Iterator[ValidationIssue]:
-    """Report a ComplexPortal entity annotated to a term under `GO:0032991`."""
+    """Report a ComplexPortal entity annotated to a term under `GO:0032991`.
+
+    `GO:0032991` is protein-containing complex.
+    """
     term = annotated_term(annotation, facts)
     if (
         term is not None
@@ -202,8 +212,9 @@ def gorule_0000046(
 ) -> Iterator[ValidationIssue]:
     """Report a self-binding annotation whose `with_or_from` omits its subject.
 
-    The rule applies to terms under any of the six self-binding terms when
-    `with_or_from` has values; then it must contain `db_object_id`.
+    The rule applies only when `with_or_from` has values and the term is under
+    one of `SELF_BINDING_TERMS`. Then `with_or_from` must contain
+    `db_object_id`.
     """
     term = annotated_term(annotation, facts)
     with_or_from = annotation.with_or_from or []
@@ -230,9 +241,10 @@ def gorule_0000053(
 def gorule_0000061(
     annotation: Annotation, facts: AnnotationFacts
 ) -> Iterator[ValidationIssue]:
-    """Report a relation the term's branch does not allow.
+    """Report a relation that GORULE:0000061 does not allow for the annotated term.
 
-    The issue lists the allowed relations. `negation` has no effect.
+    `allowed_relations` decides which relations are allowed, and the issue lists
+    them. Negated annotations are checked the same way.
     """
     term = annotated_term(annotation, facts)
     if term is None:
@@ -252,9 +264,17 @@ def allowed_relations(
 ) -> frozenset[str]:
     """Return the relations GORULE:0000061 allows for a term.
 
-    A root uses its own row. Otherwise the term's branch decides. A CC term
-    under both `GO:0032991` and `GO:0110165` or `GO:0044423` gets the union of
-    those rows, and a CC term under neither gets no relation.
+    Each of the three GO root terms has its own relations. Any other molecular
+    function term gets the molecular function relations, and any other biological
+    process term the biological process relations. Any other term gets the
+    protein-containing complex relations if it is under `GO:0032991`, plus the
+    anatomical structure relations if it is under `GO:0110165` (cellular
+    anatomical structure) or `GO:0044423` (virion component). A term under none
+    of these gets no relations.
+
+    Args:
+        term_id: The annotated term.
+        checked_ancestors: The checked ancestors the term falls under.
     """
     if term_id in _ROOT_RELATIONS:
         return _ROOT_RELATIONS[term_id]

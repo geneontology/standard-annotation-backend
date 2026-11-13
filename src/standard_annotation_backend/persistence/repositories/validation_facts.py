@@ -1,4 +1,9 @@
-"""Gather the facts semantic validation needs from the active reference data."""
+"""Read the facts that semantic validation needs from the active reference data.
+
+A fact is a value a check reads about an annotation, such as whether a term is
+obsolete, the entity's type, or whether a cited publication is retracted. This
+module reads the facts from the database; the checks themselves run without one.
+"""
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import replace
@@ -74,24 +79,29 @@ class ValidationFactsRepository:
     ) -> tuple[AnnotationFacts, ...]:
         """Return the facts about each annotation, in the same order.
 
-        The active snapshots are resolved once, first, and every later query reads
+        The active snapshots are looked up once, first, and every later query reads
         only those snapshots. One call therefore never mixes two snapshots of an
         ontology or of the rule data, even if another one activates while it runs.
-        Queries are batched, so one call serves one annotation or thousands.
+        Queries are batched, so one call can handle one annotation or thousands.
 
         Besides each identifier's status, the facts include the subsets of each
-        term, the checked ancestors each current GO term and the entity's type fall under,
-        the rule data, and the references listed as retracted.
+        term, the checked ancestors of each current GO term and of the entity's
+        type, the rule data, and the references listed as retracted. Checked
+        ancestors are the GO terms, such as the three GO roots, for which some rule
+        asks whether a term is that term or one of its descendants;
+        `checked_ancestor_terms` lists them.
 
         Args:
             annotations: Structurally valid annotations to describe.
-            peers: Each annotation's duplicate peer IDs, in the same order. A
-                write's peers come from its prepare step, taken under locks.
+            peers: Each annotation's duplicate peers, the IDs of other active
+                annotations it duplicates, in the same order. For a write they
+                come from `AnnotationRepository.prepare_create` or
+                `prepare_update`, which find them while holding the write locks.
             ontologies: The identifier prefixes of each configured ontology, keyed
                 by ontology key. GO must be among them.
-            snapshots: Snapshots the caller already resolved with
-                `active_snapshots`, such as a report that records which ones it
-                used. Resolved here when omitted.
+            snapshots: Snapshots the caller already looked up with
+                `active_snapshots`, for example a QC report that records which
+                ones it used. Looked up here when omitted.
 
         Returns:
             One `AnnotationFacts` per annotation.
@@ -190,16 +200,24 @@ class ValidationFactsRepository:
         annotations: Sequence[Annotation],
         ontologies: Mapping[str, tuple[str, ...]],
     ) -> ReplacementFacts:
-        """Return facts about the annotations' terms and their replacement chains.
+        """Return facts about the annotations' terms and the terms that replace them.
 
-        The active snapshots are resolved once. Each identifier is read from the
-        snapshot of the ontology owning its prefix; then each obsolete term's only
-        replacement and each alternative ID's primary term is read too, until no
-        chain reaches a term not yet read.
+        A replacement chain starts at an identifier an annotation uses and steps
+        from an alternative ID to its primary term, or from an obsolete term to its
+        only `replaced_by` term. The active snapshots are looked up once, and each
+        identifier is read from the snapshot of the ontology that owns its prefix.
+        Reading continues along every chain until it reaches a term already read,
+        a term with no further step, or an identifier no configured ontology owns.
+
+        Args:
+            annotations: Structurally valid annotations to describe.
+            ontologies: The identifier prefixes of each configured ontology, keyed
+                by ontology key.
 
         Raises:
             ReferenceDataUnavailableError: If a configured ontology or the go-site
                 rule data has no active snapshot.
+            StoredDataError: If the stored rule data cannot be read.
         """
         snapshots = self.active_snapshots(ontologies)
         version_by_prefix = {
@@ -239,10 +257,11 @@ class ValidationFactsRepository:
     def active_snapshots(
         self, ontologies: Mapping[str, Iterable[str]]
     ) -> ActiveSnapshots:
-        """Return the active snapshots of every configured ontology and the rule data.
+        """Return the active snapshot of each configured ontology and of the rule data.
 
         Args:
-            ontologies: The configured ontologies, keyed by ontology key.
+            ontologies: The configured ontologies, keyed by ontology key. Only the
+                keys are used.
 
         Raises:
             ReferenceDataUnavailableError: If any of them has no active snapshot.
@@ -278,10 +297,11 @@ class ValidationFactsRepository:
         )
 
     def reference_versions(self, snapshots: ActiveSnapshots) -> ReferenceDataVersions:
-        """Describe the reference data of `snapshots` and the active entity catalogs.
+        """Return version details of `snapshots` and of the active entity catalogs.
 
-        Entity facts are always read from the active catalogs, so the catalogs
-        active when this runs are the ones listed.
+        QC reports record these to show which data they checked against. Entity
+        facts are not tied to a snapshot; they are always read from the active
+        entity catalogs, so this lists the catalogs active when it runs.
         """
         ontology_rows = self.session.execute(
             select(
@@ -328,10 +348,15 @@ class ValidationFactsRepository:
         )
 
     def _term_facts(self, wanted: dict[UUID, set[str]]) -> dict[str, TermFact]:
-        """Return a fact for each wanted identifier in its ontology's snapshot.
+        """Return a fact for each wanted identifier from its ontology's snapshot.
 
-        A term gives `current` or `obsolete`; otherwise an alternative identifier
-        gives `alternate`; anything else is `unknown`.
+        An identifier that names a term gets the status `current` or `obsolete`.
+        One that is an alternative identifier gets `alternate`, and any other gets
+        `unknown`.
+
+        Args:
+            wanted: The identifiers to look up, keyed by the version ID of the
+                snapshot to read them from.
         """
         facts: dict[str, TermFact] = {}
         for version_id, identifiers in wanted.items():
@@ -404,10 +429,16 @@ class ValidationFactsRepository:
         term_ids: Collection[str],
         checked_ancestors: frozenset[str],
     ) -> dict[str, frozenset[str]]:
-        """Return the checked ancestors each term is, or descends from, in one GO snapshot.
+        """Return the checked ancestors that each term is or descends from in GO.
 
-        Every term has a reflexive closure row, so a term that is itself a checked ancestor
-        lists it.
+        Descent follows `rdfs:subClassOf` in one GO snapshot. The closure table,
+        which stores each term's ancestors, also links every term to itself, so a
+        term that is itself a checked ancestor lists itself.
+
+        Args:
+            version_id: The GO snapshot to read.
+            term_ids: The terms to look up.
+            checked_ancestors: The GO terms to test each term against.
         """
         found: dict[str, set[str]] = {}
         for batch in batched(sorted(term_ids), _QUERY_BATCH_SIZE, strict=False):

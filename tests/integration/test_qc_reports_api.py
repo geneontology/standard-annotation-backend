@@ -166,7 +166,11 @@ def test_only_admins_start_reports_and_group_admins_only_for_their_group(
     body: dict[str, object],
     expected: int,
 ) -> None:
-    """A group-restricted admin's report always covers its own group."""
+    """Only admins start reports, and a group-restricted admin reports on its group.
+
+    Its report covers its own group whether or not it names it; naming another
+    group, or starting without the admin role, is forbidden and dispatches nothing.
+    """
     _use(role, scope)
     response = integration_api_client.post(PATH, json=body)
 
@@ -215,7 +219,12 @@ def test_readers_see_findings_within_their_scope_and_counts_by_group(
     scope: str,
     visible: int,
 ) -> None:
-    """Self readers list their own annotations' findings; counts are by group."""
+    """Each reader lists only the findings its scope can read.
+
+    A self reader sees findings for annotations it created, a group reader its
+    group's, and a global reader all. Restricted readers' counts cover only
+    their group.
+    """
     _use("read", scope)
     summary = integration_api_client.get(f"{PATH}/{completed_report}").json()
     findings = integration_api_client.get(f"{PATH}/{completed_report}/findings").json()
@@ -282,33 +291,45 @@ def test_findings_reject_unknown_query_parameters_and_issue_types(
     assert bad_type.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
-def test_older_findings_expire_but_the_summary_remains(
+def test_a_newer_report_expires_older_findings_of_its_scope_only(
     integration_api_client: TestClient,
     completed_report: UUID,
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
 ) -> None:
-    """After a newer all-groups report, the older one's findings return 410."""
-    newer = UUID(integration_api_client.post(PATH, json={}).json()["job_id"])
+    """After a newer all-groups report, the older one's findings return 410.
+
+    The older report's summary keeps its counts, and a report of one group,
+    which is a different scope, keeps its findings.
+    """
+    group = _start(integration_api_client, {"owning_group_id": "MGI"})
+    _run(unit_of_work_factory, database_engine, group)
+    newer = _start(integration_api_client, {})
     _run(unit_of_work_factory, database_engine, newer)
 
     expired = integration_api_client.get(f"{PATH}/{completed_report}/findings")
     summary = integration_api_client.get(f"{PATH}/{completed_report}")
     current = integration_api_client.get(f"{PATH}/{newer}/findings")
+    group_findings = integration_api_client.get(f"{PATH}/{group}/findings")
 
     assert expired.status_code == status.HTTP_410_GONE
     assert expired.json()["error"]["code"] == "report_findings_expired"
     assert summary.status_code == status.HTTP_200_OK
     assert summary.json()["annotations_with_issues"] == 3
     assert current.json()["total"] == 3
+    assert group_findings.status_code == status.HTTP_200_OK
+    assert group_findings.json()["total"] == 2
 
 
-def test_unfinished_unknown_and_non_report_jobs(
+def test_unfinished_reports_have_no_findings_and_other_ids_are_not_found(
     integration_api_client: TestClient,
     sent: list[UUID],
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
-    """Unfinished reports have no findings yet; other IDs are not reports."""
+    """Findings of a queued report return 409, and its summary shows it queued.
+
+    An unknown ID and the ID of a job that is not a QC report both return 404.
+    """
     queued = integration_api_client.post(PATH, json={}).json()["job_id"]
     other_job = create_job(
         unit_of_work_factory,
@@ -339,7 +360,10 @@ def test_a_report_finishing_during_a_read_never_yields_an_empty_page(
     database_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A newer report that completes mid-read gives the older findings or `410`."""
+    """A newer report finishing during a findings read never yields an empty page.
+
+    The read returns the older report's findings or `410`.
+    """
     newer = UUID(integration_api_client.post(PATH, json={}).json()["job_id"])
     original = QcReportRepository.has_newer_report
     finished: list[bool] = []
@@ -373,7 +397,11 @@ def test_reports_are_listed_newest_first_with_findings_availability(
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
 ) -> None:
-    """Only the latest succeeded report of a scope offers findings, and reads agree."""
+    """The list is newest first; only a scope's latest succeeded report has findings.
+
+    Each report's `findings_available` agrees with reading its findings: `200`
+    for the latest report, `410` for the one it replaced.
+    """
     older = _start(integration_api_client, {})
     _run(unit_of_work_factory, database_engine, older)
     newer = _start(integration_api_client, {})

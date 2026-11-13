@@ -269,15 +269,13 @@ def test_annotation_openapi_documents_success_response_headers(
 def test_validated_writes_document_one_issue_code_and_missing_reference_data(
     client: TestClient, path: str, method: str, invalid_code: str
 ) -> None:
-    """Validated writes report issues with one code, and 503 if data is missing."""
+    """Validated writes document their 422 codes and a 503 for missing reference data."""
     responses = client.get("/openapi.json").json()["paths"][path][method]["responses"]
 
     assert f"`{invalid_code}`" in responses["422"]["description"]
     assert "`request_validation_error`" in responses["422"]["description"]
-    assert "unknown_db_object_id" not in responses["422"]["description"]
     assert "`reference_data_unavailable`" in responses["503"]["description"]
     assert "`credential_storage_unavailable`" in responses["503"]["description"]
-    assert "duplicate_annotation" not in responses.get("409", {}).get("description", "")
 
 
 def test_annotation_search_docs_list_query_errors_and_both_unavailable_causes(

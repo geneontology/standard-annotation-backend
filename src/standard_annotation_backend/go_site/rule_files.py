@@ -2,11 +2,11 @@
 
 The `rules` refresh reads six files from one commit of the go-site repository.
 Each parser below validates one file and keeps only the values the rules use.
-Fields SABE does not read are ignored, so a field added upstream for people does
-not stop a refresh. The values the rules do read are checked strictly: a
-malformed identifier, a pattern Python cannot compile, or an entry that repeats
-an earlier one makes the file invalid. The refresh then fails and the previous
-snapshot stays active.
+Fields SABE does not read are ignored, so a new field added upstream does not make
+a refresh fail. The values the rules do read are checked strictly: a malformed
+identifier, a pattern Python cannot compile, or an entry that repeats an earlier
+one makes the file invalid. The refresh then fails, and the rule data stored by
+the last successful refresh stays in use.
 
 Issues give the location of each problem within its file, never the rejected
 value.
@@ -143,7 +143,10 @@ _GoRefId = Annotated[str, StringConstraints(pattern=r"^GO_REF:[0-9]{7}$")]
 _GoTermId = Annotated[str, StringConstraints(pattern=r"^GO:[0-9]{7}$")]
 _EcoId = Annotated[str, StringConstraints(pattern=r"^ECO:[0-9]{7}$")]
 _RelationId = Annotated[str, StringConstraints(pattern=r"^(RO|BFO|GOREL):[0-9]{7}$")]
-"""A relation CURIE, matching go-site's `extensions-constraints.schema.yaml`."""
+"""A relation ID such as `RO:0002233`.
+
+The pattern matches the one in go-site's `extensions-constraints.schema.yaml`.
+"""
 
 
 class _Entry(BaseModel):
@@ -234,7 +237,11 @@ class _EcoConstraint(_Entry):
 
 
 class _EcoFile(_Entry):
-    """Read `eco-usage-constraints.yaml`; its `entity_types` list only holds anchors."""
+    """Read `eco-usage-constraints.yaml`.
+
+    The file's top-level `entity_types` list only defines YAML anchors that the
+    entries refer to, so it is not read.
+    """
 
     eco_usage_constraints: tuple[_EcoConstraint, ...]
 
@@ -242,7 +249,8 @@ class _EcoFile(_Entry):
 class _ExtensionConstraint(_Entry):
     """Read one entry of `extensions-constraints.yaml`.
 
-    The GAF-style `relation` label is not read; annotations name relations by ID.
+    The `relation` field, a relation name as written in GAF files, is not read,
+    because annotations name relations by ID.
     """
 
     relation_id: _RelationId | None = None

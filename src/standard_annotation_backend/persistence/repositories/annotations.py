@@ -47,7 +47,7 @@ from standard_annotation_backend.persistence.repositories.pagination import (
 )
 
 _PEER_BATCH_SIZE = 2_000
-"""How many lookup values one batched query reads."""
+"""The most lookup values one query in a batched read sends to the database."""
 
 
 def _closure_condition(term_id: str, predicate_id: str) -> ColumnElement[bool]:
@@ -174,11 +174,13 @@ def _ownership_conditions(scope: OwnershipScope) -> list[ColumnElement[bool]]:
 
 @dataclass(frozen=True, slots=True)
 class PreparedCreate:
-    """A new annotation whose write locks are held by the preparing transaction.
+    """Hold a new annotation after `AnnotationRepository.prepare_create` locked it.
 
     Attributes:
         data: The annotation's stored form and duplicate lookup values.
         duplicate_peer_ids: Active annotations that duplicate it.
+        session: The session whose transaction holds the locks. `create` accepts
+            the value only in this session.
     """
 
     data: AnnotationPersistenceData
@@ -188,13 +190,15 @@ class PreparedCreate:
 
 @dataclass(frozen=True, slots=True)
 class PreparedUpdate:
-    """A locked annotation and its replacement, checked against the expected version.
+    """Hold a locked annotation and its replacement after `prepare_update` checks.
 
     Attributes:
         record: The current annotation, locked for update.
         data: The replacement's stored form and duplicate lookup values.
         duplicate_peer_ids: Other active annotations that duplicate the
             replacement.
+        session: The session whose transaction holds the locks. `update` accepts
+            the value only in this session.
     """
 
     record: AnnotationRecord
@@ -211,12 +215,12 @@ class AnnotationRepository:
 
     Creates and updates happen in two steps. `prepare_create` and
     `prepare_update` take the locks a write needs and return the annotation's
-    duplicate peers; the caller validates the annotation, and then `create` or
-    `update` writes it. A write accepts only something prepared in the same
-    session, so no write can skip the locks. `soft_delete` checks the expected
-    version and takes its locks itself. All of them use shared private helpers for
-    the underlying database writes so annotations and their version histories
-    remain consistent.
+    duplicate peers, the other active annotations it would duplicate. The caller
+    validates the annotation, and then `create` or `update` writes it. Each
+    accepts only a value prepared in the same session, so no write can skip the
+    locks. `soft_delete` checks the expected version and takes its locks itself.
+    All of them use shared private helpers for the underlying database writes so
+    annotations and their version histories remain consistent.
 
     Args:
         session: Session used for every query and write.
@@ -336,6 +340,9 @@ class AnnotationRepository:
     ) -> tuple[AnnotationRecord, ...]:
         """Return the next active annotations in `annotation_id` order, without locks.
 
+        QC reports and term replacement jobs read annotations in batches by calling
+        this repeatedly, passing the last ID of the previous batch as `after`.
+
         Args:
             after: Return only annotations whose ID is greater; `None` starts at
                 the beginning.
@@ -410,11 +417,11 @@ class AnnotationRepository:
         """Return each annotation's active duplicate peers, for a whole batch.
 
         Peers share the annotation's signature and at least one of its
-        references, as in `find_duplicate_peer_ids`. Nothing is locked, so the
-        result suits reports, not writes.
+        references, as in `find_duplicate_peer_ids`. Nothing is locked, so use
+        this for reports, not for writes.
 
         Args:
-            keys: Each annotation's duplicate key.
+            keys: Each annotation's duplicate key, keyed by annotation ID.
 
         Returns:
             Each annotation's peers, in ID order, excluding itself.
@@ -464,9 +471,10 @@ class AnnotationRepository:
         }
 
     def creators(self, annotation_ids: Collection[UUID]) -> dict[UUID, str]:
-        """Return the actor of each annotation's first version.
+        """Return the actor who created each annotation, from its first version.
 
-        This is the actor a self-scoped token must match to read the annotation.
+        A caller whose authorization has `self` scope may read only the
+        annotations it created.
         """
         found: dict[UUID, str] = {}
         for batch in batched(sorted(annotation_ids), _PEER_BATCH_SIZE, strict=False):
@@ -485,9 +493,11 @@ class AnnotationRepository:
     def prepare_create(self, annotation: Annotation) -> PreparedCreate:
         """Take the locks a create needs and find the annotation's duplicates.
 
-        The shared global annotation-write lock and the candidate's signature lock
-        are held until the transaction ends, so no concurrent write can create a
-        duplicate of it before this transaction commits.
+        The global annotation-write lock is taken in shared mode, which lets other
+        ordinary writes run but waits for exclusive operations such as a GPAD
+        publication. The annotation's signature lock is also taken. Both are held
+        until the transaction ends, so no concurrent write can create a duplicate
+        of the annotation before this transaction commits.
 
         Raises:
             TypeError: If `annotation` is not a validated `Annotation`.
@@ -512,6 +522,12 @@ class AnnotationRepository:
         change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         """Store a prepared annotation as version 1.
+
+        Args:
+            prepared: The result of `prepare_create` in this session.
+            actor_id: Identifier for the person or process creating the annotation.
+            owning_group_id: Identifier of the responsible group.
+            change_source: Workflow recorded in version history; defaults to API.
 
         Raises:
             ValueError: If `prepared` came from another session.
@@ -597,6 +613,11 @@ class AnnotationRepository:
         change_source: ChangeSource = ChangeSource.API,
     ) -> AnnotationRecord:
         """Save a prepared replacement as the annotation's next version.
+
+        Args:
+            prepared: The result of `prepare_update` in this session.
+            actor_id: Identifier for the person or process making the change.
+            change_source: Workflow recorded in version history; defaults to API.
 
         Raises:
             ValueError: If `prepared` came from another session.

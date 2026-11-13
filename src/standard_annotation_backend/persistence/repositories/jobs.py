@@ -112,21 +112,31 @@ class JobRepository:
         )
 
     def lock_qc_report_starts(self) -> None:
-        """Serialize creation of QC report jobs until the transaction ends."""
+        """Make QC report job creation run one request at a time.
+
+        The lock is held until the transaction ends, so two requests cannot both
+        find no queued report and both create one.
+        """
         acquire_transaction_lock(self.session, LockNamespace.QC_REPORT_START)
 
     def lock_term_replacement_starts(self) -> None:
-        """Serialize creation of term replacement jobs until the transaction ends."""
+        """Make term replacement job creation run one request at a time.
+
+        The lock is held until the transaction ends, so two requests cannot both
+        find no queued job and both create one.
+        """
         acquire_transaction_lock(self.session, LockNamespace.TERM_REPLACEMENT_START)
 
     def find_queued(
         self, *, job_type: JobType, parameters: dict[str, object]
     ) -> JobRecord | None:
-        """Lock and return the oldest queued job of a type with exactly these parameters.
+        """Lock and return the oldest queued job with this type and these parameters.
 
-        The row stays locked until the transaction ends, so the job cannot start
-        until a trigger that joined it commits. A job that starts first is no
-        longer queued once its start commits, and is not returned.
+        Callers use this to reuse a queued job instead of creating another. The
+        parameters must match exactly. The row stays locked until the
+        transaction ends, so the job cannot start until the caller that reused it
+        commits. A job whose start has already committed is running, not queued,
+        and is not returned.
         """
         return self.session.scalar(
             select(JobRecord)

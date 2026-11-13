@@ -1,10 +1,11 @@
-"""Allow term replacement jobs and rename the automatic-replacement change source.
+"""Allow term replacement jobs and rename the change source of term replacements.
 
-Adds `term_replacement` to the job types the `job` table accepts, and renames the
-stored change source `ontology_refresh` to `term_replacement` on annotation
-versions and in audit event details. Downgrading reverses the rename and deletes
-term replacement jobs and their job lifecycle audit events, keeping the
-`annotation.updated` events of the versions they wrote.
+Adds `term_replacement` to the job types the `job` table accepts. Annotation
+versions written by automatic term replacement were recorded with the change
+source `ontology_refresh`; that value is renamed to `term_replacement` on
+annotation versions and in audit event details. Downgrading reverses the rename
+and deletes term replacement jobs and their `job.*` audit events. The annotation
+versions those jobs wrote, and their `annotation.updated` audit events, are kept.
 
 Revision ID: 03a2094d9969
 Revises: 7954a08de314
@@ -27,7 +28,7 @@ _JOB_TYPES = (
 
 
 def upgrade() -> None:
-    """Allow term replacement jobs and rename the automatic-replacement source."""
+    """Allow term replacement jobs and rename the `ontology_refresh` change source."""
     op.drop_constraint(op.f("ck_job_type_allowed"), "job", type_="check")
     op.create_check_constraint(
         op.f("ck_job_type_allowed"),
@@ -45,7 +46,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove term replacement jobs and restore the earlier source name."""
+    """Delete term replacement jobs and restore the `ontology_refresh` source name."""
     op.execute(
         "UPDATE audit_event SET details = jsonb_set(details, '{change_source}', "
         "'\"ontology_refresh\"') WHERE details->>'change_source' = 'term_replacement'"

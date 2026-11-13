@@ -3,8 +3,8 @@
 `config/sources.yaml` lists the authorization source, the go-site repository
 whose metadata files GO Rules read, each ontology source, each entity source, and
 each group's GPAD annotation source. Most entries are a file in a GitHub
-repository or an HTTPS URL. The GO Rule entry names a GitHub repository and ref,
-because SABE reads a fixed set of files from it.
+repository or an HTTPS URL. The `rules` entry names only a GitHub repository and a
+ref (a branch, tag, or commit), because SABE reads a fixed set of files from it.
 `Settings` validates the file when it is constructed, so an invalid file stops the
 API, worker, scheduler, and CLI at startup instead of failing later inside a job.
 """
@@ -65,7 +65,7 @@ OntologyPrefixes = Annotated[
 ClosurePredicates = Annotated[
     tuple[TrimmedNonBlankString, ...], AfterValidator(_without_repeats)
 ]
-"""The relationships whose closure SABE computes for an ontology; none repeated."""
+"""The relations SABE follows to compute each term's ancestors; none repeated."""
 
 RequiredSubsets = Annotated[
     tuple[TrimmedNonBlankString, ...], AfterValidator(_without_repeats)
@@ -176,6 +176,9 @@ class GitHubRulesSource(BaseModel):
     Attributes:
         paths: The files read from the repository. They cannot be configured,
             because SABE has a parser for each one.
+        repository: The repository in `owner/repository` form, such as
+            `geneontology/go-site`.
+        ref: The branch, tag, or commit to read, such as `master`.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -200,10 +203,11 @@ class GitHubOntologySource(GitHubSource):
         document_ontology_id: The `ontology:` header value the file must declare,
             such as `go` or `cl/cl-basic`.
         prefixes: Identifier prefixes the ontology owns, such as `GO`.
-        closure_predicates: Relationships whose closure SABE computes, such as
-            `rdfs:subClassOf`. Omit them to load the ontology as a term list.
+        closure_predicates: Relations SABE follows to compute each term's
+            ancestors, such as `rdfs:subClassOf`. Omit them to load the terms
+            without computing ancestors.
         required_subsets: Subsets the file must declare, such as
-            `gocheck_do_not_annotate`. A file that lacks one is refused.
+            `gocheck_do_not_annotate`. A refresh rejects a file that lacks one.
     """
 
     document_ontology_id: TrimmedNonBlankString
@@ -219,10 +223,11 @@ class HttpsOntologySource(HttpsSource):
         document_ontology_id: The `ontology:` header value the file must declare,
             such as `go` or `cl/cl-basic`.
         prefixes: Identifier prefixes the ontology owns, such as `GO`.
-        closure_predicates: Relationships whose closure SABE computes, such as
-            `rdfs:subClassOf`. Omit them to load the ontology as a term list.
+        closure_predicates: Relations SABE follows to compute each term's
+            ancestors, such as `rdfs:subClassOf`. Omit them to load the terms
+            without computing ancestors.
         required_subsets: Subsets the file must declare, such as
-            `gocheck_do_not_annotate`. A file that lacks one is refused.
+            `gocheck_do_not_annotate`. A refresh rejects a file that lacks one.
     """
 
     document_ontology_id: TrimmedNonBlankString
@@ -279,10 +284,11 @@ class SourcesFile(BaseModel):
     def require_go_with_what_go_rules_use(
         cls, value: dict[str, GitHubOntologySource | HttpsOntologySource]
     ) -> dict[str, GitHubOntologySource | HttpsOntologySource]:
-        """Require GO with subclass closure and the subsets GO Rules check.
+        """Require a GO entry with what GO Rules and descendant searches need.
 
-        GO Rules and closure search depend on them, so a GO entry without them
-        would let those checks silently stop working.
+        The entry must list `rdfs:subClassOf` in `closure_predicates` and every
+        subset GO Rules check in `required_subsets`. Without them, GO Rules and
+        searches that include a term's descendants would silently stop working.
         """
         go = value.get(GO_ONTOLOGY_KEY)
         if go is None:
@@ -308,7 +314,7 @@ class SourcesFile(BaseModel):
     def require_one_ontology_per_prefix(
         cls, value: dict[str, GitHubOntologySource | HttpsOntologySource]
     ) -> dict[str, GitHubOntologySource | HttpsOntologySource]:
-        """Reject a prefix claimed twice, so each identifier has one ontology."""
+        """Reject a prefix two ontologies share, so each identifier has one ontology."""
         owners: dict[str, list[str]] = {}
         for key, source in value.items():
             for prefix in source.prefixes:

@@ -5,8 +5,8 @@
 are recorded the same way. Instead of sending each job to a Celery worker, it
 runs the job in this process and waits for it. This is the supported way to load
 authorization into a new database, before anyone holds a token for the admin API.
-Annotation cutovers are available only through the admin API. Term replacement jobs
-queued by the refreshes run in this process afterward, once each.
+Annotation cutovers are available only through the admin API. After the
+refreshes, any term replacement jobs they queued also run in this process.
 """
 
 import argparse
@@ -85,8 +85,10 @@ def run_refreshes(
 def run_replacements(runtime: WorkerRuntime, queued: Sequence[Job]) -> tuple[Job, ...]:
     """Run each queued term replacement job once, in this process.
 
-    Activations and publications queue these jobs; a worker would run them
-    from Celery. Several triggers can share one job, so each is run once.
+    Ontology activations and annotation publications queue these jobs, which a
+    Celery worker would otherwise run. Several refreshes can queue the same job,
+    so each distinct job runs once. A job that raises is logged and reported in
+    whatever state it reached.
 
     Returns:
         The state of every replacement job after it ran.

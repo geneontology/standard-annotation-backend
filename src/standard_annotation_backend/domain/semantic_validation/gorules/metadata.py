@@ -80,8 +80,9 @@ def gorule_0000043(
     When the entry sets `allowed_reference`, at least one reference must match
     it in full. Its `with_presence` decides whether `with_or_from` must be
     non-empty (`mandatory`) or empty (`disallowed`); a `conditional` entry
-    chooses one from its condition. The complex condition cannot be evaluated
-    for an unknown entity, so its requirement is then not checked.
+    chooses one from its condition. The `entity_is_complex` condition needs the
+    subject's entity, so when the entity is unknown the `with_or_from`
+    requirement is not checked.
     """
     data = facts.rule_data
     if data is None:
@@ -140,8 +141,9 @@ def gorule_0000058(
     prefix among `namespaces`, has a `primary_root_terms` entry the annotated
     term falls under, and has no `cardinality` or one no smaller than the number
     of the annotation's extensions with the same relation and prefix. An
-    extension whose relation has no entry does not conform. The annotated term
-    must be current, because its checked ancestors decide the roots.
+    extension whose relation has no entry does not conform. The rule reports
+    nothing unless the annotated term is current, because only a current term's
+    checked ancestors are known.
     """
     data = facts.rule_data
     extensions = annotation.annotation_extensions or []

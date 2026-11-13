@@ -1,16 +1,15 @@
 """Verify GORULE:0000046: self-binding annotations name their own subject."""
 
 import pytest
-from gorule_cases import annotation, facts, found, term
+from gorule_cases import annotation, facts, found, go_rule, term
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.semantic_validation.checked_ancestors import (
     MF_ROOT,
     SELF_BINDING_TERMS,
 )
-from standard_annotation_backend.domain.semantic_validation.gorules.terms import (
-    gorule_0000046,
-)
+
+rule = go_rule("gorule_0000046")
 
 
 def _self_binding(term_id: str, with_or_from: list[str]) -> Annotation:
@@ -27,7 +26,7 @@ def test_values_without_the_subject_are_an_issue(self_binding: str) -> None:
     """A term under any self-binding term must list `db_object_id` if it lists anything."""
     subject = _self_binding(self_binding, ["UniProtKB:Q1"])
 
-    issues = gorule_0000046(subject, facts({self_binding: term(MF_ROOT, self_binding)}))
+    issues = rule(subject, facts({self_binding: term(MF_ROOT, self_binding)}))
 
     assert found(issues) == [("gorule_0000046", ("annotation",))]
 
@@ -39,10 +38,7 @@ def test_values_with_the_subject_or_no_values_pass(with_or_from: list[str]) -> N
     subject = _self_binding(self_binding, with_or_from)
 
     assert (
-        found(
-            gorule_0000046(subject, facts({self_binding: term(MF_ROOT, self_binding)}))
-        )
-        == []
+        found(rule(subject, facts({self_binding: term(MF_ROOT, self_binding)}))) == []
     )
 
 
@@ -50,4 +46,4 @@ def test_other_terms_pass() -> None:
     """A term under no self-binding term is not checked."""
     subject = _self_binding("GO:0005515", ["UniProtKB:Q1"])
 
-    assert found(gorule_0000046(subject, facts({"GO:0005515": term(MF_ROOT)}))) == []
+    assert found(rule(subject, facts({"GO:0005515": term(MF_ROOT)}))) == []

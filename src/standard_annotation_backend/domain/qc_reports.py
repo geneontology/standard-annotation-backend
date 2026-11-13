@@ -1,9 +1,10 @@
-"""Describe annotation QC reports: their issue types, findings, and results.
+"""Define annotation QC reports: their issue types, findings, and results.
 
-A QC report validates every active annotation in its scope, all groups or one
-owning group, and keeps one finding for each annotation with at least one issue.
-Its counts by group and by issue type are kept permanently; its findings are
-kept only until a newer report of the same scope completes.
+A QC (quality control) report validates every active annotation in its scope,
+which is either all groups or one owning group. It records a finding for each
+annotation with at least one issue; the finding lists that annotation's issues.
+The report's counts by group and by issue type are kept permanently, but its
+findings are deleted when a newer report with the same scope completes.
 """
 
 from collections.abc import Mapping
@@ -32,8 +33,9 @@ _GO_RULE_URL = (
 class IssueType(StrEnum):
     """Name every kind of issue a QC report counts.
 
-    Semantic issues keep their own type. Every structural issue, whatever its
-    Pydantic type, counts as `structural`.
+    Issues from semantic validation, which checks an annotation against reference
+    data, other annotations, and GO Rules, keep their own type. Every issue from
+    schema validation counts as `structural`, whatever its Pydantic type.
     """
 
     UNKNOWN_ENTITY = "unknown_entity"
@@ -135,8 +137,8 @@ def issue_type_link(issue_type: IssueType) -> str | None:
 def issue_type_of(issue: ValidationIssue) -> IssueType:
     """Return the issue type a report counts an issue under.
 
-    Semantic issue types are listed in `IssueType`; every other type comes from
-    structural validation.
+    Every semantic issue type is a member of `IssueType`. Any other type comes
+    from schema validation and is counted as `structural`.
     """
     try:
         return IssueType(issue["type"])
@@ -152,8 +154,9 @@ class QcFinding:
         annotation_id: The annotation.
         annotation_version: The version that was checked.
         owning_group_id: The annotation's owning group.
-        created_by: The actor of the annotation's first version, which decides
-            whether a self-scoped reader may see the finding.
+        created_by: Who created the annotation's first version. A reader whose
+            authorization has `self` scope sees only findings for annotations
+            they created.
         issues: Every issue, in the format write responses use.
     """
 
@@ -165,7 +168,7 @@ class QcFinding:
 
     @property
     def issue_types(self) -> tuple[IssueType, ...]:
-        """Return each issue type the finding has, once, in catalog order."""
+        """Return each issue type the finding has, once, in `IssueType` order."""
         found = {issue_type_of(issue) for issue in self.issues}
         return tuple(issue_type for issue_type in IssueType if issue_type in found)
 
@@ -189,7 +192,12 @@ class OntologySnapshotUse:
 
 @dataclass(frozen=True, slots=True)
 class EntityCatalogUse:
-    """Identify one active entity catalog snapshot a report read."""
+    """Identify one active entity catalog snapshot a report read.
+
+    Attributes:
+        source_key: The configured entity source.
+        snapshot_id: The catalog snapshot.
+    """
 
     source_key: str
     snapshot_id: UUID
@@ -219,11 +227,13 @@ class QcReportResult:
         annotations_checked: Active annotations validated.
         annotations_with_issues: Annotations given a finding.
         reference_data: Every distinct set of reference data used, in the order
-            first used, starting with the set resolved when the report started.
-            Snapshots are resolved per batch, so a report that spans a refresh
-            lists more than one.
+            first used, starting with the set that was active when the report
+            started. The report looks up the active snapshots again for each
+            batch of annotations, so a report that runs while reference data is
+            refreshed lists more than one set.
         sabe_version: The SABE release that ran the report.
-        schema_version: The Standard Annotation schema package version.
+        schema_version: Version of the `go-standard-annotation-schema` package
+            the report validated with.
     """
 
     group_key: str | None

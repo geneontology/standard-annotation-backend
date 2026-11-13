@@ -1,11 +1,14 @@
 """Decide how obsolete terms and alternative IDs are replaced in annotations.
 
-The `term_replacement` job uses these rules after an ontology activation or an
-annotation publication. An identifier is replaceable when it is obsolete with
-exactly one `replaced_by`, or when it is an alternative ID of a primary term.
-Chains of such identifiers are followed within the identifier's own ontology to
-the current term at their end. A chain that ends at a term that is not current,
-leaves the ontology, or loops makes no replacement.
+The `term_replacement` job uses these functions after an ontology refresh
+activates a new snapshot or a GPAD import publishes a group's annotations. An
+identifier is replaceable when it is an obsolete term with exactly one
+`replaced_by` term, or an alternative ID of a primary term. A replacement may
+itself be replaceable, so SABE follows one replacement after another until it
+reaches a current term: one that is neither obsolete nor an alternative ID. This
+module calls that sequence a replacement chain. No replacement is made when the
+chain reaches a term that is unknown or cannot be replaced, names a term of
+another ontology, or returns to an identifier it already visited.
 """
 
 import json
@@ -31,10 +34,10 @@ type Count = Annotated[int, Field(ge=0)]
 
 
 def replacement_step(fact: TermFact) -> str | None:
-    """Return the identifier one step along a replacement chain, if there is one.
+    """Return the identifier that directly replaces a term, or `None`.
 
-    That is an alternative ID's primary term, or an obsolete term's only
-    `replaced_by`.
+    An alternative ID is replaced by its primary term. An obsolete term is
+    replaced by its `replaced_by` term only when it has exactly one.
     """
     if fact.status is TermStatus.ALTERNATE:
         return fact.primary_id
@@ -52,14 +55,16 @@ def replacement_for(
 
     Args:
         identifier: An identifier an annotation uses.
-        terms: Facts about the identifier and every term its chain reaches, each
-            from the active snapshot of the ontology that owns its prefix.
+        terms: Facts about the identifier and every term its replacement chain
+            reaches, each from the active snapshot of the ontology that owns its
+            prefix.
         ontology_of: The key of the configured ontology that owns each prefix.
 
     Returns:
-        The current term at the end of the identifier's chain, or `None` when
-        the identifier is current, is not replaceable, or its chain dead-ends,
-        loops, or leaves the identifier's ontology.
+        The current term at the end of the identifier's replacement chain, or
+        `None` when the identifier is current or not replaceable, or when its
+        chain reaches a term that is unknown or cannot be replaced, names a term
+        of another ontology, or returns to an identifier it already visited.
     """
     ontology = ontology_of.get(split_identifier(identifier)[0])
     if ontology is None:
@@ -90,10 +95,10 @@ def replaced_annotation(
 ) -> Annotation | None:
     """Return the annotation with every replaceable identifier replaced.
 
-    Every field the term checks cover is examined: `ontology_class_id`, each
-    extension term, each `with_or_from` value, and each interacting taxon.
-    When a replacement repeats a value already in its list, only the first copy
-    is kept.
+    The same fields that semantic validation checks for terms are examined:
+    `ontology_class_id`, each extension term, each `with_or_from` value, and each
+    interacting taxon. When a replacement repeats a value already in its list,
+    only the first copy is kept.
 
     Returns:
         The replaced annotation, or `None` when nothing would change.
@@ -136,7 +141,7 @@ def _first_copies(values: list[Any]) -> list[Any]:
 
 
 def _set_value(data: dict[str, Any], path: tuple[str | int, ...], value: str) -> None:
-    """Replace the value at `path`, a location without its `annotation` root."""
+    """Replace the value at `path`, an issue location without its `annotation` root."""
     container: Any = data
     for key in path[:-1]:
         container = container[key]
@@ -152,12 +157,12 @@ class TermReplacementResult:
         annotation_scan_count: Active annotations read.
         annotation_replaced_count: Annotations given a new version.
         annotation_issue_skip_count: Annotations left unchanged because the
-            replaced result had semantic issues or was not a valid annotation,
-            or because the stored annotation could not be read.
+            stored annotation could not be read, or because the updated
+            annotation would not pass schema or semantic validation.
         annotation_stale_skip_count: Annotations left unchanged because they
-            changed after the job read them.
-        snapshot_ids: Every snapshot ID the job read, for each ontology key and
-            for `rules`.
+            changed or were deleted after the job read them.
+        snapshot_ids: The IDs of every snapshot the job read, keyed by ontology
+            key, plus `rules` for the go-site rule data.
     """
 
     group_key: str | None

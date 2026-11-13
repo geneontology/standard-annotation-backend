@@ -158,7 +158,10 @@ def test_proposal_discriminator_and_raw_candidates(client: TestClient) -> None:
 
 
 def test_review_request_models_and_stored_preview(client: TestClient) -> None:
-    """Review bodies document optional acceptance text and required rejection text."""
+    """Review bodies document optional acceptance text and required rejection text.
+
+    A stored preview's validation issues may carry optional details.
+    """
     schema = client.get("/openapi.json").json()
     schemas = schema["components"]["schemas"]
     for action, model in [
@@ -178,7 +181,6 @@ def test_review_request_models_and_stored_preview(client: TestClient) -> None:
     assert "ApiValidationIssue" in str(
         schemas["ChangeSetPreviewResource"]["properties"]["validation_errors"]
     )
-    assert "duplicate_peer_ids" not in schemas["ChangeSetPreviewResource"]["properties"]
     assert "details" in schemas["ApiValidationIssue"]["properties"]
     assert "details" not in schemas["ApiValidationIssue"]["required"]
     assert {

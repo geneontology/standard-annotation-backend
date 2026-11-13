@@ -1,4 +1,4 @@
-"""Hold the go-site metadata that GO Rules check annotations against.
+"""Define the go-site metadata that GO Rules check annotations against.
 
 The `rules` refresh reads six go-site files. Five of them are kept here, as
 `RuleData`: databases and their identifier patterns (`db-xrefs.yaml`), GO_REF
@@ -20,10 +20,11 @@ from standard_annotation_backend.domain.stored_json import StoredJson
 
 
 class WithPresence(StrEnum):
-    """Say whether annotations with an evidence term must have `with_or_from` values.
+    """State whether annotations with an evidence term must have `with_or_from` values.
 
-    `optional` and `recommended` impose no requirement. `conditional` chooses one
-    of the others from a `WithPresenceCondition`.
+    `mandatory` requires values and `disallowed` forbids them. `optional` and
+    `recommended` impose no requirement. `conditional` chooses one of the others
+    from a `WithPresenceCondition`.
     """
 
     MANDATORY = "mandatory"
@@ -65,7 +66,9 @@ class GoRefEntry:
 
 @dataclass(frozen=True, slots=True)
 class EntityIsComplex:
-    """Test whether the annotated entity's type is under `GO:0032991`.
+    """Test whether the entity's type is `GO:0032991` or one of its descendants.
+
+    `GO:0032991` is protein-containing complex.
 
     `eco-usage-constraints.yaml` writes this condition as
     `db_object_type eq 'complex'`.
@@ -129,12 +132,13 @@ class ExtensionConstraint:
     it meets any one of them.
 
     Attributes:
-        relation_id: The extension relation as an `RO`, `BFO`, or `GOREL` CURIE,
-            such as `BFO:0000066`, which is how annotations name it.
+        relation_id: The extension relation as a prefixed identifier (CURIE) in
+            `RO`, `BFO`, or `GOREL`, such as `BFO:0000066`. Annotations name
+            relations the same way.
         namespaces: Identifier prefixes allowed for the extension term.
-        primary_root_terms: GO terms the annotated term must be under.
-        cardinality: The entry's limit on repeated extensions, or `None` for no
-            limit.
+        primary_root_terms: GO terms the annotated term must be, or descend from.
+        cardinality: The most extensions with this relation and term prefix that
+            one annotation may have, or `None` for no limit.
     """
 
     relation_id: str
@@ -155,7 +159,8 @@ class RuleData:
         eco_usage_constraints: Every entry of `eco-usage-constraints.yaml`, at most
             one per evidence term.
         extension_constraints: Every entry of `extensions-constraints.yaml` that
-            names its relation by `relation_id`.
+            has a `relation_id`. Entries without one cannot match an annotation's
+            relation, so they are left out.
     """
 
     databases: tuple[DatabaseEntry, ...]
@@ -175,9 +180,9 @@ def unrecognized_extension_namespaces(
     """Return extension namespaces that are neither an ontology prefix nor a database.
 
     `extensions-constraints.yaml` lists the identifier prefixes an extension term
-    may use. SABE knows a prefix if a configured ontology owns it or
-    `db-xrefs.yaml` lists it as a database. No ontology source or database entry
-    describes the namespaces returned here.
+    may use. SABE recognizes a prefix if a configured ontology owns it or
+    `db-xrefs.yaml` lists it as a database. A rules refresh lists the namespaces
+    returned here in its result.
 
     Args:
         data: The refreshed go-site metadata.

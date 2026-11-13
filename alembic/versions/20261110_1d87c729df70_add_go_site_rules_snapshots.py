@@ -1,9 +1,11 @@
-"""Add go-site rules snapshots.
+"""Add storage for snapshots of the go-site files that GO Rules read.
 
-Adds the snapshots of the go-site metadata that GO Rules read, with one row for
-each retracted publication in each snapshot, and allows the `rules_refresh` job
-type. Downgrading drops both tables, then deletes `rules_refresh` jobs and their
-audit events, because the earlier schema cannot store them.
+A snapshot is the parsed content of the go-site metadata files from one
+`rules_refresh` job. Adds `rules_snapshot`, which holds each snapshot and marks at
+most one as active, and `retracted_publication`, with one row for each retracted
+publication in each snapshot. Allows the `rules_refresh` job type. Downgrading
+drops both tables, then deletes `rules_refresh` jobs and their audit events,
+because the earlier schema cannot store them.
 
 Revision ID: 1d87c729df70
 Revises: 736204438f1e

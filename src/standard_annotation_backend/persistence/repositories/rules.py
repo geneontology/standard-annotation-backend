@@ -1,4 +1,8 @@
-"""Store and activate snapshots of the go-site metadata that GO Rules read."""
+"""Store and activate snapshots of the go-site metadata that GO Rules read.
+
+A snapshot is the parsed content of the go-site files from one `rules` refresh.
+GO Rule checks read the one active snapshot.
+"""
 
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -65,7 +69,7 @@ class RulesRepository:
         )
 
     def get_by_job(self, job_id: UUID) -> RulesSnapshotRecord | None:
-        """Return the snapshot a job stored, if retention has kept it."""
+        """Return the snapshot a job stored, unless a later activation deleted it."""
         return self.session.scalar(
             select(RulesSnapshotRecord).where(RulesSnapshotRecord.job_id == job_id)
         )
@@ -80,11 +84,13 @@ class RulesRepository:
 
         A SABE release that parses or stores the files differently gets different
         values from the same files. Comparing the values, not only the files, lets
-        that release store the files again instead of keeping the old form.
+        that release store the files again instead of keeping the values an earlier
+        release stored.
 
         Args:
             record: The snapshot to compare.
-            rule_data: The `STORED_RULE_DATA` form of the parsed files.
+            rule_data: The parsed files in the JSON form that `STORED_RULE_DATA`
+                produces.
             retracted_pmids: Every PMID that `retracted-publications.txt` lists.
         """
         if record.rule_data != rule_data or record.retracted_publication_count != len(
@@ -108,21 +114,24 @@ class RulesRepository:
     ) -> RulesActivation:
         """Store a snapshot and make it the active one.
 
-        A transaction-scoped advisory lock lets one activation run at a time; a
-        second waits until the first commits or rolls back. Under that lock, if the
-        active snapshot came from the same files and already `stores` this rule
-        data and these PMIDs, nothing changes and that snapshot is returned with
-        `applied=False`. Otherwise the new snapshot and
-        its retracted publications are inserted and activated. The snapshot it
-        replaces is kept, so a reader that resolved it just before still finds its
-        data. Every older snapshot is deleted, with its retracted publications.
+        Activations run one at a time. Each takes a PostgreSQL advisory lock (a
+        lock on an application-chosen key rather than on a row) that is held until
+        its transaction commits or rolls back, and a second activation waits for
+        it. Under that lock, if the active snapshot came from the same files and
+        already `stores` this rule data and these PMIDs, nothing changes and that
+        snapshot is returned with `applied=False`. Otherwise the new snapshot and its
+        retracted publications are inserted and activated. The snapshot it replaces
+        is kept, so a validation that looked up that snapshot just before can still
+        read it. Every older snapshot is deleted, with its retracted publications.
 
-        The caller owns the commit, including any audit event.
+        The caller commits, and records any audit event.
 
         Args:
             job_id: Job that fetched the files.
-            provenance: Identifies the packed files.
-            rule_data: The `STORED_RULE_DATA` form of the parsed files.
+            provenance: Where the files came from, at which commit, and the
+                checksum of their combined content.
+            rule_data: The parsed files in the JSON form that `STORED_RULE_DATA`
+                produces.
             retracted_pmids: Every PMID that `retracted-publications.txt` lists.
 
         Returns:

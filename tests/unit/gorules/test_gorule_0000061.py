@@ -1,7 +1,7 @@
 """Verify GORULE:0000061: the relation must suit the term's branch."""
 
 import pytest
-from gorule_cases import TERM, annotation, facts, term
+from gorule_cases import TERM, annotation, facts, go_rule, term
 
 from standard_annotation_backend.domain.semantic_validation.checked_ancestors import (
     BP_ROOT,
@@ -12,9 +12,8 @@ from standard_annotation_backend.domain.semantic_validation.checked_ancestors im
     PROTEIN_CONTAINING_COMPLEX,
     VIRION_COMPONENT,
 )
-from standard_annotation_backend.domain.semantic_validation.gorules.terms import (
-    gorule_0000061,
-)
+
+rule = go_rule("gorule_0000061")
 
 COMPLEX = "GO:0000786"
 
@@ -43,9 +42,7 @@ def test_allowed_relations_pass(
     """Each row's relations pass, and a term under both CC rows gets their union."""
     subject = annotation(ontology_class_id=term_id, relation=relation)
 
-    assert (
-        list(gorule_0000061(subject, facts({term_id: term(*checked_ancestors)}))) == []
-    )
+    assert list(rule(subject, facts({term_id: term(*checked_ancestors)}))) == []
 
 
 @pytest.mark.parametrize(
@@ -75,10 +72,13 @@ def test_allowed_relations_pass(
 def test_other_relations_are_reported_with_the_allowed_ones(
     term_id: str, checked_ancestors: tuple[str, ...], relation: str, allowed: list[str]
 ) -> None:
-    """A root uses its own row, and a CC term under neither CC row allows nothing."""
+    """A disallowed relation is reported at `relation` with the allowed relations.
+
+    A root uses its own row, and a CC term under neither CC row allows none.
+    """
     subject = annotation(ontology_class_id=term_id, relation=relation)
 
-    issues = list(gorule_0000061(subject, facts({term_id: term(*checked_ancestors)})))
+    issues = list(rule(subject, facts({term_id: term(*checked_ancestors)})))
 
     assert [
         (issue["type"], issue["location"], issue.get("details")) for issue in issues

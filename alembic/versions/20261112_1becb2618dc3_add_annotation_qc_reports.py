@@ -1,9 +1,10 @@
 """Allow annotation QC report jobs and store their findings and counts.
 
-Adds `annotation_qc_report` to the job types the `job` table accepts, and creates
-`qc_report_finding`, `qc_report_group_count`, and `qc_report_issue_count`, whose
-rows are deleted with their job. Downgrading drops the tables and deletes QC
-report jobs and their audit events.
+A QC (quality control) report checks stored annotations and records the issues it
+finds in each one. Adds `annotation_qc_report` to the job types the `job` table
+accepts, and creates `qc_report_finding`, `qc_report_group_count`, and
+`qc_report_issue_count`, whose rows are deleted with their job. Downgrading drops
+the tables and deletes QC report jobs and their audit events.
 
 Revision ID: 1becb2618dc3
 Revises: 03a2094d9969

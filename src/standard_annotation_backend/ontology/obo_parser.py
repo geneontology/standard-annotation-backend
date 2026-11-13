@@ -1,7 +1,9 @@
 """Convert OBO documents to SABE ontology snapshots with `fastobo`.
 
-SABE reads only a few clauses from each term. Before parsing, it removes the rest,
-so clauses SABE does not need cannot stop a published file from loading.
+An OBO `[Term]` frame is a list of clauses, one tag and value per line, such as
+`is_a: GO:0008150`. SABE reads only a few tags. Before parsing, it removes the
+other clauses, so a clause SABE does not need cannot stop a published file from
+loading.
 """
 
 from __future__ import annotations
@@ -46,22 +48,24 @@ def parse_obo(
 
     Only terms whose identifiers have one of the ontology's prefixes are kept, so a
     file that also contains terms from other ontologies still loads. Replacement
-    suggestions are kept as published, even when they point to an obsolete term or
-    into another ontology.
+    suggestions (`replaced_by` and `consider`) are kept as published, even when
+    they point to an obsolete term or into another ontology.
 
     Args:
         document: Immutable source bytes and retrieval metadata.
-        definition: The ontology's configured prefixes, closure predicates, and
-            expected `ontology:` header.
+        definition: The ontology's configured identifier prefixes, its closure
+            predicates (the relations SABE follows to compute each term's
+            ancestors), and the `ontology:` header value the file must declare.
 
     Returns:
-        The parsed terms, approved relation edges, alternative identifiers, and
-        declared subsets.
+        The parsed terms, the direct edges for the closure predicates, the
+        alternative identifiers that each name one term, and the subsets the
+        header declares.
 
     Raises:
         OntologyParseError: If the syntax is invalid, the file declares another
             ontology, it has no terms with the ontology's prefixes, a term is defined
-            twice, a relation alias maps to more than one approved predicate, or a
+            twice, a relation alias maps to more than one closure predicate, or a
             closure edge points to a term the file does not define.
     """
     if document.ontology_key != definition.key:
@@ -215,7 +219,7 @@ def _has_owned_prefix(
     identifier: str,
     definition: OntologyDefinition,
 ) -> bool:
-    """Return whether an identifier's prefix is one that the ontology owns."""
+    """Return whether an identifier's prefix is one of the ontology's prefixes."""
     return identifier.partition(":")[0] in definition.identifier_prefixes
 
 
@@ -258,10 +262,13 @@ def _validate_edge_targets(
     terms: Mapping[str, OntologyTerm],
     edges: set[OntologyEdge],
 ) -> None:
-    """Reject a closure edge whose target the document does not define.
+    """Reject the document if a closure edge points to a term it does not define.
 
-    Closure would be incomplete without the target, so the whole document is
-    rejected.
+    Ancestors computed through such an edge would be incomplete, so the whole
+    document is rejected.
+
+    Raises:
+        OntologyParseError: If any edge's target is not a parsed term.
     """
     undefined = sorted({edge.object_term_id for edge in edges} - terms.keys())
     if undefined:
@@ -276,7 +283,7 @@ def _without_unread_clauses(content: bytes) -> BytesIO:
     `[PMID: 1]` in SO. SABE never reads those clauses, so removing them lets such
     files load and makes large files faster to parse. The header and other
     frames, such as `[Typedef]`, are kept unchanged. Lines are copied one at a
-    time, so a large file is not held in memory twice as separate lines.
+    time, so the file is never also held in memory as a list of lines.
 
     Returns:
         A buffer positioned at the start of the reduced document.
@@ -312,7 +319,12 @@ def _unambiguous_alt_ids(
     """Return each alternative identifier that names exactly one term.
 
     An alternative identifier that is also a term's own identifier, or that more
-    than one term claims, does not name one term, so it is left out.
+    than one term lists in an `alt_id` clause, does not name one term, so it is
+    left out.
+
+    Args:
+        claims: The terms that list each alternative identifier.
+        terms: Every parsed term, keyed by identifier.
     """
     return {
         alt_id: next(iter(claimants))

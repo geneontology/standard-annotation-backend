@@ -2,10 +2,12 @@
 
 Each term now records the ontology subsets it belongs to, and a new table maps each
 alternative identifier to the term it names in the same snapshot. Each snapshot also
-records the identifier prefixes it was read with, so that changing an ontology's
-prefixes or closure predicates loads an unchanged file again. Existing snapshots
-record no prefixes, so the next refresh of each ontology loads it again with subsets
-and alternative identifiers. Downgrading drops the table and the columns.
+records the identifier prefixes it was read with. A refresh compares these prefixes
+and the snapshot's closure predicates (the relations SABE follows to compute each
+term's ancestors) with the configuration, so changing either loads an unchanged
+file again. Existing snapshots record no prefixes, so the next refresh of each
+ontology loads it again with subsets and alternative identifiers. Downgrading drops
+the table and the columns.
 
 Revision ID: 736204438f1e
 Revises: 184f7be9fc74

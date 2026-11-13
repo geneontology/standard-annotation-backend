@@ -206,8 +206,9 @@ class OntologyRepository:
         """Return whether the active snapshot came from this document and definition.
 
         The source details, checksum, identifier prefixes, and closure predicates
-        must all match. A changed definition therefore loads an unchanged file
-        again.
+        must all match. A refresh skips loading a file only when this returns
+        `True`, so changing an ontology's prefixes or closure predicates loads an
+        unchanged file again.
         """
         active = self.get_active(document.ontology_key)
         return active is not None and (
@@ -250,7 +251,7 @@ class OntologyRepository:
         self.session.flush([record])
 
     def prune_candidates(self, key: str, pruned_at: datetime) -> tuple[UUID, ...]:
-        """Delete term and closure rows for snapshots outside the retention set.
+        """Delete term, alternative ID, and closure rows of snapshots no longer kept.
 
         The active snapshot, newest successfully activated predecessor, and snapshots
         for queued or running jobs remain complete. Metadata rows are locked until

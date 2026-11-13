@@ -17,7 +17,7 @@ settings = get_settings()
 
 
 def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
-    """Return the Celery Beat schedule of refreshes and the nightly QC report.
+    """Return the Celery Beat schedule of refreshes and the all-groups QC report.
 
     Each kind of reference data gets one entry that runs `sabe.refresh.schedule`
     with the kind's name, on the cron expression from that kind's

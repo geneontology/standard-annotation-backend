@@ -1,6 +1,8 @@
 """Queue and run term replacement jobs.
 
-These jobs replace obsolete terms and alternative IDs in active annotations.
+These jobs replace obsolete terms and alternative IDs in active annotations. An
+ontology activation queues one for all groups, and an annotation import
+publication queues one for the imported group.
 """
 
 from collections import Counter
@@ -55,18 +57,21 @@ def queue_term_replacement(
 ) -> Job:
     """Return the queued term replacement job for a scope, creating one if needed.
 
-    The trigger's transaction holds a lock on job creation until it ends, so two
-    triggers committing at once share one job. A running job is never joined: it
-    may have read its facts before the change that triggered this call. The
-    caller commits, and dispatches the job only after committing.
+    A lock held until the caller's transaction ends lets only one caller at a
+    time look for or create a job, so callers that commit at about the same time
+    share one queued job. A job that is already running is never reused, because
+    it may have read annotations and terms from before the caller's change; a new
+    job is queued instead. The caller must commit, and only then send the job to
+    a worker.
 
     Args:
-        unit_of_work: The trigger's transaction.
+        unit_of_work: The caller's transaction.
         group_key: The group to cover, or `None` for all groups.
-        requested_by: The triggering job's requester, recorded as this job's.
+        requested_by: The actor recorded as the requester of a new job, which
+            is the requester of the caller's own job.
 
     Returns:
-        The queued job, new or joined.
+        The queued job, either new or already queued.
     """
     unit_of_work.jobs.lock_term_replacement_starts()
     parameters = group_scope_parameters(group_key)
@@ -103,14 +108,17 @@ class TermReplacementBusyError(RuntimeError):
 class TermReplacementService:
     """Run term replacement jobs.
 
-    Each changed annotation is written through the same prepare, validate, and
-    update steps as a client update, in its own transaction, so a replacement is
-    made only when the result has no semantic issues.
+    Each annotation that needs a replacement is updated in its own transaction,
+    with the same locks, version check, and semantic validation as a client
+    update. A replacement is saved only when the result has no semantic issues,
+    and an annotation that changed after the job read it is skipped.
 
     Args:
         unit_of_work_factory: Opens the transactions for reading and updating.
         sources: Configured sources, which name the ontologies and their prefixes.
-        try_lock: Takes the job's lock and the scope's lock.
+        try_lock: Takes a PostgreSQL advisory lock only if it is free. The
+            service locks the job, so only one process runs it, and the job's
+            scope, so only one job of a scope runs at a time.
     """
 
     def __init__(
@@ -136,10 +144,11 @@ class TermReplacementService:
     def run(self, job_id: UUID) -> None:
         """Run one term replacement job to completion or failure.
 
-        A job that another process is running, or that has finished, is left
-        alone. A job with invalid parameters fails with `invalid_parameters`, and
-        one that finds reference data missing fails with
-        `reference_data_unavailable`.
+        Nothing happens if another process is running the job or the job has
+        finished. A job whose parameters are invalid fails with
+        `invalid_parameters`, and one that finds required reference data missing
+        fails with `reference_data_unavailable`. Each replacement commits on its
+        own, so a job that stops early keeps the replacements it already made.
 
         Raises:
             TermReplacementBusyError: If another job for the same scope is
@@ -240,10 +249,12 @@ class TermReplacementService:
     def _replace_one(
         self, job: Job, annotation_id: UUID, version: int, replaced: Annotation
     ) -> str:
-        """Write one replacement if it passes validation; return what happened.
+        """Save one replacement if it passes validation, and return the outcome.
 
         Returns:
-            `replaced`, `issues`, or `stale`.
+            `replaced` if a new version was saved, `issues` if the result has
+            semantic issues, or `stale` if the annotation changed or was deleted
+            after the job read it.
         """
         with self._unit_of_work_factory() as unit_of_work:
             try:

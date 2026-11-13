@@ -1,1 +1,1 @@
-"""Read the go-site metadata files that GO Rules use."""
+"""Parse the metadata files in the go-site repository that GO Rules read."""

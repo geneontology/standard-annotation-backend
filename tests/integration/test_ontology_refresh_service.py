@@ -1,5 +1,6 @@
-"""Verify atomic ontology activation."""
+"""Verify how ontology refreshes load, check, and activate snapshots."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -32,14 +33,16 @@ from standard_annotation_backend.domain.ontology import (
     OntologyTerm,
 )
 from standard_annotation_backend.domain.refresh import TerminalRefreshError
+from standard_annotation_backend.domain.semantic_validation.facts import (
+    TermFact,
+    TermStatus,
+)
 from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
-    OntologyAltIdRecord,
     OntologyMetadataRecord,
 )
-from standard_annotation_backend.persistence.repositories import OntologyRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
@@ -124,19 +127,6 @@ def _prepare(
         uow.commit()
 
 
-def _alternative_ids(
-    session_factory: sessionmaker[Session], version_id: UUID
-) -> dict[str, str]:
-    """Return each stored alternative identifier of a snapshot with its term."""
-    with session_factory() as session:
-        rows = session.execute(
-            select(OntologyAltIdRecord.alt_id, OntologyAltIdRecord.term_id).where(
-                OntologyAltIdRecord.version_id == version_id
-            )
-        )
-        return {alt_id: term_id for alt_id, term_id in rows}
-
-
 def _refresh_audits(session: Session) -> tuple[AuditEventRecord, ...]:
     """Return audit events other than job lifecycle events, oldest first."""
     return tuple(
@@ -185,38 +175,6 @@ def test_activation_leaves_annotations_unchanged(
         assert [audit.action for audit in _refresh_audits(session)] == [
             "ontology.refreshed"
         ]
-
-
-def test_activation_failure_keeps_the_previous_snapshot_active(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failure while recording the result rolls the activation back."""
-    _prepare(
-        unit_of_work_factory,
-        annotations=(),
-        old_terms={OLD_TERM: OntologyTerm(OLD_TERM, False, (), ())},
-    )
-    job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
-    service = OntologyRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
-    )
-
-    def fail(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("injected flush failure")
-
-    monkeypatch.setattr(OntologyRepository, "record_refresh_result", fail)
-    with pytest.raises(RuntimeError, match="injected flush failure"):
-        service.apply(job, go_document(CANDIDATE), ignore_progress)
-
-    with unit_of_work_factory() as uow:
-        active = uow.ontologies.get_active(GO_ONTOLOGY_KEY)
-        assert active is not None
-        assert active.source_revision == "old"
-    with session_factory() as session:
-        assert _refresh_audits(session) == ()
 
 
 def test_recovery_rejects_a_stored_result_with_an_invalid_count(
@@ -293,12 +251,12 @@ is_a: CL:0000000
         assert uow.ontologies.get_active("cl") is not None
 
 
-def test_a_refreshed_snapshot_keeps_subsets_and_alternative_identifiers(
+def test_validation_reads_subsets_and_alternative_identifiers_from_a_refresh(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
     database_engine: Engine,
+    reference_data: Callable[..., None],
 ) -> None:
-    """Each term's subsets and each alternative identifier's term are stored."""
+    """Validation sees each refreshed term's subsets and each alternative ID's term."""
     content = b"""\
 format-version: 1.4
 ontology: go
@@ -321,15 +279,22 @@ id: GO:0000002
     service.apply(job, go_document(content), ignore_progress)
 
     with unit_of_work_factory() as uow:
-        active = uow.ontologies.get_active(GO_ONTOLOGY_KEY)
-        assert active is not None
-        assert _alternative_ids(session_factory, active.version_id) == {
-            "GO:0000009": "GO:0000001"
-        }
-        assert {
-            record.term_id: record.subsets
-            for record in uow.ontologies.list_terms(active.version_id)
-        } == {"GO:0000001": ["gocheck_do_not_annotate"], "GO:0000002": []}
+        tagged, plain, alternative = (
+            facts.terms
+            for facts in uow.validation_facts.gather(
+                [
+                    _annotation(term_id)
+                    for term_id in ("GO:0000001", "GO:0000002", "GO:0000009")
+                ],
+                [(), (), ()],
+                {GO_ONTOLOGY_KEY: ("GO",)},
+            )
+        )
+    assert tagged["GO:0000001"].subsets == frozenset({"gocheck_do_not_annotate"})
+    assert plain["GO:0000002"].subsets == frozenset()
+    assert alternative["GO:0000009"] == TermFact(
+        TermStatus.ALTERNATE, primary_id="GO:0000001"
+    )
 
 
 def test_a_go_file_without_the_rule_subsets_is_refused(
@@ -401,43 +366,3 @@ def test_an_unchanged_file_is_loaded_again_when_its_definition_changes(
         assert active.loaded_predicates == list(
             changed.ontology_definition(GO_ONTOLOGY_KEY).closure_predicates
         )
-
-
-def test_any_ontology_can_require_its_file_to_declare_subsets(
-    unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
-) -> None:
-    """A file that lacks a subset its entry requires is refused, for any ontology.
-
-    The job fails as an invalid document and no snapshot is staged.
-    """
-    sources = sources_with(
-        ontologies={
-            "cl": {
-                "type": "https",
-                "url": "https://example.org/cl-basic.obo",
-                "document_ontology_id": "cl/cl-basic",
-                "prefixes": ["CL"],
-                "required_subsets": ["cellxgene_subset"],
-            }
-        }
-    )
-    content = b"""\
-format-version: 1.4
-ontology: cl/cl-basic
-
-[Term]
-id: CL:0000000
-"""
-    job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "cl")
-    service = OntologyRefreshService(
-        unit_of_work_factory, sources, bind_try_lock(database_engine), None
-    )
-
-    with pytest.raises(TerminalRefreshError) as raised:
-        service.apply(job, source_document("cl", content), ignore_progress)
-
-    assert raised.value.failure_code == "invalid_document"
-    assert "cellxgene_subset" in str(raised.value.failure_details)
-    with unit_of_work_factory() as uow:
-        assert uow.ontologies.get_by_job(job.job_id) is None

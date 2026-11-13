@@ -153,6 +153,28 @@ def test_obsolete_terms_and_alternative_ids_are_replaced_by_the_requester(
     ] == [("annotation.updated", job.job_id, 2)]
 
 
+def test_a_chain_of_replacements_is_followed_to_its_current_term(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+    reference_data: Callable[..., None],
+) -> None:
+    """An obsolete term whose replacement is also obsolete gets the chain's last term."""
+    reference_data(
+        SeedTerm("GO:0000011", obsolete=True, replaced_by=("GO:0000012",)),
+        SeedTerm("GO:0000012", obsolete=True, replaced_by=("GO:0000013",)),
+        SeedTerm("GO:0000013", parents=("GO:0008150",)),
+    )
+    annotation_id = _insert(session_factory, _annotation("GO:0000011"))
+
+    job = _run(unit_of_work_factory, database_engine)
+
+    assert job.result is not None
+    assert job.result["annotation_replaced_count"] == 1
+    record = _record(session_factory, annotation_id)
+    assert (record.ontology_class_id, record.current_version) == ("GO:0000013", 2)
+
+
 def test_a_result_with_issues_is_not_written(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],

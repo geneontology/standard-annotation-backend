@@ -1,9 +1,10 @@
-"""Check an annotation against the facts gathered about it.
+"""Check an annotation against the facts read about it.
 
-Each check is a pure function from an annotation and its facts to the issues it
-finds. `validate_semantics` runs every check in a fixed order, so the same
-annotation and facts always give the same issues in the same order. The catalog
-and duplicate checks come first, then the GO Rules in rule-number order.
+Each check takes an annotation and its facts and returns the issues it finds,
+without reading anything else. `validate_semantics` runs every check in a fixed
+order, so the same annotation and facts always give the same issues in the same
+order. The entity, term, and duplicate checks come first, then the GO Rules in
+rule-number order.
 """
 
 from collections.abc import Callable, Iterable, Iterator
@@ -54,7 +55,7 @@ from standard_annotation_backend.domain.validation import (
 )
 
 type SemanticCheck = Callable[[Annotation, AnnotationFacts], Iterable[ValidationIssue]]
-"""A check: the issues one rule finds in an annotation, given its facts."""
+"""A function that returns the issues it finds in an annotation, given its facts."""
 
 
 def check_entity(
@@ -111,8 +112,10 @@ def check_duplicates(
 ) -> Iterator[ValidationIssue]:
     """Report the other active annotations that duplicate this one.
 
-    The duplicate policy decides which annotations are peers; every peer is
-    listed, so an update to one of two existing duplicates is reported too.
+    The rules in `duplicate_policy` decide which annotations are duplicates. The
+    issue lists every one of them, including annotations that already duplicated
+    this one before the current write, so updating one of two existing duplicates
+    is reported too.
     """
     if facts.duplicate_peer_ids:
         yield ValidationIssue(
@@ -151,7 +154,11 @@ GO_RULES: tuple[SemanticCheck, ...] = (
     gorule_0000063,
     gorule_0000065,
 )
-"""Every write-blocking GO Rule, in rule-number order."""
+"""Every write-blocking GO Rule, in rule-number order.
+
+A write-blocking rule is one SABE can check using only one annotation and the
+reference data, so SABE rejects any write that breaks it.
+"""
 
 SEMANTIC_CHECKS: tuple[SemanticCheck, ...] = (
     check_entity,

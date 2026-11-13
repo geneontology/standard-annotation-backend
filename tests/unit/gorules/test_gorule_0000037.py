@@ -1,11 +1,9 @@
 """Verify GORULE:0000037: IBA comes from GO_Central and cites only GO_REF:0000033."""
 
 import pytest
-from gorule_cases import annotation, facts, found
+from gorule_cases import annotation, facts, found, go_rule
 
-from standard_annotation_backend.domain.semantic_validation.gorules.support import (
-    gorule_0000037,
-)
+rule = go_rule("gorule_0000037")
 
 
 @pytest.mark.parametrize(
@@ -22,9 +20,7 @@ def test_other_groups_or_references_are_an_issue(
     """IBA from another group, or with any other reference, is reported."""
     subject = annotation("IBA", assigned_by=assigned_by, references=references)
 
-    assert found(gorule_0000037(subject, facts())) == [
-        ("gorule_0000037", ("annotation",))
-    ]
+    assert found(rule(subject, facts())) == [("gorule_0000037", ("annotation",))]
 
 
 def test_go_central_with_the_phylogenetic_reference_passes() -> None:
@@ -32,5 +28,5 @@ def test_go_central_with_the_phylogenetic_reference_passes() -> None:
     iba = annotation("IBA", references=["GO_REF:0000033"])
     ida = annotation("IDA", assigned_by="MGI")
 
-    assert found(gorule_0000037(iba, facts())) == []
-    assert found(gorule_0000037(ida, facts())) == []
+    assert found(rule(iba, facts())) == []
+    assert found(rule(ida, facts())) == []
