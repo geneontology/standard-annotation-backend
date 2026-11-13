@@ -66,7 +66,7 @@ SABE reads the GO Rules as follows:
 | Rule | An issue when |
 |---|---|
 | 02 | `negation` is true and the term is directly `GO:0005488` or `GO:0005515`. |
-| 05 | The term is directly `GO:0005488` or `GO:0005515` and the evidence is IEA, ISS, ISO, ISM, ISA, or IBA. This follows the rule body; the title also lists RCA, and that question is raised upstream. |
+| 05 | The term is directly `GO:0005488` or `GO:0005515` and the evidence is IEA, ISS, ISO, ISM, ISA, IBA, or RCA. |
 | 06 | The evidence is IEP or HEP and the term is not under the BP root. |
 | 07 | The evidence is IPI and the term is under `GO:0003824`. |
 | 08 | The term is in subset `gocheck_do_not_annotate`. |

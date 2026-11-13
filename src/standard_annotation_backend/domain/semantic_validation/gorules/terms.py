@@ -44,7 +44,9 @@ BINDING_TERMS = frozenset({"GO:0005488", "GO:0005515"})
 These rules match the two terms exactly, not their descendants.
 """
 
-_INFERRED_BINDING_EVIDENCE = frozenset({"IEA", "ISS", "ISO", "ISM", "ISA", "IBA"})
+_INFERRED_BINDING_EVIDENCE = frozenset(
+    {"IEA", "ISS", "ISO", "ISM", "ISA", "IBA", "RCA"}
+)
 _TERM_LOCATION = (ANNOTATION_ROOT, "ontology_class_id")
 
 _MF_RELATIONS = frozenset({"RO:0002327", "RO:0002326"})
@@ -85,10 +87,9 @@ def gorule_0000002(
 def gorule_0000005(
     annotation: Annotation, facts: AnnotationFacts
 ) -> Iterator[ValidationIssue]:
-    """Report IEA, ISS, ISO, ISM, ISA, or IBA evidence on a binding term.
+    """Report IEA, ISS, ISO, ISM, ISA, IBA, or RCA evidence on a binding term.
 
-    The terms are `GO:0005488` and `GO:0005515`, matched directly. RCA is not
-    included: the rule's title lists it, but its body does not.
+    The terms are `GO:0005488` and `GO:0005515`, matched directly.
     """
     if (
         annotated_term(annotation, facts) is not None
@@ -98,7 +99,7 @@ def gorule_0000005(
         yield gorule_issue(
             5,
             "Annotations to GO:0005488 or GO:0005515 cannot use IEA, ISS, ISO, "
-            "ISM, ISA, or IBA evidence",
+            "ISM, ISA, IBA, or RCA evidence",
         )
 
 
