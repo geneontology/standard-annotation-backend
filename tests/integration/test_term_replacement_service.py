@@ -1,16 +1,17 @@
 """Verify that term replacement jobs replace only what passes validation."""
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from uuid import UUID
 
 import pytest
-from refresh_helpers import TEST_SOURCES
+from refresh_helpers import TEST_ONTOLOGIES
 from seeding import SeedTerm, insert_annotation
 from sqlalchemy import Engine, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
 from standard_annotation_backend.domain.jobs import JobStatus
+from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.semantic_validation.facts import (
     ReplacementFacts,
 )
@@ -85,7 +86,7 @@ def _run(
         job = queue_term_replacement(uow, group_key=group_key, requested_by="curator")
         uow.commit()
     TermReplacementService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
+        unit_of_work_factory, TEST_ONTOLOGIES, bind_try_lock(database_engine)
     ).run(job.job_id)
     return JobService(unit_of_work_factory).find(job.job_id)
 
@@ -218,7 +219,7 @@ def test_an_annotation_changed_after_it_was_read_is_skipped_as_stale(
     def edit_then_gather(
         self: ValidationFactsRepository,
         annotations: Sequence[Annotation],
-        ontologies: Mapping[str, tuple[str, ...]],
+        ontologies: OntologyCatalog,
     ) -> ReplacementFacts:
         with session_factory.begin() as other:
             other.execute(
@@ -309,7 +310,7 @@ def test_a_job_waits_while_another_job_for_its_scope_runs(
         job = queue_term_replacement(uow, group_key="MGI", requested_by="curator")
         uow.commit()
     service = TermReplacementService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
+        unit_of_work_factory, TEST_ONTOLOGIES, bind_try_lock(database_engine)
     )
 
     with try_advisory_lock(

@@ -41,6 +41,7 @@ from standard_annotation_backend.domain.change_sets import (
     apply_annotation_patch,
 )
 from standard_annotation_backend.domain.duplicate_policy import duplicate_key
+from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.domain.validation import (
     AnnotationValidationResult,
@@ -60,7 +61,6 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
-from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.resource_authorization import (
     load_authorized_annotation,
@@ -200,15 +200,14 @@ class ChangeSetService:
 
     Args:
         unit_of_work_factory: Factory opening repositories in one transaction.
-        sources: Configured sources, which name the ontologies that
-            validation checks identifiers against.
+        ontologies: The configured ontologies and the identifier prefixes each owns.
     """
 
     def __init__(
-        self, unit_of_work_factory: UnitOfWorkFactory, sources: RefreshSources
+        self, unit_of_work_factory: UnitOfWorkFactory, ontologies: OntologyCatalog
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
-        self._validator = SemanticValidator(sources)
+        self._validator = SemanticValidator(ontologies)
 
     def propose_create(
         self,

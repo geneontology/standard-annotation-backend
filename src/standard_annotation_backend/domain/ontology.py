@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import MappingProxyType
 from typing import Annotated
 from uuid import UUID
 
@@ -70,6 +71,76 @@ class OntologyDefinition:
     closure_predicates: tuple[str, ...]
     document_ontology_id: str
     required_subsets: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class OntologyCatalog:
+    """List the configured ontologies and the identifier prefixes each one owns.
+
+    Validation, term replacement, and QC reports read an identifier's term from
+    the active snapshot of the ontology that owns the identifier's prefix.
+    Identifiers whose prefix no configured ontology owns are not looked up. The
+    catalog is built from `config/sources.yaml`, so a change to the file takes
+    effect when a process next reads its settings, even before the changed
+    ontology is refreshed.
+
+    Args:
+        prefixes_by_key: The identifier prefixes each ontology owns, keyed by
+            ontology key. The catalog keeps its own read-only copy.
+
+    Attributes:
+        prefixes_by_key: The identifier prefixes each ontology owns, keyed by
+            ontology key.
+
+    Raises:
+        ValueError: If GO is not among the ontologies, which the GO Rules need, or
+            if two ontologies own the same prefix, which would give an identifier
+            two ontologies to be checked against.
+    """
+
+    prefixes_by_key: Mapping[str, tuple[str, ...]]
+    _key_by_prefix: Mapping[str, str] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        prefixes_by_key = {
+            key: tuple(prefixes) for key, prefixes in self.prefixes_by_key.items()
+        }
+        if GO_ONTOLOGY_KEY not in prefixes_by_key:
+            raise ValueError("the GO ontology must be configured")
+        key_by_prefix: dict[str, str] = {}
+        for key, prefixes in prefixes_by_key.items():
+            for prefix in prefixes:
+                if key_by_prefix.setdefault(prefix, key) != key:
+                    raise ValueError(
+                        f"identifier prefix {prefix} belongs to more than one ontology"
+                    )
+        # A frozen dataclass can only set its fields through `object.__setattr__`.
+        object.__setattr__(self, "prefixes_by_key", MappingProxyType(prefixes_by_key))
+        object.__setattr__(self, "_key_by_prefix", MappingProxyType(key_by_prefix))
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        """Return the configured ontology keys in sorted order."""
+        return tuple(sorted(self.prefixes_by_key))
+
+    @property
+    def prefixes(self) -> frozenset[str]:
+        """Return every identifier prefix that a configured ontology owns."""
+        return frozenset(self._key_by_prefix)
+
+    @property
+    def go_key(self) -> str:
+        """Return the key of the GO ontology."""
+        return GO_ONTOLOGY_KEY
+
+    @property
+    def go_prefixes(self) -> frozenset[str]:
+        """Return the identifier prefixes that GO owns."""
+        return frozenset(self.prefixes_by_key[GO_ONTOLOGY_KEY])
+
+    def key_of(self, prefix: str) -> str | None:
+        """Return the key of the ontology that owns `prefix`, or `None`."""
+        return self._key_by_prefix.get(prefix)
 
 
 @dataclass(frozen=True, slots=True)

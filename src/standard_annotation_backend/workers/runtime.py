@@ -84,9 +84,10 @@ def create_refresh_runner(
             queued without sending them.
     """
     try_lock = bind_try_lock(engine)
+    ontologies = sources.ontology_catalog()
     jobs = JobService(unit_of_work_factory)
     authorization = AuthorizationRefreshService(unit_of_work_factory)
-    rules = RulesRefreshService(unit_of_work_factory, sources)
+    rules = RulesRefreshService(unit_of_work_factory, ontologies)
     entity = EntityRefreshService(unit_of_work_factory, sources)
     ontology = OntologyRefreshService(
         unit_of_work_factory,
@@ -104,9 +105,9 @@ def create_refresh_runner(
     return RefreshComponents(
         ontology=ontology,
         term_replacement=TermReplacementService(
-            unit_of_work_factory, sources, try_lock
+            unit_of_work_factory, ontologies, try_lock
         ),
-        qc_report=QcReportRunner(unit_of_work_factory, sources, try_lock),
+        qc_report=QcReportRunner(unit_of_work_factory, ontologies, try_lock),
         runner=RefreshRunner(
             try_lock=try_lock,
             jobs=jobs,

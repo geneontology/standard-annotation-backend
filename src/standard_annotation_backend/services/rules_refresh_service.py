@@ -16,6 +16,7 @@ from datetime import datetime
 from uuid import UUID
 
 from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.refresh import (
     ProgressReporter,
     RefreshFailureCode,
@@ -42,7 +43,6 @@ from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
 )
 from standard_annotation_backend.refresh.decoding import decode_source_text
-from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
 
@@ -97,15 +97,15 @@ class RulesRefreshService:
 
     Args:
         unit_of_work_factory: Opens the transactions for snapshots and audit.
-        sources: Configured sources. An `extensions-constraints.yaml` namespace
-            that matches one of their ontology prefixes produces no warning.
+        ontologies: The configured ontologies. An `extensions-constraints.yaml`
+            namespace that one of them owns as a prefix produces no warning.
     """
 
     def __init__(
-        self, unit_of_work_factory: UnitOfWorkFactory, sources: RefreshSources
+        self, unit_of_work_factory: UnitOfWorkFactory, ontologies: OntologyCatalog
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
-        self._sources = sources
+        self._ontologies = ontologies
 
     @property
     def name(self) -> RefreshKindName:
@@ -201,7 +201,7 @@ class RulesRefreshService:
             StoredDataError: If the stored rule data is invalid.
         """
         data = STORED_RULE_DATA.load(record.rule_data)
-        namespaces = unrecognized_extension_namespaces(data, self._ontology_prefixes())
+        namespaces = unrecognized_extension_namespaces(data, self._ontologies.prefixes)
         result = RulesRefreshResult(
             snapshot_id=record.snapshot_id,
             source_type=record.source_type,
@@ -235,12 +235,4 @@ class RulesRefreshService:
                 for namespace in namespaces
             ),
             unchanged=unchanged,
-        )
-
-    def _ontology_prefixes(self) -> frozenset[str]:
-        """Return every identifier prefix owned by a configured ontology."""
-        return frozenset(
-            prefix
-            for key in self._sources.keys(RefreshKindName.ONTOLOGY)
-            for prefix in self._sources.ontology_definition(key).identifier_prefixes
         )

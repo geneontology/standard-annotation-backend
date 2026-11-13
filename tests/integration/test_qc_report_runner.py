@@ -3,7 +3,7 @@
 from uuid import UUID
 
 import pytest
-from refresh_helpers import TEST_SOURCES
+from refresh_helpers import TEST_ONTOLOGIES
 from seeding import insert_annotation
 from sqlalchemy import Engine, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -63,7 +63,7 @@ def _runner(
     unit_of_work_factory: UnitOfWorkFactory, database_engine: Engine
 ) -> QcReportRunner:
     return QcReportRunner(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
+        unit_of_work_factory, TEST_ONTOLOGIES, bind_try_lock(database_engine)
     )
 
 

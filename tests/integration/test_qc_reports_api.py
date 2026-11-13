@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
-from refresh_helpers import TEST_SOURCES
+from refresh_helpers import TEST_ONTOLOGIES
 from seeding import create_job, insert_annotation
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -77,7 +77,7 @@ def _run(
     unit_of_work_factory: UnitOfWorkFactory, database_engine: Engine, report_id: UUID
 ) -> None:
     QcReportRunner(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
+        unit_of_work_factory, TEST_ONTOLOGIES, bind_try_lock(database_engine)
     ).run(report_id)
 
 

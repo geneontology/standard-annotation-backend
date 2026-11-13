@@ -3,7 +3,7 @@
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
-from refresh_helpers import TEST_SOURCES
+from refresh_helpers import TEST_ONTOLOGIES, TEST_SOURCES
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER, REVIEWER
@@ -160,13 +160,13 @@ def test_deletion_succeeds_after_subject_removal(
     """
     imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
     publish_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
-    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     created = annotations.create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="other-group",
         context=PROPOSER,
     )
-    changes = ChangeSetService(unit_of_work_factory, TEST_SOURCES)
+    changes = ChangeSetService(unit_of_work_factory, TEST_ONTOLOGIES)
     proposal = (
         changes.propose_delete(
             created.annotation_id, base_version=1, reason="Remove", context=PROPOSER
@@ -200,7 +200,7 @@ def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
     """
     imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
     job = stage_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
-    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     payload = writable_annotation.model_dump(mode="json")
     before = _counts(session_factory)
     with pytest.raises(InvalidAnnotationPayloadError) as staged:

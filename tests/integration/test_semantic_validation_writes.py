@@ -6,7 +6,7 @@ import httpx2
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
-from refresh_helpers import TEST_SOURCES
+from refresh_helpers import TEST_ONTOLOGIES
 from seeding import (
     DEFAULT_RULE_DATA,
     SeedTerm,
@@ -136,7 +136,7 @@ def test_an_imported_duplicate_cannot_be_updated_until_the_pair_is_resolved(
             for _ in range(2)
         )
         session.commit()
-    service = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    service = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     context = PROPOSER
 
     with pytest.raises(InvalidAnnotationPayloadError) as raised:

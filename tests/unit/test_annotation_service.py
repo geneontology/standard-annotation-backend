@@ -33,9 +33,9 @@ from standard_annotation_backend.services.annotation_service import (
     AnnotationService,
 )
 
-SOURCES = RefreshSources(
+ONTOLOGIES = RefreshSources(
     load_sources_file(Path(__file__).parents[2] / "config" / "sources.yaml")
-)
+).ontology_catalog()
 FIXED_ID = UUID("00000000-0000-0000-0000-000000000301")
 CREATED_AT = datetime(2026, 9, 11, 10, 0, tzinfo=UTC)
 UPDATED_AT = datetime(2026, 9, 11, 10, 5, tzinfo=UTC)
@@ -305,7 +305,7 @@ def service_harness() -> ServiceHarness:
         audit=FakeAuditRepository(),
     )
     factory = cast(UnitOfWorkFactory, lambda: unit_of_work)
-    service = AnnotationService(factory, SOURCES)
+    service = AnnotationService(factory, ONTOLOGIES)
     return ServiceHarness(service, repository, unit_of_work)
 
 

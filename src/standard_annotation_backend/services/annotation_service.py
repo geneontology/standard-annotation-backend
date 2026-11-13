@@ -24,7 +24,10 @@ from standard_annotation_backend.domain.auth import (
     authorize_role,
     derive_creation_group,
 )
-from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
+from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
+    OntologyCatalog,
+)
 from standard_annotation_backend.domain.validation import validate_annotation
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
@@ -32,7 +35,6 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories import AuditRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.pagination import ResultPage
 from standard_annotation_backend.services.resource_authorization import (
@@ -96,15 +98,14 @@ class AnnotationService:
     Args:
         unit_of_work_factory: Callable that opens a transaction containing the
             annotation repositories used by each operation.
-        sources: Configured sources, which name the ontologies that
-            validation checks identifiers against.
+        ontologies: The configured ontologies and the identifier prefixes each owns.
     """
 
     def __init__(
-        self, unit_of_work_factory: UnitOfWorkFactory, sources: RefreshSources
+        self, unit_of_work_factory: UnitOfWorkFactory, ontologies: OntologyCatalog
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
-        self._validator = SemanticValidator(sources)
+        self._validator = SemanticValidator(ontologies)
 
     def create(
         self,

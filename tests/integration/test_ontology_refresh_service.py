@@ -28,6 +28,7 @@ from standard_annotation_backend.domain.annotations import (
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
     GO_ONTOLOGY_KEY,
+    OntologyCatalog,
     OntologyDocument,
     OntologySnapshot,
     OntologyTerm,
@@ -287,7 +288,7 @@ id: GO:0000002
                     for term_id in ("GO:0000001", "GO:0000002", "GO:0000009")
                 ],
                 [(), (), ()],
-                {GO_ONTOLOGY_KEY: ("GO",)},
+                OntologyCatalog({GO_ONTOLOGY_KEY: ("GO",)}),
             )
         )
     assert tagged["GO:0000001"].subsets == frozenset({"gocheck_do_not_annotate"})

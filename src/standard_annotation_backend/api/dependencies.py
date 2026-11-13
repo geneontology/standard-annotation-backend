@@ -190,7 +190,9 @@ def get_annotation_service(
     Returns:
         A service configured to run annotation operations.
     """
-    return AnnotationService(unit_of_work_factory, get_settings().sources)
+    return AnnotationService(
+        unit_of_work_factory, get_settings().sources.ontology_catalog()
+    )
 
 
 def get_change_set_service(
@@ -207,7 +209,9 @@ def get_change_set_service(
     Returns:
         Service configured to run change-set operations.
     """
-    return ChangeSetService(unit_of_work_factory, get_settings().sources)
+    return ChangeSetService(
+        unit_of_work_factory, get_settings().sources.ontology_catalog()
+    )
 
 
 def get_comment_service(

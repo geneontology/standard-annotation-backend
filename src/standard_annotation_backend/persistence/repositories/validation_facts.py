@@ -5,7 +5,7 @@ obsolete, the entity's type, or whether a cited publication is retracted. This
 module reads the facts from the database; the checks themselves run without one.
 """
 
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import replace
 from itertools import batched
 from uuid import UUID
@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.ontology import (
-    GO_ONTOLOGY_KEY,
     SUBCLASS_PREDICATE,
+    OntologyCatalog,
 )
 from standard_annotation_backend.domain.qc_reports import (
     EntityCatalogUse,
@@ -73,7 +73,7 @@ class ValidationFactsRepository:
         self,
         annotations: Sequence[Annotation],
         peers: Sequence[tuple[UUID, ...]],
-        ontologies: Mapping[str, tuple[str, ...]],
+        ontologies: OntologyCatalog,
         *,
         snapshots: ActiveSnapshots | None = None,
     ) -> tuple[AnnotationFacts, ...]:
@@ -97,8 +97,8 @@ class ValidationFactsRepository:
                 annotations it duplicates, in the same order. For a write they
                 come from `AnnotationRepository.prepare_create` or
                 `prepare_update`, which find them while holding the write locks.
-            ontologies: The identifier prefixes of each configured ontology, keyed
-                by ontology key. GO must be among them.
+            ontologies: The configured ontologies and the identifier prefixes each
+                owns.
             snapshots: Snapshots the caller already looked up with
                 `active_snapshots`, for example a QC report that records which
                 ones it used. Looked up here when omitted.
@@ -116,22 +116,17 @@ class ValidationFactsRepository:
             raise ValueError("every annotation needs its duplicate peers")
         if snapshots is None:
             snapshots = self.active_snapshots(ontologies)
-        version_by_prefix = {
-            prefix: snapshots.ontology_versions[key]
-            for key, prefixes in ontologies.items()
-            for prefix in prefixes
-        }
         wanted: dict[UUID, set[str]] = {}
         for annotation in annotations:
             for occurrence in term_identifiers(annotation):
-                version_id = version_by_prefix.get(occurrence.prefix)
+                version_id = _snapshot_for(occurrence.prefix, ontologies, snapshots)
                 if version_id is not None:
                     wanted.setdefault(version_id, set()).add(occurrence.identifier)
         terms = self._term_facts(wanted)
         entities = self._entity_facts(
             {annotation.db_object_id for annotation in annotations}
         )
-        go_prefixes = set(ontologies[GO_ONTOLOGY_KEY])
+        go_prefixes = ontologies.go_prefixes
         current_go_terms = {
             identifier
             for identifier, fact in terms.items()
@@ -144,7 +139,7 @@ class ValidationFactsRepository:
             if split_identifier(entity.db_object_type)[0] in go_prefixes
         }
         checked_ancestors = self._checked_ancestors(
-            snapshots.ontology_versions[GO_ONTOLOGY_KEY],
+            snapshots.ontology_versions[ontologies.go_key],
             current_go_terms | go_types,
             checked_ancestor_terms(snapshots.rule_data),
         )
@@ -198,7 +193,7 @@ class ValidationFactsRepository:
     def replacement_facts(
         self,
         annotations: Sequence[Annotation],
-        ontologies: Mapping[str, tuple[str, ...]],
+        ontologies: OntologyCatalog,
     ) -> ReplacementFacts:
         """Return facts about the annotations' terms and the terms that replace them.
 
@@ -211,8 +206,8 @@ class ValidationFactsRepository:
 
         Args:
             annotations: Structurally valid annotations to describe.
-            ontologies: The identifier prefixes of each configured ontology, keyed
-                by ontology key.
+            ontologies: The configured ontologies and the identifier prefixes each
+                owns.
 
         Raises:
             ReferenceDataUnavailableError: If a configured ontology or the go-site
@@ -220,30 +215,26 @@ class ValidationFactsRepository:
             StoredDataError: If the stored rule data cannot be read.
         """
         snapshots = self.active_snapshots(ontologies)
-        version_by_prefix = {
-            prefix: snapshots.ontology_versions[key]
-            for key, prefixes in ontologies.items()
-            for prefix in prefixes
-        }
         terms: dict[str, TermFact] = {}
         pending = {
             occurrence.identifier
             for annotation in annotations
             for occurrence in term_identifiers(annotation)
-            if occurrence.prefix in version_by_prefix
         }
         while pending:
             wanted: dict[UUID, set[str]] = {}
             for identifier in pending:
-                version_id = version_by_prefix[split_identifier(identifier)[0]]
-                wanted.setdefault(version_id, set()).add(identifier)
+                version_id = _snapshot_for(
+                    split_identifier(identifier)[0], ontologies, snapshots
+                )
+                if version_id is not None:
+                    wanted.setdefault(version_id, set()).add(identifier)
             found = self._term_facts(wanted)
             terms.update(found)
             pending = {
                 following
                 for fact in found.values()
                 if (following := replacement_step(fact)) is not None
-                and split_identifier(following)[0] in version_by_prefix
                 and following not in terms
             }
         return ReplacementFacts(
@@ -254,14 +245,12 @@ class ValidationFactsRepository:
             },
         )
 
-    def active_snapshots(
-        self, ontologies: Mapping[str, Iterable[str]]
-    ) -> ActiveSnapshots:
+    def active_snapshots(self, ontologies: OntologyCatalog) -> ActiveSnapshots:
         """Return the active snapshot of each configured ontology and of the rule data.
 
         Args:
-            ontologies: The configured ontologies, keyed by ontology key. Only the
-                keys are used.
+            ontologies: The configured ontologies. Each must have an active
+                snapshot.
 
         Raises:
             ReferenceDataUnavailableError: If any of them has no active snapshot.
@@ -274,12 +263,12 @@ class ValidationFactsRepository:
                     OntologyMetadataRecord.ontology_key,
                     OntologyMetadataRecord.version_id,
                 ).where(
-                    OntologyMetadataRecord.ontology_key.in_(list(ontologies)),
+                    OntologyMetadataRecord.ontology_key.in_(ontologies.keys),
                     OntologyMetadataRecord.active.is_(True),
                 )
             )
         }
-        missing = set(ontologies) - set(versions)
+        missing = set(ontologies.keys) - set(versions)
         rules = self.session.execute(
             select(
                 RulesSnapshotRecord.snapshot_id, RulesSnapshotRecord.rule_data
@@ -476,3 +465,11 @@ class ValidationFactsRepository:
                 )
             )
         return retracted
+
+
+def _snapshot_for(
+    prefix: str, ontologies: OntologyCatalog, snapshots: ActiveSnapshots
+) -> UUID | None:
+    """Return the snapshot of the ontology that owns `prefix`, or `None`."""
+    key = ontologies.key_of(prefix)
+    return None if key is None else snapshots.ontology_versions[key]

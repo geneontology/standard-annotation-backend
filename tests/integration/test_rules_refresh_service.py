@@ -8,6 +8,7 @@ import pytest
 from refresh_helpers import (
     REVISION,
     RULES_LOCATOR,
+    TEST_ONTOLOGIES,
     TEST_SOURCES,
     FakeFetchers,
     build_runner,
@@ -210,7 +211,7 @@ def test_the_same_files_from_a_newer_commit_are_not_stored_again(
 
     The snapshot keeps the commit it was first read from.
     """
-    service = RulesRefreshService(unit_of_work_factory, TEST_SOURCES)
+    service = RulesRefreshService(unit_of_work_factory, TEST_ONTOLOGIES)
     first = service.apply(
         start_job(unit_of_work_factory, JobType.RULES_REFRESH, "go-site"),
         _document(rule_files(), "a" * 40),
@@ -383,7 +384,7 @@ def test_concurrent_refreshes_of_the_same_files_activate_one_snapshot(
     repository, where the check made under the rules refresh lock decides.
     """
     monkeypatch.setattr(rules_refresh_service, "same_rule_files", lambda *_: False)
-    service = RulesRefreshService(unit_of_work_factory, TEST_SOURCES)
+    service = RulesRefreshService(unit_of_work_factory, TEST_ONTOLOGIES)
     jobs = [
         start_job(unit_of_work_factory, JobType.RULES_REFRESH, "go-site")
         for _ in range(2)
