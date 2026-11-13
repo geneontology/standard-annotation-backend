@@ -1,17 +1,21 @@
 """Store and read QC report findings and counts in the caller's transaction."""
 
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, cast, delete, exists, literal, select, tuple_
+from sqlalchemy import Select, cast, delete, exists, literal, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy.types import Text
 
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.jobs import (
+    JobStatus,
+    JobType,
+    group_scope_parameters,
+)
 from standard_annotation_backend.domain.qc_reports import (
     IssueType,
     QcFinding,
@@ -184,6 +188,70 @@ class QcReportRepository:
                             literal(job_id, JobRecord.job_id.type),
                         ),
                     )
+                )
+            )
+        )
+
+    def list_reports(
+        self,
+        *,
+        covering_group: str | None,
+        status: JobStatus | None,
+        limit: int,
+        offset: int,
+    ) -> Page[JobRecord]:
+        """Return one page of QC reports, newest first.
+
+        Args:
+            covering_group: Only reports of all groups or of this group, if
+                given; otherwise every report.
+            status: Only reports in this state, if given.
+            limit: The most reports to return.
+            offset: The number of reports to skip.
+        """
+        statement: Select[tuple[JobRecord]] = select(JobRecord).where(
+            JobRecord.job_type == JobType.ANNOTATION_QC_REPORT
+        )
+        if covering_group is not None:
+            statement = statement.where(
+                or_(
+                    JobRecord.parameters == cast(group_scope_parameters(None), JSONB),
+                    JobRecord.parameters
+                    == cast(group_scope_parameters(covering_group), JSONB),
+                )
+            )
+        if status is not None:
+            statement = statement.where(JobRecord.status == status)
+        return load_page(
+            self.session,
+            statement,
+            record_type=JobRecord,
+            order_by=(JobRecord.created_at, JobRecord.job_id),
+            descending=True,
+            limit=limit,
+            offset=offset,
+        )
+
+    def superseded(self, job_ids: Collection[UUID]) -> set[UUID]:
+        """Return the reports among `job_ids` that a later report of their scope replaced.
+
+        Uses the same order as `has_newer_report`: completion time, then job ID.
+        A report that has not completed is never superseded.
+        """
+        if not job_ids:
+            return set()
+        later = aliased(JobRecord)
+        return set(
+            self.session.scalars(
+                select(JobRecord.job_id).where(
+                    JobRecord.job_id.in_(list(job_ids)),
+                    exists().where(
+                        later.job_type == JobType.ANNOTATION_QC_REPORT,
+                        later.status == JobStatus.SUCCEEDED,
+                        later.parameters == JobRecord.parameters,
+                        tuple_(later.completed_at, later.job_id)
+                        > tuple_(JobRecord.completed_at, JobRecord.job_id),
+                    ),
                 )
             )
         )

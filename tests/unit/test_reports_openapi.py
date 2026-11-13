@@ -74,3 +74,22 @@ def test_the_issue_type_filter_is_an_enum_with_titles_and_links(schema: dict) ->
     assert descriptions[enum_schema["enum"].index("structural")] == (
         "Annotation fails the Standard Annotation schema"
     )
+
+
+def test_reports_are_listed_with_status_and_paging_parameters(schema: dict) -> None:
+    """The list route documents its parameters, page schema, and errors."""
+    operation = schema["paths"][START]["get"]
+
+    assert operation["tags"] == ["reports"]
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/QcReportPageResponse"
+    }
+    assert set(operation["responses"]) == {"200", "401", "403", "422", "500", "503"}
+    assert "`unknown_query_parameter`" in operation["responses"]["422"]["description"]
+    assert {parameter["name"] for parameter in operation["parameters"]} == {
+        "status",
+        "limit",
+        "offset",
+    }
+    item = schema["components"]["schemas"]["QcReportListItemResource"]
+    assert "findings_available" in item["required"]

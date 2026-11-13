@@ -265,6 +265,9 @@ Some details that matter when debugging:
   job stays `running` and the run is retried. Pruning runs after every finished
   ontology job: through `sabe.ontology.prune` under Celery, or directly in the
   CLI process, where a busy lock or a pruning error is logged and skipped.
+  Removing an ontology from `config/sources.yaml` stops its prefix from being
+  checked once processes reload their configuration; its snapshots are not retired
+  and stay stored.
 - **Entity.** Staging and publication are separate transactions. If a worker
   stops between them, `recover` publishes the committed staging on the next run.
   Publication holds the per-source entity catalog lock. A "refresh all" request
@@ -306,12 +309,35 @@ fetches nothing, and `TermReplacementService` runs it instead of `RefreshRunner`
 - **The CLI.** `just refresh` runs the replacement jobs its refreshes queued once,
   in its own process, after the refresh jobs finish, and prints a line for each.
 
+## QC report jobs
+
+An `annotation_qc_report` job validates every active annotation in its scope and stores
+findings and counts (see `docs/annotation-validation.md`). Like term replacement, it is
+not a refresh kind: `QcReportRunner` runs it instead of `RefreshRunner`.
+
+- **Triggers.** `POST /reports/annotation-qc` (admin role) and the Beat entry
+  `annotation-qc-report`, which calls `sabe.qc_report.schedule` on `SABE_QC_REPORT_CRON`
+  to start an all-groups report. Both join the scope's queued report if there is one,
+  and send the job to `sabe.qc_report.run` after it commits. If sending fails, the job
+  stays queued until the next start of its scope.
+- **Running.** The job holds its own lock and its scope's lock; if another report of the
+  same scope is running, the task is retried and the job stays queued. It first deletes
+  rows left by an earlier attempt and checks that reference data is available. It then
+  reads active annotations in `annotation_id` order, 500 at a time, without locks, and
+  commits each batch's findings and counts. Reference data is resolved per batch, and
+  the result lists every distinct set used. Marking the job succeeded and deleting the
+  findings of earlier reports of its scope commit together. Reports of a scope are
+  ordered by completion time, then job ID.
+- **Failures.** `invalid_parameters`, and `reference_data_unavailable`. A failed report
+  keeps no findings or counts.
+- **The CLI.** `just refresh` does not run QC reports.
+
 ## Locks
 
 | Lock | Kind of lock | Held by | Prevents |
 |---|---|---|---|
 | Refresh start lock | transaction advisory lock | `RefreshStartService.start` | two starts both creating a job for the same source |
-| Job execution lock | session try-lock, one per job | `RefreshRunner.run`, `run_retirement` | two processes running one job after a duplicate delivery |
+| Job execution lock | session try-lock, one per job | `RefreshRunner.run`, `run_retirement`, `TermReplacementService.run`, `QcReportRunner.run` | two processes running one job after a duplicate delivery |
 | Authorization refresh lock | transaction advisory lock | `replace_authorizations` | concurrent authorization replacements |
 | Rules refresh lock | transaction advisory lock | `RulesRepository.activate` | concurrent activations, so refreshes of the same files store one snapshot |
 | Ontology refresh lock | session try-lock, one per ontology | ontology `apply` and `prune` | out-of-order activation, and pruning a snapshot that is being activated |
@@ -320,16 +346,20 @@ fetches nothing, and `TermReplacementService` runs it instead of `RefreshRunner`
 | Annotation group lock (`annotation_group_lock`) | session try-lock, one per group | annotation `apply`, after the document is fetched and found changed | two GPAD jobs for one group staging or publishing at once |
 | Term replacement start lock | transaction advisory lock | `queue_term_replacement` | two triggers both creating a queued job |
 | Term replacement scope lock | session try-lock, one per scope | `TermReplacementService.run` | two jobs of one scope running at once |
+| QC report start lock | transaction advisory lock | `queue_qc_report` | two starts both creating a queued report |
+| QC report scope lock | session try-lock, one per scope | `QcReportRunner.run` | two reports of one scope running at once |
 
 The try-locks never wait. A process that cannot take one either returns (job
-lock) or raises so the task is retried later (ontology lock and annotation group
-lock, which raises `AnnotationRefreshBusyError`).
+lock) or raises so the task is retried later: the ontology lock, the annotation group
+lock (`AnnotationRefreshBusyError`), and the term replacement and QC report scope
+locks (`TermReplacementBusyError` and `QcReportBusyError`).
 
 ## Where to start
 
 | Symptom or task | Look at |
 |---|---|
-| A job stays `running` | worker logs for `Worker task unavailable` (Celery retries) or `Refresh job stopped before finishing` (CLI); start the same refresh again to dispatch and resume it |
+| A job stays `running` | worker logs for `Worker task unavailable` (Celery retries) or `Refresh job stopped before finishing` (CLI); for a refresh, start the same refresh again to dispatch and resume it. A running term replacement or QC report job resumes only when Celery redelivers or retries its task; a QC report then starts again from empty rows |
+| A term replacement or QC report job stays `queued` | worker logs for `Term replacement dispatch failed` or `QC report dispatch failed` (the next trigger for its scope sends it again), or another job of its scope holding the scope lock (the task retries every 30 seconds) |
 | A job failed | its `progress.failure_code` and `failure_details` through `GET /admin/jobs/{job_id}`; the table of classified errors above |
 | `unknown_source` | the job's `source_key` against `config/sources.yaml` as loaded by the running process (settings are cached per process) |
 | A refresh did nothing | completed progress with `"unchanged": true` (also in the job result): the source document is already active |

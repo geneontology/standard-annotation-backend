@@ -43,13 +43,14 @@ class RefreshKindName(StrEnum):
 
 
 class RefreshFailureCode(StrEnum):
-    """List the codes recorded when a refresh job fails in a way retrying cannot fix.
+    """List the codes recorded when a job fails in a way retrying cannot fix.
 
-    Term replacement jobs use the same codes: `invalid_parameters`, and
-    `reference_data_unavailable` when a configured ontology or the go-site rule
-    data has no active snapshot. The codes are fixed strings, so job records and logs never contain source
-    URLs or content. Operators use them to tell retrieval, decoding, parsing,
-    and publication failures apart.
+    Refresh jobs use every code. Term replacement and QC report jobs use
+    `invalid_parameters`, and `reference_data_unavailable` when a configured
+    ontology or the go-site rule data has no active snapshot. The codes are fixed
+    strings, so job records and logs never contain source URLs or content.
+    Operators use them to tell retrieval, decoding, parsing, and publication
+    failures apart.
     """
 
     INVALID_PARAMETERS = "invalid_parameters"

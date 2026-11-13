@@ -183,8 +183,13 @@ lists its peers; reports do not group duplicates further.
   group or on all groups, and a group admin on its own group. A queued report of the
   same scope is reused. An all-groups report also runs nightly, on
   `SABE_QC_REPORT_CRON` (default `0 6 * * *` UTC).
-- **Reading.** `GET /reports/annotation-qc/{report_id}` returns the status, scope,
-  timing, the reference data versions used, and counts by issue type and by group.
+- **Reading.** `GET /reports/annotation-qc` lists reports newest first, optionally by
+  `status`, and says whether each report's findings can still be read. A global reader
+  sees every report, and other readers see all-groups reports and their own group's.
+  The list only narrows discovery: any report can be read by ID, with counts and
+  findings limited as described next.
+  `GET /reports/annotation-qc/{report_id}` returns the status, scope, timing, the
+  reference data versions used, and counts by issue type and by group.
   `GET /reports/annotation-qc/{report_id}/findings` lists findings, filtered by
   `issue_type` and `owning_group_id`. Reading requires the read role. Counts cover the
   reader's group, or every group for global scope, and findings follow the reader's

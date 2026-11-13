@@ -52,13 +52,17 @@ from standard_annotation_backend.services.change_set_service import (
 from standard_annotation_backend.services.comment_service import AnnotationComment
 from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.pagination import ResultPage
-from standard_annotation_backend.services.qc_report_service import QcReportSummary
+from standard_annotation_backend.services.qc_report_service import (
+    QcReportListing,
+    QcReportSummary,
+)
 from standard_annotation_backend.services.token_service import (
     CreatedToken,
     TokenContext,
     TokenCreateInput,
 )
 from standard_annotation_backend.validation_types import (
+    ExactNonBlankString,
     NonBlankString,
 )
 
@@ -306,7 +310,9 @@ class JobResource(BaseModel):
             "100 issues (line number, category, and invalid fields) for invalid "
             "rows. Completed refresh jobs, except entity retirement, include "
             "unchanged, which is true when the source document was already "
-            "active so nothing was applied."
+            "active so nothing was applied. Term replacement and QC report jobs "
+            "report a phase and running counts, and when they fail, "
+            "phase='failed' and a failure_code."
         ),
         examples=[
             {
@@ -735,7 +741,7 @@ class QcReportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     owning_group_id: Annotated[
-        NonBlankString | None,
+        ExactNonBlankString | None,
         Field(
             description=(
                 "Report on this group only. Global admins may omit it to report on "
@@ -913,5 +919,58 @@ class QcFindingPageResponse(PageResource[QcFindingResource]):
                 issues=[
                     ApiValidationIssue.model_validate(issue) for issue in finding.issues
                 ],
+            ),
+        )
+
+
+class QcReportListQuery(BaseModel):
+    """Filter and page the list of QC reports."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Annotated[
+        JobStatus | None, Field(description="Only reports in this state.")
+    ] = None
+    limit: PageLimit = 50
+    offset: PageOffset = 0
+
+
+class QcReportListItemResource(BaseModel):
+    """Identify one QC report in a list, and whether its findings can be read."""
+
+    report_id: UUID
+    status: JobStatus
+    owning_group_id: str | None = Field(
+        description="The group the report covers, or null for all groups."
+    )
+    requested_by: str
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    findings_available: bool = Field(
+        description=(
+            "True when the report succeeded and no later report of its scope has "
+            "replaced its findings."
+        )
+    )
+
+
+class QcReportPageResponse(PageResource[QcReportListItemResource]):
+    """Represent one requested page of QC reports."""
+
+    @classmethod
+    def from_service(cls, result: ResultPage[QcReportListing]) -> Self:
+        """Build a response page from a QC report service result."""
+        return cls.from_result_page(
+            result,
+            lambda listing: QcReportListItemResource(
+                report_id=listing.job.job_id,
+                status=listing.job.status,
+                owning_group_id=listing.owning_group_id,
+                requested_by=listing.job.requested_by,
+                created_at=listing.job.created_at,
+                started_at=listing.job.started_at,
+                completed_at=listing.job.completed_at,
+                findings_available=listing.findings_available,
             ),
         )

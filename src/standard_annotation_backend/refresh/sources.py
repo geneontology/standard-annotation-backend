@@ -42,6 +42,7 @@ from standard_annotation_backend.domain.refresh import (
 )
 from standard_annotation_backend.go_site.rule_files import RULE_FILE_PATHS
 from standard_annotation_backend.validation_types import TrimmedNonBlankString
+from standard_annotation_backend.yaml_loading import load_yaml
 
 SourceKey = Annotated[str, StringConstraints(pattern=SOURCE_KEY_PATTERN)]
 
@@ -345,11 +346,12 @@ def load_sources_file(path: Path) -> SourcesFile:
         The validated file contents.
 
     Raises:
-        ValueError: If the file cannot be read, is not valid YAML, or does not
-            match `SourcesFile`. Pydantic's `ValidationError` is a `ValueError`.
+        ValueError: If the file cannot be read, is not valid YAML, repeats a key
+            within one mapping, or does not match `SourcesFile`. Pydantic's
+            `ValidationError` is a `ValueError`.
     """
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = load_yaml(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
         raise ValueError("sources file could not be read") from None
     return SourcesFile.model_validate({} if raw is None else raw)

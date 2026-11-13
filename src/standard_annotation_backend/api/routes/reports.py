@@ -1,9 +1,11 @@
-"""Expose annotation QC reports: start them, and read summaries and findings."""
+"""Expose annotation QC reports: start and list them, and read summaries and findings."""
 
+from collections.abc import Callable
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Query, Request, status
+from pydantic import BaseModel
 
 from standard_annotation_backend.api.dependencies import (
     get_authenticated_context,
@@ -19,6 +21,8 @@ from standard_annotation_backend.api.models import (
     JobResource,
     QcFindingPageResponse,
     QcFindingQuery,
+    QcReportListQuery,
+    QcReportPageResponse,
     QcReportRequest,
     QcReportResource,
 )
@@ -42,8 +46,6 @@ router = APIRouter(
     responses=error_responses(*BEARER_ERRORS),
 )
 
-_FINDING_QUERY_PARAMETERS = frozenset(QcFindingQuery.model_fields)
-
 
 def get_qc_report_service(
     unit_of_work_factory: Annotated[
@@ -56,18 +58,23 @@ def get_qc_report_service(
     )
 
 
-def _reject_unknown_query_parameters(request: Request) -> None:
-    """Reject findings query parameters the route does not define."""
-    unknown_name = next(
-        (
-            name
-            for name, _value in request.query_params.multi_items()
-            if name not in _FINDING_QUERY_PARAMETERS
-        ),
-        None,
-    )
-    if unknown_name is not None:
-        raise UnknownQueryParameterError(unknown_name)
+def _only_query_parameters(model: type[BaseModel]) -> Callable[[Request], None]:
+    """Return a dependency that rejects query parameters `model` does not define."""
+    allowed = frozenset(model.model_fields)
+
+    def reject_unknown(request: Request) -> None:
+        unknown_name = next(
+            (
+                name
+                for name, _value in request.query_params.multi_items()
+                if name not in allowed
+            ),
+            None,
+        )
+        if unknown_name is not None:
+            raise UnknownQueryParameterError(unknown_name)
+
+    return reject_unknown
 
 
 @router.post(
@@ -95,6 +102,33 @@ def start_qc_report(
 
 
 @router.get(
+    "/annotation-qc",
+    response_model=QcReportPageResponse,
+    dependencies=[Depends(_only_query_parameters(QcReportListQuery))],
+    responses=error_responses(UnknownQueryParameterError, RequestValidationFailedError),
+    summary="List QC reports",
+    description=(
+        "List QC reports newest first, with whether each report's findings can "
+        "still be read. A global reader sees every report; other readers see "
+        "all-groups reports and their own group's reports. The list only narrows "
+        "discovery: any report can be read by ID. Requires the read role."
+    ),
+    response_description="One page of reports",
+)
+def list_qc_reports(
+    service: Annotated[QcReportService, Depends(get_qc_report_service)],
+    context: Annotated[RequestContext, Depends(get_authenticated_context)],
+    query: Annotated[QcReportListQuery, Query()],
+) -> QcReportPageResponse:
+    """Return one page of the reports covering the caller's group."""
+    return QcReportPageResponse.from_service(
+        service.list(
+            context, status=query.status, limit=query.limit, offset=query.offset
+        )
+    )
+
+
+@router.get(
     "/annotation-qc/{report_id}",
     response_model=QcReportResource,
     responses=error_responses(QcReportNotFoundError, RequestValidationFailedError),
@@ -118,7 +152,7 @@ def read_qc_report(
 @router.get(
     "/annotation-qc/{report_id}/findings",
     response_model=QcFindingPageResponse,
-    dependencies=[Depends(_reject_unknown_query_parameters)],
+    dependencies=[Depends(_only_query_parameters(QcFindingQuery))],
     responses=error_responses(
         QcReportNotFoundError,
         QcReportNotCompletedError,

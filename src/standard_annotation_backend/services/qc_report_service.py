@@ -58,7 +58,10 @@ from standard_annotation_backend.domain.validation import (
     validate_annotation,
 )
 from standard_annotation_backend.persistence.locks import AdvisoryTryLock, LockNamespace
-from standard_annotation_backend.persistence.models import QcReportFindingRecord
+from standard_annotation_backend.persistence.models import (
+    JobRecord,
+    QcReportFindingRecord,
+)
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
@@ -346,6 +349,22 @@ class QcReportSummary:
     result: QcReportResult | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class QcReportListing:
+    """Describe one report in a list of reports.
+
+    Attributes:
+        job: The report's job.
+        owning_group_id: The group the report covers, or `None` for all groups.
+        findings_available: Whether the report succeeded and no later report of
+            its scope has replaced its findings.
+    """
+
+    job: Job
+    owning_group_id: str | None
+    findings_available: bool
+
+
 class QcReportService:
     """Start QC reports and read them within each caller's scope.
 
@@ -405,6 +424,39 @@ class QcReportService:
                 type(error).__name__,
             )
         return job
+
+    def list(
+        self,
+        context: AuthorizationContext,
+        *,
+        status: JobStatus | None,
+        limit: int,
+        offset: int,
+    ) -> ResultPage[QcReportListing]:
+        """Return one page of the reports covering the caller's group, newest first.
+
+        A global reader sees every report. Other readers see all-groups reports
+        and their own group's reports.
+
+        Raises:
+            PermissionDeniedError: If the caller's authorization cannot read
+                reports.
+        """
+        authorize_role(context, PermissionAction.QC_REPORT_READ)
+        group = ownership_scope(context).owning_group_id
+        with self._unit_of_work_factory() as unit_of_work:
+            page = unit_of_work.qc_reports.list_reports(
+                covering_group=group, status=status, limit=limit, offset=offset
+            )
+            superseded = unit_of_work.qc_reports.superseded(
+                [record.job_id for record in page.items]
+            )
+            return ResultPage.from_page(
+                page,
+                lambda record: _listing(record, superseded),
+                limit=limit,
+                offset=offset,
+            )
 
     def summary(
         self, context: AuthorizationContext, report_id: UUID
@@ -510,6 +562,18 @@ def _report(unit_of_work: SqlAlchemyUnitOfWork, report_id: UUID) -> Job:
     if record is None or record.job_type is not JobType.ANNOTATION_QC_REPORT:
         raise QcReportNotFoundError(report_id)
     return job_from_record(record)
+
+
+def _listing(record: JobRecord, superseded: set[UUID]) -> QcReportListing:
+    """Build a list entry from a report's job record."""
+    job = job_from_record(record)
+    return QcReportListing(
+        job=job,
+        owning_group_id=group_scope(job.parameters),
+        findings_available=(
+            job.status is JobStatus.SUCCEEDED and job.job_id not in superseded
+        ),
+    )
 
 
 def _finding(record: QcReportFindingRecord) -> QcFinding:

@@ -2,7 +2,8 @@
 
 PyYAML keeps the last value when a mapping repeats a key, so a mistake in a
 hand-edited file can silently replace an earlier value. Every YAML document SABE
-reads from go-site is loaded here, so a repeated key fails instead.
+reads from go-site or from `config/sources.yaml` is loaded here, so a repeated key
+fails instead.
 """
 
 import yaml

@@ -842,9 +842,11 @@ POST /reports/annotation-qc
   one group and returns 202 Accepted with the job. The scheduler also creates
   a nightly all-groups report.
 
+GET /reports/annotation-qc
 GET /reports/annotation-qc/{report_id}
 GET /reports/annotation-qc/{report_id}/findings
-  Return a report's summary, and its findings, within the caller's scope.
+  List reports, and return one report's summary and findings, within the caller's
+  scope.
 
 GET /admin/jobs/{job_id}
   Returns queued/running/succeeded/failed status, progress, counts,
@@ -874,20 +876,16 @@ guide](docs/refresh-infrastructure.md) shows how these pieces fit together in th
 described under Authorization Model.
 
 **GO Rule data.** The `rules` entry names the go-site repository and ref. Each refresh
-resolves the ref to one commit and reads six metadata files at it: `db-xrefs.yaml`,
-`gorefs.yaml`, `groups.yaml`, `retracted-publications.txt`,
-`eco-usage-constraints.yaml`, and `extensions-constraints.yaml`. Every file is
-validated, keeping only the values GO Rules check, and the six activate together as one
-snapshot. Extension constraints are kept only for entries that name their relation by
-`relation_id`, because annotations name relations by ID. An invalid or unreachable file
-fails the job and leaves the previous snapshot active. A refresh skips as unchanged when
-the files match the active snapshot's, whichever commit they came from, and the snapshot
-already holds what this release parses from them. Retracted PMIDs are stored as rows of
-their snapshot, and the other five files as one validated document. Activation keeps the
-snapshot it replaces and deletes older ones. The job warns about each
-`extensions-constraints.yaml` namespace that is neither a configured ontology prefix nor
-a `db-xrefs.yaml` database. This refresh is separate from the authorization refresh,
-which reads `users.yaml` from the same repository on its own schedule.
+resolves the ref to one commit, reads the six metadata files GO Rules use
+(`db-xrefs.yaml`, `gorefs.yaml`, `groups.yaml`, `retracted-publications.txt`,
+`eco-usage-constraints.yaml`, and `extensions-constraints.yaml`), validates them, and
+activates them together as one snapshot. An invalid or unreachable file fails the job
+and leaves the previous snapshot active. This refresh is separate from the authorization
+refresh, which reads `users.yaml` from the same repository on its own schedule. The
+[refresh infrastructure guide](docs/refresh-infrastructure.md) describes its unchanged
+check, storage, retention, and warnings, and
+[annotation validation](docs/annotation-validation.md#go-rules) describes how rules read
+the data.
 
 **Ontologies.** `config/sources.yaml` lists every ontology SABE loads and says how to
 read each one: the `ontology:` header the file must declare, the identifier prefixes the
@@ -914,7 +912,9 @@ active or be used by operations that need terms or closure. Pruning and activati
 the same per-ontology advisory lock, so cleanup cannot race with a refresh of that
 ontology. Pruning runs after each ontology job finishes (`sabe.ontology.prune`); a
 failure to schedule or run it leaves the job's status and result unchanged, and pruning
-is retried.
+is retried. Removing an ontology from `config/sources.yaml` stops its prefix from being
+checked once SABE's processes reload their configuration; its stored snapshots are not
+yet retired.
 
 **Entities.** An entity is an annotatable subject identified by `db_object_id`. Each
 configured GPI source supplies a complete catalog. An identifier can be active in only
@@ -1045,25 +1045,16 @@ identifies them, counts, and warnings/errors.
 Semantic validation of client writes is synchronous, as described under Validation.
 Stored annotations can still have issues, from GPAD imports or from later reference data
 refreshes, so an `annotation_qc_report` job validates every active annotation in its
-scope (all groups or one owning group) with the same checks, in ID-ordered batches read
-without locks. Admins start reports through the API, and the scheduler runs an
-all-groups report nightly. One report runs per scope at a time.
-
-The report stores one finding per annotation with issues, and counts by group and by
-group and issue type. A stored annotation that no longer passes the schema becomes a
-finding of type `structural` rather than failing the job. Duplicates are reported per
-annotation, each listing its peers: because reference overlap is not transitive for
-multi-reference annotations, reports never group duplicate pairs into connected
-components. Snapshots are resolved per batch, and the job result records every set of
-ontology snapshots, entity catalog snapshots, and go-site commits used, with the SABE and
-schema versions. Missing reference data fails the job with `reference_data_unavailable`
-and leaves no rows.
-
-Summaries and counts are kept permanently. Findings are kept only for the most recent
-completed report of each scope: the transaction that marks a report succeeded deletes
-the findings of older reports of that scope. Readers need only the read role; counts are
-limited to the reader's group and findings to the reader's ownership scope. See
-[annotation validation](docs/annotation-validation.md#reports) for the API behavior.
+scope (all groups or one owning group) with the same checks, in batches read without
+locks. Admins start reports through the API, and the scheduler runs an all-groups
+report nightly. A report keeps one finding per annotation with issues, and counts by
+group and issue type. Duplicates are reported per annotation, each listing its peers:
+because reference overlap is not transitive for multi-reference annotations, reports
+never group duplicate pairs into connected components. Counts are kept permanently, and
+findings only for the most recent completed report of each scope.
+[Annotation validation](docs/annotation-validation.md#reports) describes the API, and the
+[refresh infrastructure guide](docs/refresh-infrastructure.md#qc-report-jobs) describes
+how the jobs run.
 
 ## Deployment and Operations
 
@@ -1165,11 +1156,11 @@ developers can run locally and operate in AWS with limited specialized DevOps bu
 |------------------------------------------------------|----------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | SABE annotation identifiers                          | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | The backend generates UUIDs as SABE metadata outside the Standard Annotation payload; UUID helpers and persistence may proceed.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Per-group GPAD replacement and cutover               | Settled for the initial implementation                                                                   | Each group's cutover is a global-admin decision; no further input is needed for the mechanism.                                             | Configured GPAD sources replace a `gpad_imported` group's annotations through staging tables keyed by job ID. A per-group try-lock serializes jobs for one group. One publication transaction takes the global annotation-write lock exclusively, permanently deletes the group's annotations and dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. A cutover does the same with zero rejections allowed and makes the group `sabe_managed` permanently. |
-| Duplicate handling during GPAD import                | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | Staging and publication perform no duplicate checks or rejection. Staging takes no duplicate locks; publication takes the global annotation-write lock exclusively but takes no signature locks. A separate QC process may apply the settled pairwise predicate and should report duplicate pairs rather than treating connected components as equivalence classes.                                                                                                                                                                                                          |
+| Duplicate handling during GPAD import                | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | Staging and publication perform no duplicate checks or rejection. Staging takes no duplicate locks; publication takes the global annotation-write lock exclusively but takes no signature locks. QC reports apply the settled pairwise predicate to stored annotations and list each annotation's peers rather than grouping duplicates into connected components.                                                                                                                                                                                                           |
 | Initial Protein2GO-aligned pairwise duplicate policy | Settled for the initial implementation                                                                   | No further input is needed. The accepted non-transitivity risk should be reviewed if multi-reference source data becomes material.         | Implementation may proceed with an indexed base signature and per-reference lookup rows. Creates and updates reject any peer as a `duplicate_annotation` issue; soft deletes remove conflicts. Every ordinary annotation mutation uses `READ COMMITTED`, takes the global annotation-write lock in shared mode before ordered signature locks, then freshly re-reads state and peers.                                                                                                                                                                                        |
-| Annotated-entity metadata for GPAD imports           | Settled for GPAD import; alternatives are deferred                                                       | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | GPAD imports do not check `db_object_id` against the entity catalog; semantic validation applies to client writes only. No alternative source or reconciliation workflow is implied.                                                                                                                                                                                                                                                                                                                                                                                         |
+| Annotated-entity metadata for GPAD imports           | Settled for GPAD import; alternatives are deferred                                                       | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | GPAD imports do not check `db_object_id` against the entity catalog; semantic validation applies to client writes and term replacement writes, and QC reports flag stored annotations whose entity is unknown. No alternative source or reconciliation workflow is implied.                                                                                                                                                                                                                                                                                                  |
 | Structural validation                                | Settled for the initial implementation                                                                   | No further policy input is needed.                                                                                                         | Structural schema validation blocks all writes and individual import records. Invalid imported records are isolated and reported instead of failing the whole import.                                                                                                                                                                                                                                                                                                                                                                                                        |
-| GORULE-style semantic validation                     | Settled: entity, ontology-term, duplicate, and write-blocking GO Rule checks block client writes             | No further policy input is needed for the checks in `docs/annotation-validation.md`.                                                       | Client creates and updates must have no semantic issues; deletes and GPAD imports are not checked. The rules and SABE's reading of each are in `docs/annotation-validation.md`.                                                                                                                                                                                                                                                                                                                                                                                              |
+| GORULE-style semantic validation                     | Settled: entity, ontology-term, duplicate, and write-blocking GO Rule checks block client writes         | No further policy input is needed for the checks in `docs/annotation-validation.md`.                                                       | Client creates and updates must have no semantic issues; deletes and GPAD imports are not checked. The rules and SABE's reading of each are in `docs/annotation-validation.md`. Term replacement writes meet the same checks, and QC reports apply them to stored annotations.                                                                                                                                                                                                                                                                                               |
 
 ## Possible Future Expansion
 
@@ -1181,10 +1172,11 @@ Eventually, the full set of curated annotations in SABE should have no pairs tha
 satisfy the settled duplicate predicate. Reaching that state requires identifying,
 reviewing, and resolving duplicate pairs already present in imported source data. During
 cleanup, creates and updates that would leave an annotation with any duplicate-conflict
-peer are rejected, and soft deletes reduce those pairs. Reports and cleanup tools can
-use the base signature and per-reference lookup rows, but any connected grouping they
-present for navigation must not be described as an equivalence class because the
-pairwise predicate is not necessarily transitive.
+peer are rejected, and soft deletes reduce those pairs. QC reports already list each
+annotation's duplicate peers. Cleanup tools can use the base signature and per-reference
+lookup rows, but any connected grouping they present for navigation must not be
+described as an equivalence class because the pairwise predicate is not necessarily
+transitive.
 
 The initial design is intentionally very conservative about how it handles change sets
 which target a version of an annotation that is not the current version. It will treat

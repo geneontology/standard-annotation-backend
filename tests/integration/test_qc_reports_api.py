@@ -81,6 +81,13 @@ def _run(
     ).run(report_id)
 
 
+def _start(client: TestClient, body: dict[str, object]) -> UUID:
+    """Start a report as the client's identity and return its ID."""
+    response = client.post(PATH, json=body)
+    assert response.status_code == status.HTTP_202_ACCEPTED
+    return UUID(response.json()["job_id"])
+
+
 @pytest.fixture
 def completed_report(
     integration_api_client: TestClient,
@@ -357,3 +364,96 @@ def test_a_report_finishing_during_a_read_never_yields_an_empty_page(
         assert response.json()["total"] == 3
     else:
         assert response.status_code == status.HTTP_410_GONE
+
+
+def test_reports_are_listed_newest_first_with_findings_availability(
+    integration_api_client: TestClient,
+    sent: list[UUID],
+    active_annotation_subjects: None,
+    unit_of_work_factory: UnitOfWorkFactory,
+    database_engine: Engine,
+) -> None:
+    """Only the latest succeeded report of a scope offers findings, and reads agree."""
+    older = _start(integration_api_client, {})
+    _run(unit_of_work_factory, database_engine, older)
+    newer = _start(integration_api_client, {})
+    _run(unit_of_work_factory, database_engine, newer)
+    queued = _start(integration_api_client, {"owning_group_id": "MGI"})
+
+    body = integration_api_client.get(PATH).json()
+
+    assert body["total"] == 3
+    assert [item["report_id"] for item in body["items"]] == [
+        str(queued),
+        str(newer),
+        str(older),
+    ]
+    assert [item["findings_available"] for item in body["items"]] == [
+        False,
+        True,
+        False,
+    ]
+    assert [item["owning_group_id"] for item in body["items"]] == ["MGI", None, None]
+    assert body["items"][0]["status"] == "queued"
+    newer_findings = integration_api_client.get(f"{PATH}/{newer}/findings")
+    older_findings = integration_api_client.get(f"{PATH}/{older}/findings")
+    assert newer_findings.status_code == status.HTTP_200_OK
+    assert older_findings.status_code == status.HTTP_410_GONE
+
+
+@pytest.mark.parametrize("scope", ["self", "group"])
+def test_readers_list_all_groups_reports_and_their_own_groups(
+    integration_api_client: TestClient, sent: list[UUID], scope: str
+) -> None:
+    """Restricted readers see reports that cover their group; global readers see all."""
+    all_groups = _start(integration_api_client, {})
+    mgi = _start(integration_api_client, {"owning_group_id": "MGI"})
+    rgd = _start(integration_api_client, {"owning_group_id": "RGD"})
+
+    everything = integration_api_client.get(PATH).json()["items"]
+    _use("read", scope)
+    visible = integration_api_client.get(PATH).json()
+
+    assert {item["report_id"] for item in everything} == {
+        str(all_groups),
+        str(mgi),
+        str(rgd),
+    }
+    assert {item["report_id"] for item in visible["items"]} == {
+        str(all_groups),
+        str(mgi),
+    }
+    assert visible["total"] == 2
+
+
+def test_the_report_list_filters_by_status_and_pages(
+    integration_api_client: TestClient, completed_report: UUID
+) -> None:
+    """A status filter and a page limit combine; unknown parameters are rejected."""
+    _start(integration_api_client, {"owning_group_id": "MGI"})
+
+    succeeded = integration_api_client.get(PATH, params={"status": "succeeded"}).json()
+    first = integration_api_client.get(PATH, params={"limit": 1}).json()
+    second = integration_api_client.get(PATH, params={"limit": 1, "offset": 1}).json()
+    unknown = integration_api_client.get(PATH, params={"scope": "MGI"})
+
+    assert [item["report_id"] for item in succeeded["items"]] == [str(completed_report)]
+    assert (first["total"], len(first["items"]), first["limit"]) == (2, 1, 1)
+    assert second["items"][0]["report_id"] == str(completed_report)
+    assert first["items"][0]["report_id"] != second["items"][0]["report_id"]
+    assert unknown.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert unknown.json()["error"]["code"] == "unknown_query_parameter"
+
+
+@pytest.mark.parametrize("group", ["MGI ", " MGI"])
+def test_a_report_scope_with_surrounding_whitespace_is_rejected(
+    integration_api_client: TestClient, sent: list[UUID], group: str
+) -> None:
+    """A padded group key is invalid input, so no unreadable report scope is stored."""
+    response = integration_api_client.post(PATH, json={"owning_group_id": group})
+    listing = integration_api_client.get(PATH)
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert sent == []
+    assert listing.status_code == status.HTTP_200_OK
+    assert listing.json()["total"] == 0

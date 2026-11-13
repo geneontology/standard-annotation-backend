@@ -324,3 +324,19 @@ def test_invalid_annotation_sources_are_rejected(annotations: object) -> None:
     """A source needs a valid key, a nonblank group no other source uses, and GPAD."""
     with pytest.raises(ValidationError):
         SourcesFile.model_validate(_file(annotations=annotations))
+
+
+def test_a_repeated_key_is_rejected_instead_of_replacing_the_first(
+    tmp_path: Path,
+) -> None:
+    """A section listed twice fails to load, even when both copies are valid."""
+    path = tmp_path / "sources.yaml"
+    path.write_text(
+        SHIPPED_FILE.read_text(encoding="utf-8")
+        + "\nrules:\n  type: github\n  repository: geneontology/go-site\n"
+        "  ref: master\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"^sources file could not be read$"):
+        load_sources_file(path)
