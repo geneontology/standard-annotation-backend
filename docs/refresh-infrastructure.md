@@ -78,7 +78,7 @@ at startup. The models live in `refresh/sources.py`:
 ```mermaid
 flowchart LR
     file[("config/sources.yaml")] -->|"load_sources_file"| model["SourcesFile<br/>(Pydantic validation)"]
-    model --> lookup["RefreshSources<br/>sources(kind), keys(kind), source(kind, key)"]
+    model --> lookup["RefreshSources<br/>sources(kind), keys(kind), source(kind, key),<br/>ontology_catalog()"]
     lookup --> gh["GitHubSource<br/>repository, ref, path"]
     lookup --> https["HttpsSource<br/>url"]
     gh -->|"GitHubSourceFetcher:<br/>resolve ref, download raw file"| doc["SourceDocument<br/>content + provenance"]
@@ -86,6 +86,11 @@ flowchart LR
     lookup --> rules["GitHubRulesSource<br/>repository, ref"]
     rules -->|"GitHubSourceFetcher.fetch_files:<br/>resolve ref once, download six files, pack them"| doc
 ```
+
+`ontology_catalog()` returns the configured ontologies and the identifier prefixes
+each owns. Validation, term replacement, QC reports, and the rules refresh's
+extension-namespace warnings all use it to decide which ontology an identifier
+belongs to.
 
 A `SourceDocument` carries the downloaded bytes and their provenance:
 `source_type`, `source_locator` (`github:<repository>:<path>`, `github:<repository>`

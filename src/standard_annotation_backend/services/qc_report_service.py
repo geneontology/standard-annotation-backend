@@ -35,6 +35,7 @@ from standard_annotation_backend.domain.jobs import (
     group_scope,
     group_scope_parameters,
 )
+from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.qc_reports import (
     STORED_QC_REPORT_RESULT,
     IssueType,
@@ -46,10 +47,7 @@ from standard_annotation_backend.domain.qc_reports import (
     QcReportResult,
     ReferenceDataVersions,
 )
-from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
-    RefreshKindName,
-)
+from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
 from standard_annotation_backend.domain.semantic_validation.facts import (
     ReferenceDataUnavailableError,
@@ -70,7 +68,6 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
-from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import (
     Job,
@@ -141,7 +138,7 @@ class QcReportRunner:
 
     Args:
         unit_of_work_factory: Opens the transactions for reading and storing.
-        sources: Configured sources, which name the ontologies and their prefixes.
+        ontologies: The configured ontologies and the identifier prefixes each owns.
         try_lock: Takes a PostgreSQL advisory lock only if it is free. The runner
             locks the job, so only one process runs it, and the report's scope,
             so only one report of a scope runs at a time.
@@ -150,16 +147,13 @@ class QcReportRunner:
     def __init__(
         self,
         unit_of_work_factory: UnitOfWorkFactory,
-        sources: RefreshSources,
+        ontologies: OntologyCatalog,
         try_lock: AdvisoryTryLock,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._try_lock = try_lock
         self._jobs = JobService(unit_of_work_factory)
-        self._ontologies = {
-            key: sources.ontology_definition(key).identifier_prefixes
-            for key in sources.keys(RefreshKindName.ONTOLOGY)
-        }
+        self._ontologies = ontologies
 
     def run(self, job_id: UUID) -> None:
         """Run one QC report to completion or failure.

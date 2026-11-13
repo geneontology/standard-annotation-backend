@@ -9,7 +9,7 @@ from typing import Never
 from uuid import UUID, uuid4
 
 import pytest
-from refresh_helpers import TEST_SOURCES
+from refresh_helpers import TEST_ONTOLOGIES
 from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -285,7 +285,7 @@ def _run_review_race(
 
 
 def _propose_create(factory: UnitOfWorkFactory, annotation: Annotation) -> UUID:
-    proposed = ChangeSetService(factory, TEST_SOURCES).propose_create(
+    proposed = ChangeSetService(factory, TEST_ONTOLOGIES).propose_create(
         payload=annotation.model_dump(mode="json"),
         owning_group_id="curator-group",
         reason="Review new evidence",
@@ -296,7 +296,7 @@ def _propose_create(factory: UnitOfWorkFactory, annotation: Annotation) -> UUID:
 
 def _accept(change_set_id: UUID, context: RequestContext) -> Operation:
     def accept(factory: UnitOfWorkFactory) -> AcceptedChangeSet:
-        return ChangeSetService(factory, TEST_SOURCES).accept(
+        return ChangeSetService(factory, TEST_ONTOLOGIES).accept(
             change_set_id, context=context
         )
 
@@ -358,10 +358,10 @@ def test_direct_update_makes_waiting_acceptance_stale_without_overwriting(
 ) -> None:
     """A waiting acceptance commits staleness and preserves the direct writer's data."""
     payload = writable_annotation.model_dump(mode="json")
-    created = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
+    created = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES).create(
         payload=payload, owning_group_id="group", context=PROPOSER
     )
-    service = ChangeSetService(unit_of_work_factory, TEST_SOURCES)
+    service = ChangeSetService(unit_of_work_factory, TEST_ONTOLOGIES)
     proposed = (
         service.propose_update(
             created.annotation_id,
@@ -380,7 +380,7 @@ def test_direct_update_makes_waiting_acceptance_stale_without_overwriting(
     )
 
     def direct_update(factory: UnitOfWorkFactory) -> object:
-        return AnnotationService(factory, TEST_SOURCES).patch(
+        return AnnotationService(factory, TEST_ONTOLOGIES).patch(
             created.annotation_id,
             changes={"assigned_by": "WB"},
             expected_version=1,
@@ -519,8 +519,8 @@ def test_conflicting_update_acceptances_cannot_both_succeed(
     writable_annotation: Annotation,
 ) -> None:
     """Updates of different targets serialize before introducing a shared duplicate."""
-    annotation_service = AnnotationService(unit_of_work_factory, TEST_SOURCES)
-    change_sets = ChangeSetService(unit_of_work_factory, TEST_SOURCES)
+    annotation_service = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
+    change_sets = ChangeSetService(unit_of_work_factory, TEST_ONTOLOGIES)
     proposal_ids = []
     target_ids = []
     for db_object_id in ("UniProtKB:FIRST", "UniProtKB:SECOND"):
@@ -608,7 +608,7 @@ def test_review_and_preview_wait_for_global_lock_before_locking_proposal(
         def review() -> object:
             started.set()
             service = ChangeSetService(
-                create_unit_of_work_factory(lambda: reviewer), TEST_SOURCES
+                create_unit_of_work_factory(lambda: reviewer), TEST_ONTOLOGIES
             )
             try:
                 if operation == "accept":
@@ -648,7 +648,7 @@ def test_review_and_preview_wait_for_global_lock_before_locking_proposal(
         finally:
             holder.rollback()
             _drain_workers(executor, futures, failures, stop_workers=stop_reviewer)
-    stored = ChangeSetService(unit_of_work_factory, TEST_SOURCES).get(
+    stored = ChangeSetService(unit_of_work_factory, TEST_ONTOLOGIES).get(
         proposal_id, context=FIRST_REVIEWER
     )
     assert stored.state == ("accepted" if operation == "accept" else "proposed")

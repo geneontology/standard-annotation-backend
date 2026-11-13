@@ -26,10 +26,8 @@ from standard_annotation_backend.domain.jobs import (
     group_scope,
     group_scope_parameters,
 )
-from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
-    RefreshKindName,
-)
+from standard_annotation_backend.domain.ontology import OntologyCatalog
+from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.domain.semantic_validation.facts import (
     ReferenceDataUnavailableError,
 )
@@ -42,7 +40,6 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
-from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import (
     Job,
@@ -115,7 +112,7 @@ class TermReplacementService:
 
     Args:
         unit_of_work_factory: Opens the transactions for reading and updating.
-        sources: Configured sources, which name the ontologies and their prefixes.
+        ontologies: The configured ontologies and the identifier prefixes each owns.
         try_lock: Takes a PostgreSQL advisory lock only if it is free. The
             service locks the job, so only one process runs it, and the job's
             scope, so only one job of a scope runs at a time.
@@ -124,22 +121,14 @@ class TermReplacementService:
     def __init__(
         self,
         unit_of_work_factory: UnitOfWorkFactory,
-        sources: RefreshSources,
+        ontologies: OntologyCatalog,
         try_lock: AdvisoryTryLock,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._try_lock = try_lock
         self._jobs = JobService(unit_of_work_factory)
-        self._validator = SemanticValidator(sources)
-        self._ontologies = {
-            key: sources.ontology_definition(key).identifier_prefixes
-            for key in sources.keys(RefreshKindName.ONTOLOGY)
-        }
-        self._ontology_of = {
-            prefix: key
-            for key, prefixes in self._ontologies.items()
-            for prefix in prefixes
-        }
+        self._ontologies = ontologies
+        self._validator = SemanticValidator(ontologies)
 
     def run(self, job_id: UUID) -> None:
         """Run one term replacement job to completion or failure.
@@ -226,7 +215,7 @@ class TermReplacementService:
             for annotation_id, version, annotation in readable:
                 try:
                     replaced = replaced_annotation(
-                        annotation, facts.terms, self._ontology_of
+                        annotation, facts.terms, self._ontologies
                     )
                 except ValidationError:
                     # A replacement target the schema rejects, such as a

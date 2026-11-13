@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from uuid import UUID, uuid4
 
 import pytest
-from refresh_helpers import TEST_SOURCES
+from refresh_helpers import TEST_ONTOLOGIES
 from seeding import insert_annotation
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -61,7 +61,7 @@ REVIEWER = RequestContext(
 
 
 def _service(factory: UnitOfWorkFactory) -> ChangeSetService:
-    return ChangeSetService(factory, TEST_SOURCES)
+    return ChangeSetService(factory, TEST_ONTOLOGIES)
 
 
 def _duplicate_peers(issues: Sequence[ValidationIssue]) -> set[UUID]:
@@ -183,7 +183,7 @@ def test_create_acceptance_rechecks_duplicates_after_successful_preview(
         context=PROPOSER,
     )
     assert service.preview(proposed.change_set_id, context=PROPOSER).can_accept
-    duplicate = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
+    duplicate = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES).create(
         payload=payload,
         owning_group_id="other-group",
         context=PROPOSER,
@@ -285,7 +285,7 @@ def test_update_preview_and_acceptance_use_base_snapshot(
     The saved version is attributed to the proposer, as for creates; the reviewer
     is recorded on the change set.
     """
-    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     target = annotations.create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="target-group",
@@ -327,7 +327,7 @@ def test_update_preview_reports_invalid_post_patch_annotation(
     writable_annotation: Annotation,
 ) -> None:
     """A valid patch that removes a required field yields validation problems."""
-    target = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
+    target = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES).create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
@@ -353,7 +353,7 @@ def test_update_preview_uses_historical_base_and_reports_current_version(
     writable_annotation: Annotation,
 ) -> None:
     """A historical proposal previews its saved base while reporting staleness."""
-    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     target = annotations.create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
@@ -467,7 +467,7 @@ def test_update_proposal_rejects_unusable_patch_before_persistence(
     patch: object,
 ) -> None:
     """Unsupported or inapplicable patches are rejected without storing a proposal."""
-    target = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
+    target = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES).create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
@@ -490,7 +490,7 @@ def test_update_proposal_requires_existing_base_version(
     writable_annotation: Annotation,
 ) -> None:
     """A proposal cannot target a version that has never existed."""
-    target = AnnotationService(unit_of_work_factory, TEST_SOURCES).create(
+    target = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES).create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
         context=PROPOSER,
@@ -515,7 +515,7 @@ def test_delete_preview_and_acceptance_preserve_history(
     The deleted version is attributed to the proposer; the reviewer is recorded on
     the change set.
     """
-    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     target = annotations.create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="target-group",
@@ -592,7 +592,7 @@ def test_stale_acceptance_commits_review_and_audit_before_raising(
     target_change: str,
 ) -> None:
     """A changed or deleted target makes review stale durably before the error escapes."""
-    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     target = annotations.create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
@@ -652,7 +652,7 @@ def test_terminal_proposals_reject_further_review_operations(
     operation: str,
 ) -> None:
     """A completed review remains terminal and cannot be previewed or reviewed again."""
-    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     target = annotations.create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
@@ -690,7 +690,7 @@ def test_delete_proposal_requires_existing_active_base_snapshot(
     writable_annotation: Annotation,
 ) -> None:
     """Deletion proposals require a saved version that still represented an annotation."""
-    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     target = annotations.create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",
@@ -722,7 +722,7 @@ def test_review_audit_failure_rolls_back_annotation_and_review_state(
     transition: str,
 ) -> None:
     """A failed audit record leaves the proposal and prior annotation version intact."""
-    annotations = AnnotationService(unit_of_work_factory, TEST_SOURCES)
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     target = annotations.create(
         payload=writable_annotation.model_dump(mode="json"),
         owning_group_id="group",

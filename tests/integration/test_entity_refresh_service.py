@@ -30,7 +30,7 @@ from standard_annotation_backend.domain.entities import (
     EntityRefreshResult,
 )
 from standard_annotation_backend.domain.jobs import JobType
-from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
+from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY, OntologyCatalog
 from standard_annotation_backend.domain.refresh import (
     SourceDocument,
     SourceProvenance,
@@ -458,7 +458,7 @@ def test_validation_reads_each_published_entity_taxon_and_type(
         facts = uow.validation_facts.gather(
             [_annotation_on("MGI:1"), _annotation_on("MGI:2")],
             [(), ()],
-            {GO_ONTOLOGY_KEY: ("GO",)},
+            OntologyCatalog({GO_ONTOLOGY_KEY: ("GO",)}),
         )
     assert [
         None

@@ -3,13 +3,12 @@
 from uuid import UUID
 
 from standard_annotation_backend.domain.annotations import Annotation
-from standard_annotation_backend.domain.refresh import RefreshKindName
+from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.semantic_validation.rules import (
     validate_semantics,
 )
 from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.unit_of_work import SqlAlchemyUnitOfWork
-from standard_annotation_backend.refresh.sources import RefreshSources
 
 
 class SemanticValidator:
@@ -23,14 +22,11 @@ class SemanticValidator:
     one of an ontology's prefixes must be a current term of that ontology.
 
     Args:
-        sources: Configured sources, which name the ontologies and their prefixes.
+        ontologies: The configured ontologies and the identifier prefixes each owns.
     """
 
-    def __init__(self, sources: RefreshSources) -> None:
-        self._ontologies = {
-            key: sources.ontology_definition(key).identifier_prefixes
-            for key in sources.keys(RefreshKindName.ONTOLOGY)
-        }
+    def __init__(self, ontologies: OntologyCatalog) -> None:
+        self._ontologies = ontologies
 
     def issues(
         self,

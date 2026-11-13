@@ -31,6 +31,7 @@ from standard_annotation_backend.domain.ontology import (
     GO_ONTOLOGY_KEY,
     REQUIRED_GO_SUBSETS,
     SUBCLASS_PREDICATE,
+    OntologyCatalog,
     OntologyDefinition,
 )
 from standard_annotation_backend.domain.refresh import (
@@ -430,6 +431,15 @@ class RefreshSources:
         if definition is None:
             raise UnknownSourceError(RefreshKindName.ONTOLOGY, key)
         return definition
+
+    def ontology_catalog(self) -> OntologyCatalog:
+        """Return the configured ontologies and the identifier prefixes each owns."""
+        return OntologyCatalog(
+            {
+                key: definition.identifier_prefixes
+                for key, definition in self._ontology_definitions.items()
+            }
+        )
 
 
 def _is_github_path_segment(value: str) -> bool:

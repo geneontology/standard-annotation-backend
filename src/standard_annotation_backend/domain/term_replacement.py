@@ -20,6 +20,7 @@ from uuid import UUID
 from pydantic import Field
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.semantic_validation.facts import (
     TermFact,
     TermStatus,
@@ -49,7 +50,7 @@ def replacement_step(fact: TermFact) -> str | None:
 def replacement_for(
     identifier: str,
     terms: Mapping[str, TermFact],
-    ontology_of: Mapping[str, str],
+    ontologies: OntologyCatalog,
 ) -> str | None:
     """Return the current term that replaces `identifier`, or `None`.
 
@@ -58,7 +59,9 @@ def replacement_for(
         terms: Facts about the identifier and every term its replacement chain
             reaches, each from the active snapshot of the ontology that owns its
             prefix.
-        ontology_of: The key of the configured ontology that owns each prefix.
+        ontologies: The configured ontologies and the identifier prefixes each
+            owns. A replacement must belong to the same ontology as the
+            identifier it replaces.
 
     Returns:
         The current term at the end of the identifier's replacement chain, or
@@ -66,7 +69,7 @@ def replacement_for(
         chain reaches a term that is unknown or cannot be replaced, names a term
         of another ontology, or returns to an identifier it already visited.
     """
-    ontology = ontology_of.get(split_identifier(identifier)[0])
+    ontology = ontologies.key_of(split_identifier(identifier)[0])
     if ontology is None:
         return None
     seen = {identifier}
@@ -81,7 +84,7 @@ def replacement_for(
         if (
             following is None
             or following in seen
-            or ontology_of.get(split_identifier(following)[0]) != ontology
+            or ontologies.key_of(split_identifier(following)[0]) != ontology
         ):
             return None
         seen.add(following)
@@ -91,7 +94,7 @@ def replacement_for(
 def replaced_annotation(
     annotation: Annotation,
     terms: Mapping[str, TermFact],
-    ontology_of: Mapping[str, str],
+    ontologies: OntologyCatalog,
 ) -> Annotation | None:
     """Return the annotation with every replaceable identifier replaced.
 
@@ -111,7 +114,7 @@ def replaced_annotation(
     changed_lists: set[str] = set()
     changed = False
     for occurrence in term_identifiers(annotation):
-        target = replacement_for(occurrence.identifier, terms, ontology_of)
+        target = replacement_for(occurrence.identifier, terms, ontologies)
         if target is None:
             continue
         path = occurrence.location[1:]

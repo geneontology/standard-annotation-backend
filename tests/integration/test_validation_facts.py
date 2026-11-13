@@ -16,7 +16,6 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation
-from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.domain.semantic_validation.facts import (
     EntityFact,
     TermFact,
@@ -31,10 +30,7 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 
-ONTOLOGIES = {
-    key: SHIPPED_SOURCES.ontology_definition(key).identifier_prefixes
-    for key in SHIPPED_SOURCES.keys(RefreshKindName.ONTOLOGY)
-}
+ONTOLOGIES = SHIPPED_SOURCES.ontology_catalog()
 PEER = UUID("00000000-0000-0000-0000-000000000001")
 
 

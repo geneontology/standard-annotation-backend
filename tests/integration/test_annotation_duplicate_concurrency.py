@@ -12,7 +12,7 @@ from time import monotonic
 from uuid import UUID
 
 import pytest
-from refresh_helpers import TEST_SOURCES
+from refresh_helpers import TEST_ONTOLOGIES
 from seeding import insert_annotation
 from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -380,7 +380,7 @@ def test_patch_rejects_a_merge_based_on_a_different_version(
         return reader
 
     service = AnnotationService(
-        create_unit_of_work_factory(reader_session_factory), TEST_SOURCES
+        create_unit_of_work_factory(reader_session_factory), TEST_ONTOLOGIES
     )
     with pytest.raises(StaleAnnotationVersionError):
         service.patch(

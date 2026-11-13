@@ -5,6 +5,7 @@ from uuid import UUID
 import pytest
 
 from standard_annotation_backend.domain.annotations import Annotation
+from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.semantic_validation.facts import (
     TermFact,
     TermStatus,
@@ -16,7 +17,9 @@ from standard_annotation_backend.domain.term_replacement import (
     replacement_for,
 )
 
-ONTOLOGY_OF = {"GO": "go", "CL": "cl", "CHEBI": "chebi", "NCBITaxon": "ncbitaxon"}
+ONTOLOGIES = OntologyCatalog(
+    {"go": ("GO",), "cl": ("CL",), "chebi": ("CHEBI",), "ncbitaxon": ("NCBITaxon",)}
+)
 CURRENT = TermFact(TermStatus.CURRENT)
 
 
@@ -47,7 +50,7 @@ def test_single_replacements_alt_ids_and_chains_lead_to_a_current_term(
     terms: dict[str, TermFact], expected: str
 ) -> None:
     """A replaceable identifier is followed to the current term at its chain's end."""
-    assert replacement_for("GO:1", terms, ONTOLOGY_OF) == expected
+    assert replacement_for("GO:1", terms, ONTOLOGIES) == expected
 
 
 @pytest.mark.parametrize(
@@ -77,14 +80,14 @@ def test_single_replacements_alt_ids_and_chains_lead_to_a_current_term(
 )
 def test_other_identifiers_are_not_replaced(terms: dict[str, TermFact]) -> None:
     """Current terms, dead ends, loops, and chains leaving the ontology give nothing."""
-    assert replacement_for("GO:1", terms, ONTOLOGY_OF) is None
+    assert replacement_for("GO:1", terms, ONTOLOGIES) is None
 
 
 def test_an_identifier_no_configured_ontology_owns_is_not_replaced() -> None:
     """A prefix with no ontology, such as a GO_REF, is never replaced."""
     terms = {"GO_REF:1": _alternate("GO_REF:2"), "GO_REF:2": CURRENT}
 
-    assert replacement_for("GO_REF:1", terms, ONTOLOGY_OF) is None
+    assert replacement_for("GO_REF:1", terms, ONTOLOGIES) is None
 
 
 def _annotation(**changes: object) -> Annotation:
@@ -120,7 +123,7 @@ def test_every_field_the_term_checks_cover_is_replaced() -> None:
         "NCBITaxon:2": CURRENT,
     }
 
-    replaced = replaced_annotation(_annotation(), terms, ONTOLOGY_OF)
+    replaced = replaced_annotation(_annotation(), terms, ONTOLOGIES)
 
     assert replaced is not None
     assert replaced.ontology_class_id == "GO:0000002"
@@ -140,7 +143,7 @@ def test_an_annotation_with_nothing_to_replace_gives_none() -> None:
         "NCBITaxon:1": CURRENT,
     }
 
-    assert replaced_annotation(_annotation(), terms, ONTOLOGY_OF) is None
+    assert replaced_annotation(_annotation(), terms, ONTOLOGIES) is None
 
 
 def test_the_stored_result_round_trips() -> None:
@@ -177,7 +180,7 @@ def test_a_replacement_already_in_its_list_leaves_one_copy() -> None:
         "NCBITaxon:3": CURRENT,
     }
 
-    replaced = replaced_annotation(annotation, terms, ONTOLOGY_OF)
+    replaced = replaced_annotation(annotation, terms, ONTOLOGIES)
 
     assert replaced is not None
     assert replaced.with_or_from == ["CHEBI:0000002", "UniProtKB:Q1"]

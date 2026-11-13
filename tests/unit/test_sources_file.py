@@ -144,6 +144,21 @@ def test_an_unconfigured_ontology_has_no_definition() -> None:
         sources.ontology_definition("cl")
 
 
+def test_the_ontology_catalog_follows_the_configured_prefixes() -> None:
+    """Each configured prefix leads to the ontology whose entry lists it."""
+    sources = RefreshSources(
+        SourcesFile.model_validate(_file(ontologies={"go": GO, "cl": CL}))
+    )
+
+    catalog = sources.ontology_catalog()
+
+    assert catalog.keys == ("cl", "go")
+    assert {prefix: catalog.key_of(prefix) for prefix in catalog.prefixes} == {
+        "CL": "cl",
+        "GO": "go",
+    }
+
+
 @pytest.mark.parametrize(
     "ontologies",
     [

@@ -20,9 +20,9 @@ from standard_annotation_backend.refresh.sources import (
     load_sources_file,
 )
 
-SOURCES = RefreshSources(
+ONTOLOGIES = RefreshSources(
     load_sources_file(Path(__file__).parents[2] / "config" / "sources.yaml")
-)
+).ontology_catalog()
 
 
 def _unopened_transaction() -> NoReturn:
@@ -46,7 +46,7 @@ def test_invalid_create_envelope_is_rejected_before_transaction(
 ) -> None:
     """Malformed JSON payloads and blank proposal metadata never reach storage."""
     module = import_module("standard_annotation_backend.services.change_set_service")
-    service = module.ChangeSetService(_unopened_transaction, SOURCES)
+    service = module.ChangeSetService(_unopened_transaction, ONTOLOGIES)
     with pytest.raises(InvalidChangeSetError) as error:
         service.propose_create(
             payload=payload,
@@ -68,7 +68,7 @@ def test_invalid_create_envelope_is_rejected_before_transaction(
 def test_invalid_create_annotation_is_located_at_the_body_annotation_field() -> None:
     """Non-JSON proposal annotation data is reported at the body's `annotation`."""
     module = import_module("standard_annotation_backend.services.change_set_service")
-    service = module.ChangeSetService(_unopened_transaction, SOURCES)
+    service = module.ChangeSetService(_unopened_transaction, ONTOLOGIES)
     with pytest.raises(InvalidChangeSetError) as error:
         service.propose_create(
             payload={"value": float("inf")},
@@ -94,7 +94,7 @@ def test_rejection_requires_nonblank_reason_without_opening_transaction(
 ) -> None:
     """A blank review explanation cannot start a rejection workflow."""
     module = import_module("standard_annotation_backend.services.change_set_service")
-    service = module.ChangeSetService(_unopened_transaction, SOURCES)
+    service = module.ChangeSetService(_unopened_transaction, ONTOLOGIES)
     with pytest.raises(InvalidChangeSetError) as error:
         service.reject(
             uuid4(),
@@ -118,7 +118,7 @@ def test_proposals_require_strict_positive_base_version(
 ) -> None:
     """Invalid version metadata fails before a repository transaction is opened."""
     module = import_module("standard_annotation_backend.services.change_set_service")
-    service = module.ChangeSetService(_unopened_transaction, SOURCES)
+    service = module.ChangeSetService(_unopened_transaction, ONTOLOGIES)
     with pytest.raises(InvalidChangeSetError) as error:
         getattr(service, f"propose_{operation}")(
             uuid4(),
@@ -147,7 +147,7 @@ def test_acceptance_rejects_nontext_review_reason_before_transaction(
 ) -> None:
     """Malformed optional review metadata cannot reach the acceptance transaction."""
     module = import_module("standard_annotation_backend.services.change_set_service")
-    service = module.ChangeSetService(_unopened_transaction, SOURCES)
+    service = module.ChangeSetService(_unopened_transaction, ONTOLOGIES)
     with pytest.raises(InvalidChangeSetError) as error:
         service.accept(
             uuid4(),

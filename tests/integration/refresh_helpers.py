@@ -124,6 +124,7 @@ TEST_SOURCES = sources_with_entities(
         "rgd": {"type": "https", "url": "https://example.org/rgd.gpi"},
     }
 )
+TEST_ONTOLOGIES = TEST_SOURCES.ontology_catalog()
 REVISION = "a" * 40
 FETCHED_AT = datetime(2026, 10, 1, tzinfo=UTC)
 
