@@ -3,7 +3,7 @@
 SABE keeps reference data current from external sources: authorization from
 go-site `users.yaml`, rule data from six other go-site files, ontologies from OBO
 files, entities from GPI files, and annotations from group GPAD files. Rule data
-is what GO Rules, GO's published checks on annotation quality, compare annotations
+is what GO Rules, GO's official checks on annotation quality, compare annotations
 against. Refreshing one source means fetching it and applying it. These values are
 shared by every kind and need neither HTTP nor a database.
 """
@@ -52,7 +52,7 @@ class RefreshFailureCode(StrEnum):
     `reference_data_unavailable` when a configured ontology or the go-site rule
     data has no active snapshot. The codes are fixed strings, so job records and
     logs never contain source URLs or content. Operators use them to tell
-    retrieval, decoding, parsing, and publication failures apart.
+    retrieval, decoding, parsing, and activation or publication failures apart.
     """
 
     INVALID_PARAMETERS = "invalid_parameters"

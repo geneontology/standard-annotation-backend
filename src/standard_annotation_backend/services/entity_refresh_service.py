@@ -46,7 +46,7 @@ _PARSERS: Mapping[str, Callable[[str, SourceProvenance], EntityCatalog]] = {
 
 
 class EntityRefreshService:
-    """Refresh entity catalogs, recording an audit event for each publication.
+    """Refresh entity catalogs, recording an audit event for each activation.
 
     Implements `RefreshKind`.
 
@@ -102,12 +102,12 @@ class EntityRefreshService:
             return RefreshOutcome(result=unchanged.to_job_result(), unchanged=True)
         catalog = self._parse(job, document)
         counts = _catalog_counts(catalog)
-        report("staging", counts, catalog.warnings)
+        report("storing", counts, catalog.warnings)
         record = snapshots.create(
             SnapshotKind.ENTITY, document.source_key, job.job_id, document.provenance
         )
         unit_of_work.entities.insert(record.snapshot_id, catalog)
-        report("publishing", counts, catalog.warnings)
+        report("activating", counts, catalog.warnings)
         unit_of_work.entities.lock_activation()
         collisions = unit_of_work.entities.collisions(
             record.snapshot_id, document.source_key
@@ -150,7 +150,7 @@ class EntityRefreshService:
             },
         )
         snapshots.prune(SnapshotKind.ENTITY)
-        return _published(result)
+        return _outcome(result)
 
     def _parse(self, job: Job, document: SourceDocument) -> EntityCatalog:
         """Decode and parse a fetched catalog with its source's format.
@@ -183,7 +183,7 @@ class EntityRefreshService:
 
 
 def _catalog_counts(catalog: EntityCatalog) -> dict[str, int]:
-    """Return the catalog counts reported in the `staging` and `publishing` phases."""
+    """Return the catalog counts reported in the `storing` and `activating` phases."""
     return {
         "source_record_count": len(catalog.records),
         "active_identifier_count": len(
@@ -193,8 +193,8 @@ def _catalog_counts(catalog: EntityCatalog) -> dict[str, int]:
     }
 
 
-def _published(result: EntityRefreshResult) -> RefreshOutcome:
-    """Convert a publication result into the job's outcome."""
+def _outcome(result: EntityRefreshResult) -> RefreshOutcome:
+    """Convert an activation result into the job's outcome."""
     return RefreshOutcome(
         result=result.to_job_result(),
         counts={

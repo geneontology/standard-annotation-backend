@@ -153,7 +153,7 @@ class OntologyTerm:
     Attributes:
         term_id: The term's identifier, such as `GO:0005515`.
         obsolete: Whether the ontology marks the term obsolete.
-        replaced_by: The terms the ontology says to use instead, as published.
+        replaced_by: The terms the ontology says to use instead, as the file gives them.
             They may be obsolete or belong to another ontology.
         consider: Terms the ontology suggests considering instead.
         subsets: Names of the ontology subsets the term belongs to, such as

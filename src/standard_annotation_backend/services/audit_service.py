@@ -189,7 +189,7 @@ class AuditService:
     def record_entity_refreshed(
         self, *, actor_id: str, job_id: UUID, details: dict[str, object]
     ) -> AuditEventRecord:
-        """Record a summary of a catalog publication in the publishing transaction."""
+        """Record a summary of a catalog activation in the activation's transaction."""
         return self._record_job_summary(
             AuditAction.ENTITY_REFRESHED, actor_id, job_id, details
         )

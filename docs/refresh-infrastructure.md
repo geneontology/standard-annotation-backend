@@ -12,9 +12,9 @@ SABE refreshes five kinds of reference data:
 |---|---|---|---|
 | `authorization` | go-site `users.yaml` | `authorization` (one entry) | always `go-site` |
 | `rules` | six go-site metadata files read at one commit | `rules` (one entry: `repository` and `ref`) | always `go-site` |
-| `ontology` | OBO | `ontologies` | ontology keys, such as `go` |
-| `entity` | GPI 2.0 | `entities` | any key matching `^[a-z0-9][a-z0-9_-]*$` |
-| `annotation` | GPAD 2.0 | `annotations` (each entry names the `group` it replaces) | any key matching `^[a-z0-9][a-z0-9_-]*$` |
+| `ontology` | OBO | `ontologies` | each entry's key, such as `go` |
+| `entity` | GPI 2.0 | `entities` | each entry's key, such as `mgi` |
+| `annotation` | GPAD 2.0 | `annotations` (each entry names the `group` it replaces) | each entry's key, such as `mgi` |
 
 The annotation kind has two job types, `annotation_refresh` and
 `annotation_cutover`, both served by `AnnotationRefreshService`. A cutover is a
@@ -230,11 +230,12 @@ stateDiagram-v2
     failed --> [*]
 ```
 
-Kinds may report their own phases inside `applying`. Entity and annotation
-refreshes report `staging` and then `publishing`. When nothing was applied
-because the document was already active, `apply` returns an outcome with
-`unchanged` set. The runner alone records it: completed progress and the job
-result of every refresh job include `"unchanged"` (`true` or `false`).
+Kinds may report their own phases inside `applying`. Snapshot kinds (ontology,
+rules, and entity) report `storing` and then `activating` when they store a new
+snapshot, and annotation refreshes report `staging` and then `publishing`. When
+nothing was applied because the document was already active, `apply` returns an
+outcome with `unchanged` set. The runner alone records it: completed progress and
+the job result of every refresh job include `"unchanged"` (`true` or `false`).
 
 Progress is written in its own transactions while the job's transaction is open,
 so clients can follow a long job. Job state changes lock the job row with

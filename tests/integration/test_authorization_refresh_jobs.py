@@ -215,7 +215,7 @@ def test_redelivery_after_success_does_not_repeat_audit_work(
     assert after == before
 
 
-def test_scheduler_creates_job_before_dispatch_and_records_publication_failure(
+def test_scheduler_creates_job_before_dispatch_and_records_dispatch_failure(
     worker_environment: None,
     unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,

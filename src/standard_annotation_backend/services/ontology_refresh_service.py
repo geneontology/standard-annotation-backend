@@ -100,12 +100,14 @@ class OntologyRefreshService:
             snapshots.prune(SnapshotKind.ONTOLOGY)
             return _unchanged(ontology_document)
         snapshot = _parse(ontology_document, definition)
+        report("storing")
         record = snapshots.create(
             SnapshotKind.ONTOLOGY, definition.key, job.job_id, document.provenance
         )
         closure_count = unit_of_work.ontologies.insert(
             record.snapshot_id, snapshot, compute_closure(snapshot)
         )
+        report("activating")
         snapshots.activate(record)
         version = OntologyVersion(
             version_id=record.snapshot_id,

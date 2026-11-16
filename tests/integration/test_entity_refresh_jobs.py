@@ -202,7 +202,7 @@ def test_entity_refresh_job_records_progress_and_result(
     runner_for: Callable[..., RefreshRunner],
     integration_api_client: TestClient,
 ) -> None:
-    """A successful refresh records its final progress and publication result.
+    """A successful refresh records its final progress and result.
 
     The job status endpoint returns the same result.
     """
@@ -239,12 +239,12 @@ def test_entity_refresh_job_records_progress_and_result(
     assert fetchers.calls == ["mgi"]
 
 
-def test_gzip_compressed_source_publishes_the_same_catalog(
+def test_gzip_compressed_source_stores_the_same_catalog(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
 ) -> None:
-    """A gzip-compressed GPI file is expanded and published like a plain one."""
+    """A gzip-compressed GPI file is expanded and stored like a plain one."""
     job_id = _create_job(unit_of_work_factory)
 
     runner_for(_fetchers(gzip.compress(SOURCE_BYTES))).run(job_id)
@@ -432,17 +432,17 @@ def test_unchanged_source_reports_the_active_snapshot(
 
 
 @pytest.mark.parametrize("changed", ["url", "content"])
-def test_changed_url_or_content_publishes_new_snapshot(
+def test_changed_url_or_content_stores_new_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
     changed: str,
 ) -> None:
-    """A refresh with a changed URL or changed content publishes a new snapshot.
+    """A refresh with a changed URL or changed content stores a new snapshot.
 
-    Moving a source to a new URL publishes even when the content is identical, and
-    new content at the same URL is never reported as unchanged.
+    Moving a source to a new URL stores a snapshot even when the content is
+    identical, and new content at the same URL is never reported as unchanged.
     """
     runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
     if changed == "url":
@@ -460,8 +460,8 @@ def test_changed_url_or_content_publishes_new_snapshot(
     assert stored.result["source_locator"] == expected_url
     assert stored.result["source_checksum"] == sha256(text.encode()).hexdigest()
     assert stored.result["retained_count"] == 1
-    published = _audit_events(session_factory, AuditAction.ENTITY_REFRESHED)
-    assert len(published) == 2
+    refreshed = _audit_events(session_factory, AuditAction.ENTITY_REFRESHED)
+    assert len(refreshed) == 2
     with session_factory() as session:
         active = session.scalar(
             select(ReferenceSnapshotRecord).where(
@@ -483,7 +483,7 @@ def test_matching_catalog_of_another_source_does_not_make_refresh_unchanged(
     """Only the same source's active catalog can make a refresh unchanged.
 
     Another source's active catalog with the same locator and checksum is
-    ignored, and the refresh publishes this source's catalog.
+    ignored, and the refresh stores this source's catalog.
     """
     other_job = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "rgd")
     mgi_document = _fetchers().fetch(

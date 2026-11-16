@@ -222,3 +222,6 @@ When deciding where new code belongs:
 Some rules cross a layer boundary. Duplicate prevention, for example, is part of the
 application's behavior, but its database check and write must occur together under a
 repository lock to prevent two concurrent requests from creating the same annotation.
+
+[`ARCHITECTURE.md`](ARCHITECTURE.md) describes the design in more detail, and the
+[glossary](docs/glossary.md) defines the terms SABE uses.

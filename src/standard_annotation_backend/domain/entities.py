@@ -1,4 +1,4 @@
-"""Define the values used to refresh, publish, and validate entity catalogs.
+"""Define the values used to refresh, store, and validate entity catalogs.
 
 An entity is the subject an annotation describes, identified by `db_object_id`.
 Each configured entity source supplies a complete catalog of the entities it
@@ -46,7 +46,7 @@ class EntityCatalog:
             that was parsed, such as `gpi-2.0`.
         source_metadata: JSON-compatible, format-specific metadata stored with
             the catalog for reference, such as the GPI header. Entity
-            validation and publication never read it.
+            validation and activation never read it.
         records: Validated entity records in source order.
         warnings: Messages about problems that did not stop parsing.
     """

@@ -140,6 +140,7 @@ class RulesRefreshService:
             outcome = self._outcome(unit_of_work, active, unchanged=True)
         else:
             parsed = _parse(document)
+            report("storing")
             record = snapshots.create(
                 SnapshotKind.RULES, document.source_key, job.job_id, document.provenance
             )
@@ -148,6 +149,7 @@ class RulesRefreshService:
                 STORED_RULE_DATA.dump(parsed.data),
                 parsed.retracted_pmids,
             )
+            report("activating")
             snapshots.activate(record)
             outcome = self._outcome(unit_of_work, record, unchanged=False)
             AuditService(unit_of_work.audit).record_rules_refreshed(

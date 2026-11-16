@@ -7,7 +7,7 @@ from refresh_helpers import TEST_ONTOLOGIES, TEST_SOURCES
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER, REVIEWER
-from test_entity_refresh_service import publish_catalog
+from test_entity_refresh_service import refresh_catalog
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
@@ -67,12 +67,12 @@ def test_unknown_subject_returns_exact_error_without_writes(
     The subject is either removed from the catalog or changed by the write to an
     identifier that was never in it. Each operation returns only the
     `unknown_entity` issue and leaves annotations, versions, audit events, and the
-    change set's review state unchanged. Publishing the subject lets the same
-    change set be accepted.
+    change set's review state unchanged. Refreshing the catalog to list the subject lets
+    the same change set be accepted.
     """
     client = integration_api_client
     imports = EntityRefreshService(TEST_SOURCES)
-    publish_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
+    refresh_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
     payload = writable_annotation.model_dump(mode="json")
     to_unknown = operation.endswith("_to_unknown")
     annotation_id = None
@@ -113,7 +113,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
         if not to_unknown:
             assert client.post(f"{proposal_path}/preview").json()["can_accept"]
     if not to_unknown:
-        publish_catalog(imports, unit_of_work_factory)
+        refresh_catalog(imports, unit_of_work_factory)
     before = _counts(session_factory)
     if operation == "create":
         response = client.post(
@@ -140,8 +140,8 @@ def test_unknown_subject_returns_exact_error_without_writes(
         proposal = client.get(proposal_path).json()
         assert proposal["state"] == "proposed"
         assert proposal["reviewed_by"] is None
-        # Publishing the subject makes the same proposal acceptable again.
-        publish_catalog(
+        # Listing the subject in a catalog makes the same proposal acceptable again.
+        refresh_catalog(
             imports, unit_of_work_factory, writable_annotation.db_object_id, UNKNOWN_ID
         )
         assert client.post(f"{proposal_path}/accept").status_code == status.HTTP_200_OK
@@ -159,7 +159,7 @@ def test_deletion_succeeds_after_subject_removal(
     The deleted annotation keeps its stored data and gains a new version.
     """
     imports = EntityRefreshService(TEST_SOURCES)
-    publish_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
+    refresh_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
     annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     created = annotations.create(
         payload=writable_annotation.model_dump(mode="json"),
@@ -174,7 +174,7 @@ def test_deletion_succeeds_after_subject_removal(
         if proposal_delete
         else None
     )
-    publish_catalog(imports, unit_of_work_factory)
+    refresh_catalog(imports, unit_of_work_factory)
     if proposal is not None:
         assert changes.accept(proposal.change_set_id, context=REVIEWER).is_deleted
     else:
@@ -198,7 +198,7 @@ def test_only_the_exact_active_identifier_is_accepted(
     A differently cased identifier is rejected and writes nothing, while the
     identifier the catalog lists is accepted.
     """
-    publish_catalog(
+    refresh_catalog(
         EntityRefreshService(TEST_SOURCES),
         unit_of_work_factory,
         writable_annotation.db_object_id,

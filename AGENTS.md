@@ -128,6 +128,10 @@ Limit discussion of how SABE works to a brief `Architecture` section that links 
 relevant implementation. Avoid describing missing capabilities, rejected alternatives,
 temporary omissions, future milestones, or release operations in the README.
 
+Define each SABE-specific term, and each GO term that SABE uses in a specific way, in
+`docs/glossary.md`. Keep each entry to a short definition that links to where the term
+is explained, and update the entry when a term is added, renamed, or changes meaning.
+
 ## Testing and verification
 
 Add focused regression coverage for every behavior change.

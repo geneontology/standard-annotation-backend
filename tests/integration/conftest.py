@@ -51,7 +51,7 @@ def seed_active_subjects(
     Each call activates one new catalog that lists the identifiers. The helper
     writes catalog rows directly, so it records no refresh audit events. Each
     subject gets type `PR:000000001` and taxon `NCBITaxon:7955` unless the call
-    names others, as a published catalog records them.
+    names others, as an entity catalog records them.
     """
     # Imported here because unit tests import this module without the
     # integration directory on the import path.

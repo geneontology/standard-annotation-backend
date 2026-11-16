@@ -628,7 +628,7 @@ def test_progress_reported_during_apply_commits_before_the_job_does(
 ) -> None:
     """Another connection sees a job's progress while its transaction is still open.
 
-    The entity refresh reports `publishing` after its rows are stored, and those
+    The entity refresh reports `activating` after its rows are stored, and those
     rows refer to the job, so the report must not wait for the job's transaction.
     """
     seen: list[object] = []
@@ -655,7 +655,54 @@ def test_progress_reported_during_apply_commits_before_the_job_does(
         FakeFetchers({"mgi": gpi_bytes("MGI:MGI:1")}),
     ).run(job.job_id)
 
-    assert seen == ["publishing"]
+    assert seen == ["activating"]
     assert JobService(unit_of_work_factory).find(job.job_id).status is (
         JobStatus.SUCCEEDED
     )
+
+
+@pytest.mark.parametrize("kind", ["entity", "ontology", "rules"])
+def test_snapshot_kinds_report_storing_then_activating_for_a_new_snapshot(
+    kind: str,
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh that stores a new snapshot reports `storing`, then `activating`.
+
+    The job's progress names `storing` when the snapshot is created and
+    `activating` when it becomes the source's active snapshot.
+    """
+    case = CASES[kind]
+    seen: list[str] = []
+    original_create = SnapshotRepository.create
+    original_activate = SnapshotRepository.activate
+
+    def phase_of(job_id: UUID) -> str:
+        return str(JobService(unit_of_work_factory).find(job_id).progress["phase"])
+
+    def observe_create(
+        self: SnapshotRepository, *args: Any, **kwargs: Any
+    ) -> ReferenceSnapshotRecord:
+        record = original_create(self, *args, **kwargs)
+        seen.append(phase_of(record.job_id))
+        return record
+
+    def observe_activate(
+        self: SnapshotRepository, record: ReferenceSnapshotRecord
+    ) -> ReferenceSnapshotRecord | None:
+        seen.append(phase_of(record.job_id))
+        return original_activate(self, record)
+
+    monkeypatch.setattr(SnapshotRepository, "create", observe_create)
+    monkeypatch.setattr(SnapshotRepository, "activate", observe_activate)
+    job_id = _job(unit_of_work_factory, case)
+
+    build_runner(
+        database_engine,
+        unit_of_work_factory,
+        FakeFetchers({case.source_key: case.content}),
+    ).run(job_id)
+
+    assert seen == ["storing", "activating"]
+    assert _read(unit_of_work_factory, job_id).status is JobStatus.SUCCEEDED

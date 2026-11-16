@@ -2,7 +2,8 @@
 
 This document proposes an architecture for a stable, initial version of the new Standard
 Annotation Backend (SABE). It is intended as a starting point for technical review and
-team discussion, not as a final implementation plan.
+team discussion, not as a final implementation plan. The [glossary](docs/glossary.md)
+defines the terms it uses.
 
 ## Resources
 
@@ -918,7 +919,7 @@ entry must list `rdfs:subClassOf` among its closure predicates and require the
 `gocheck_do_not_annotate` and `gocheck_obsoletion_candidate` subsets that GO Rules
 check; SABE refuses to start otherwise. The other ontologies are loaded as term lists
 without closure. Before parsing, SABE removes the term clauses it does not read, such as
-definitions and cross-references, so a malformed clause there cannot stop a published
+definitions and cross-references, so a malformed clause there cannot stop an ontology
 file from loading. A refresh stores a complete snapshot of terms, their subsets,
 alternative identifiers, and closure rows, then activates it. Activation changes no
 annotations and does not block annotation writes, and it queues a term replacement job
@@ -1175,7 +1176,7 @@ developers can run locally and operate in AWS with limited specialized DevOps bu
 | Annotated-entity metadata for GPAD imports           | Settled for GPAD import; alternatives are deferred                                                       | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | GPAD imports do not check `db_object_id` against the entity catalog; semantic validation applies to client writes and term replacement writes, and QC reports flag stored annotations whose entity is unknown. No alternative source or reconciliation workflow is implied.                                                                                                                                                                                                                                                                                                  |
 | Structural validation                                | Settled for the initial implementation                                                                   | No further policy input is needed.                                                                                                         | Structural schema validation blocks all writes and individual import records. Invalid imported records are isolated and reported instead of failing the whole import.                                                                                                                                                                                                                                                                                                                                                                                                        |
 | GORULE-style semantic validation                     | Settled: entity, ontology-term, duplicate, and write-blocking GO Rule checks block client writes         | No further policy input is needed for the checks in `docs/annotation-validation.md`.                                                       | Client creates and updates must have no semantic issues; deletes and GPAD imports are not checked. The rules and SABE's reading of each are in `docs/annotation-validation.md`. Term replacement writes meet the same checks, and QC reports apply them to stored annotations.                                                                                                                                                                                                                                                                                               |
-| Reference data snapshots                             | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | One `reference_snapshot` table with one lifecycle; refresh jobs are one transaction. This removes recovery and staging state, three storage models, and four change rules, and readers never see pruned data. |
+| Reference data snapshots                             | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | One `reference_snapshot` table with one lifecycle; refresh jobs are one transaction. This removes recovery and pre-activation state, three storage models, and four change rules, and readers never see pruned data. |
 
 ## Possible Future Expansion
 

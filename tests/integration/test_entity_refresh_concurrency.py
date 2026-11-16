@@ -9,7 +9,7 @@ from refresh_helpers import TEST_SOURCES, FakeFetchers, build_runner, gpi_bytes
 from seeding import create_job, entity_identifiers
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
-from test_entity_refresh_service import active_ids, publish_catalog
+from test_entity_refresh_service import active_ids, refresh_catalog
 
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.repositories.entities import (
@@ -53,7 +53,7 @@ def test_cross_source_membership_race_has_one_complete_winner(
     database_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two sources publishing the same identifier at once produce exactly one winner.
+    """Two sources listing the same identifier at once produce exactly one winner.
 
     Both jobs store their catalogs and hold their transactions open before either
     activates. The other job fails with a collision and its source keeps its
@@ -62,7 +62,7 @@ def test_cross_source_membership_race_has_one_complete_winner(
     service = EntityRefreshService(TEST_SOURCES)
     prefixes = {"mgi": "MGI", "rgd": "RGD"}
     for key, prefix in prefixes.items():
-        publish_catalog(service, unit_of_work_factory, f"{prefix}:old", source=key)
+        refresh_catalog(service, unit_of_work_factory, f"{prefix}:old", source=key)
     runner = build_runner(
         database_engine,
         unit_of_work_factory,

@@ -1,4 +1,4 @@
-"""Verify publication and replacement of entity catalogs in PostgreSQL."""
+"""Verify storing, activation, and replacement of entity catalogs in PostgreSQL."""
 
 from collections.abc import Callable
 from uuid import UUID
@@ -46,20 +46,20 @@ def _document(source: str, *identifiers: str) -> SourceDocument:
     return source_document(source, source_gpi(*identifiers).encode())
 
 
-def publish_catalog(
+def refresh_catalog(
     service: EntityRefreshService,
     factory: UnitOfWorkFactory,
     *identifiers: str,
     source: str = "mgi",
 ) -> Job:
-    """Start a job and publish a catalog of `identifiers` for `source`."""
+    """Start a job and refresh `source` with a catalog of `identifiers`."""
     job = start_job(factory, JobType.ENTITY_REFRESH, source)
     apply_in_transaction(factory, service, job, _document(source, *identifiers))
     return job
 
 
 def stored_result(factory: UnitOfWorkFactory, job: Job) -> EntityRefreshResult | None:
-    """Return the publication result stored for `job`, or `None` if unpublished."""
+    """Return the refresh result stored for `job`, or `None` if it has none."""
     result = JobService(factory).find(job.job_id).result
     return None if result is None else STORED_ENTITY_REFRESH_RESULT.load(result)
 
@@ -109,10 +109,10 @@ def test_replacement_does_not_change_annotations(
     including a deleted annotation's.
     """
     service = EntityRefreshService(TEST_SOURCES)
-    old = publish_catalog(service, unit_of_work_factory, "MGI:z", "MGI:a", "MGI:keep")
+    old = refresh_catalog(service, unit_of_work_factory, "MGI:z", "MGI:a", "MGI:keep")
     old_result = stored_result(unit_of_work_factory, old)
     assert old_result is not None
-    publish_catalog(service, unit_of_work_factory, "RGD:1", source="rgd")
+    refresh_catalog(service, unit_of_work_factory, "RGD:1", source="rgd")
     ids = [UUID(int=3), UUID(int=1), UUID(int=2), UUID(int=4)]
     with unit_of_work_factory() as uow:
         for index, annotation_id in enumerate(ids):
@@ -171,14 +171,14 @@ def test_replacement_does_not_change_annotations(
         assert list(session.execute(history_query).mappings()) == history_before
 
 
-def test_publish_empty_catalog_removes_only_that_source(
+def test_empty_catalog_removes_only_that_source(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
-    """Publishing a catalog with no entities removes only that source's entities."""
+    """Refreshing a source with no entities removes only that source's entities."""
     service = EntityRefreshService(TEST_SOURCES)
     for prefix, key in (("MGI", "mgi"), ("RGD", "rgd")):
-        publish_catalog(service, unit_of_work_factory, f"{prefix}:1", source=key)
+        refresh_catalog(service, unit_of_work_factory, f"{prefix}:1", source=key)
     empty = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "mgi")
     outcome = apply_in_transaction(
         unit_of_work_factory, service, empty, _document("mgi")
@@ -192,13 +192,13 @@ def test_publish_empty_catalog_removes_only_that_source(
     assert active_ids(session_factory) == ["RGD:1"]
 
 
-def test_publication_spans_multiple_insert_batches_without_losing_records(
+def test_catalog_spanning_multiple_insert_batches_keeps_every_record(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
-    """A catalog larger than one insert batch is published with every record."""
+    """A catalog larger than one insert batch is stored with every record."""
     service = EntityRefreshService(TEST_SOURCES)
-    job = publish_catalog(
+    job = refresh_catalog(
         service, unit_of_work_factory, *(f"MGI:{index}" for index in range(5001))
     )
     result = stored_result(unit_of_work_factory, job)
@@ -207,7 +207,7 @@ def test_publication_spans_multiple_insert_batches_without_losing_records(
     assert len(active_ids(session_factory)) == 5001
 
 
-def test_validation_reads_each_published_entity_taxon_and_type(
+def test_validation_reads_each_active_entity_taxon_and_type(
     unit_of_work_factory: UnitOfWorkFactory,
     reference_data: Callable[..., None],
 ) -> None:
