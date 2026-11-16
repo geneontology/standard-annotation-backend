@@ -24,7 +24,6 @@ from standard_annotation_backend.domain.annotations import (
     new_annotation_id,
 )
 from standard_annotation_backend.domain.duplicate_policy import DuplicateKey
-from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
 from standard_annotation_backend.persistence.annotation_data import (
     AnnotationPersistenceData,
     prepare_annotation_for_persistence,
@@ -39,7 +38,6 @@ from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
     OntologyClosureRecord,
-    OntologyMetadataRecord,
 )
 from standard_annotation_backend.persistence.repositories.pagination import (
     Page,
@@ -50,15 +48,18 @@ _PEER_BATCH_SIZE = 2_000
 """The most lookup values one query in a batched read sends to the database."""
 
 
-def _closure_condition(term_id: str, predicate_id: str) -> ColumnElement[bool]:
+def _closure_condition(
+    term_id: str, predicate_id: str, snapshot_id: UUID
+) -> ColumnElement[bool]:
     """Match annotations whose ontology class is the term or one of its descendants.
 
     Descendants are read from the closure (precomputed ancestor relationships)
-    of the active GO ontology through the given predicate.
+    of one GO snapshot through the given predicate.
 
     Args:
         term_id: Ontology term whose descendants-or-self are matched.
         predicate_id: Loaded closure predicate relating descendants to the term.
+        snapshot_id: The GO snapshot to read.
 
     Returns:
         An SQL condition on the annotation's ontology class.
@@ -66,13 +67,8 @@ def _closure_condition(term_id: str, predicate_id: str) -> ColumnElement[bool]:
     return exists(
         select(1)
         .select_from(OntologyClosureRecord)
-        .join(
-            OntologyMetadataRecord,
-            OntologyMetadataRecord.version_id == OntologyClosureRecord.version_id,
-        )
         .where(
-            OntologyMetadataRecord.ontology_key == GO_ONTOLOGY_KEY,
-            OntologyMetadataRecord.active.is_(True),
+            OntologyClosureRecord.snapshot_id == snapshot_id,
             OntologyClosureRecord.subject_term_id == AnnotationRecord.ontology_class_id,
             OntologyClosureRecord.object_term_id == term_id,
             OntologyClosureRecord.predicate_id == predicate_id,
@@ -100,14 +96,21 @@ def _multivalued_condition(field_name: str, field_value: str) -> ColumnElement[b
     )
 
 
-def _criteria_conditions(criteria: AnnotationFilter) -> list[ColumnElement[bool]]:
+def _criteria_conditions(
+    criteria: AnnotationFilter, closure_snapshot_id: UUID | None
+) -> list[ColumnElement[bool]]:
     """Build the SQL conditions for every supplied search criterion.
 
     Args:
         criteria: Field values that matching annotations must have.
+        closure_snapshot_id: The GO snapshot that closure search reads.
 
     Returns:
         SQL conditions that a matching annotation must satisfy together.
+
+    Raises:
+        ValueError: If `criteria` requests closure search and
+            `closure_snapshot_id` is `None`.
     """
     conditions: list[ColumnElement[bool]] = []
     if criteria.db_object_id is not None:
@@ -118,9 +121,13 @@ def _criteria_conditions(criteria: AnnotationFilter) -> list[ColumnElement[bool]
         conditions.append(AnnotationRecord.relation == criteria.relation)
     if criteria.ontology_class_id is not None:
         if criteria.ontology_class_id_closure is not None:
+            if closure_snapshot_id is None:
+                raise ValueError("closure search needs the GO snapshot to read")
             conditions.append(
                 _closure_condition(
-                    criteria.ontology_class_id, criteria.ontology_class_id_closure
+                    criteria.ontology_class_id,
+                    criteria.ontology_class_id_closure,
+                    closure_snapshot_id,
                 )
             )
         else:
@@ -358,6 +365,7 @@ class AnnotationRepository:
         *,
         limit: int,
         offset: int,
+        closure_snapshot_id: UUID | None = None,
     ) -> Page[AnnotationRecord]:
         """List active annotations that match every supplied criterion.
 
@@ -366,14 +374,20 @@ class AnnotationRepository:
             scope: Ownership restrictions applied before pagination.
             limit: Maximum number of annotations to return.
             offset: Number of matching annotations to skip.
+            closure_snapshot_id: The GO snapshot that closure search reads;
+                required when `criteria` requests closure search.
 
         Returns:
             The selected annotation records and total number of matches.
+
+        Raises:
+            ValueError: If `criteria` requests closure search and
+                `closure_snapshot_id` is `None`.
         """
         statement = select(AnnotationRecord).where(
             AnnotationRecord.status == AnnotationStatus.ACTIVE,
             *_ownership_conditions(scope),
-            *_criteria_conditions(criteria),
+            *_criteria_conditions(criteria, closure_snapshot_id),
         )
         return load_page(
             self.session,

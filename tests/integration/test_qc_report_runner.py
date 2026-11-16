@@ -4,22 +4,20 @@ from uuid import UUID
 
 import pytest
 from refresh_helpers import TEST_ONTOLOGIES
-from seeding import insert_annotation
-from sqlalchemy import Engine, update
+from seeding import deactivate_reference_data, insert_annotation
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from test_qc_report_repository import _finding
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.jobs import JobStatus
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     bind_try_lock,
     try_advisory_lock,
 )
-from standard_annotation_backend.persistence.models import (
-    AnnotationRecord,
-    OntologyMetadataRecord,
-)
+from standard_annotation_backend.persistence.models import AnnotationRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.qc_report_service import (
@@ -222,12 +220,7 @@ def test_missing_reference_data_fails_the_report_and_leaves_no_rows(
     It keeps no findings or counts.
     """
     _insert(session_factory, _annotation(db_object_id="UniProtKB:NOPE"))
-    with session_factory.begin() as session:
-        session.execute(
-            update(OntologyMetadataRecord)
-            .where(OntologyMetadataRecord.ontology_key == "go")
-            .values(active=False)
-        )
+    deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "go")
 
     job = _run(unit_of_work_factory, database_engine)
 
@@ -301,12 +294,7 @@ def test_a_report_with_nothing_to_check_still_requires_reference_data(
     assert isinstance(reference_data, list)
     assert len(reference_data) == 1
 
-    with session_factory.begin() as session:
-        session.execute(
-            update(OntologyMetadataRecord)
-            .where(OntologyMetadataRecord.ontology_key == "go")
-            .values(active=False)
-        )
+    deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "go")
     failed = _run(unit_of_work_factory, database_engine, group_key="ZFIN")
 
     assert failed.status is JobStatus.FAILED

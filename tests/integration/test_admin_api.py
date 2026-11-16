@@ -440,3 +440,35 @@ def test_sabe_managed_group_is_409_and_creates_no_job(
         assert (
             session.scalar(select(func.count()).select_from(JobRecord)) == jobs_before
         )
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ("/admin/annotation-refreshes", CUTOVER_ROUTE),
+        (CUTOVER_ROUTE, "/admin/annotation-refreshes"),
+    ],
+)
+def test_an_overlapping_gpad_job_is_409_and_creates_no_job(
+    integration_api_client: TestClient,
+    dispatched: list[Job],
+    session_factory: sessionmaker[Session],
+    first: str,
+    second: str,
+) -> None:
+    """A GPAD request while the group has an unfinished job of the other type is 409."""
+    assert (
+        integration_api_client.post(first, json={"source_key": "mgi-gpad"}).status_code
+        == status.HTTP_202_ACCEPTED
+    )
+    with session_factory() as session:
+        jobs_before = session.scalar(select(func.count()).select_from(JobRecord))
+
+    response = integration_api_client.post(second, json={"source_key": "mgi-gpad"})
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    assert response.json()["error"]["code"] == "annotation_job_in_progress"
+    with session_factory() as session:
+        assert (
+            session.scalar(select(func.count()).select_from(JobRecord)) == jobs_before
+        )

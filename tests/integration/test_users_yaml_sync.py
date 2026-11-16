@@ -1,14 +1,13 @@
 """Verify atomic refresh of users, grants, provenance, and audit events."""
 
-from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from threading import Barrier
 from uuid import UUID
 
 import pytest
 from refresh_helpers import (
+    apply_in_transaction,
     apply_users_yaml,
-    ignore_progress,
     start_job,
     users_document,
 )
@@ -19,7 +18,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
-    RefreshOutcome,
     SourceProvenance,
     TerminalRefreshError,
 )
@@ -33,7 +31,6 @@ from standard_annotation_backend.persistence.models import (
     SabeUserRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services import authorization_refresh_service
 from standard_annotation_backend.services.authorization_refresh_service import (
     AuthorizationRefreshService,
 )
@@ -216,10 +213,11 @@ def test_audit_failure_rolls_back_sync_and_its_provenance(
     event.listen(AuditEventRecord, "before_insert", reject_audit)
     try:
         with pytest.raises(RuntimeError, match="audit unavailable"):
-            AuthorizationRefreshService(unit_of_work_factory).apply(
+            apply_in_transaction(
+                unit_of_work_factory,
+                AuthorizationRefreshService(),
                 job,
                 users_document(REPLACEMENT, github_provenance("b" * 40)),
-                ignore_progress,
             )
     finally:
         event.remove(AuditEventRecord, "before_insert", reject_audit)
@@ -280,34 +278,22 @@ def test_repeated_revision_is_idempotent_without_state_or_audit_changes(
     assert _snapshot(session_factory) == before
 
 
-def test_concurrent_same_revision_is_applied_once(
+def test_a_new_revision_with_identical_bytes_is_not_applied_again(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Concurrent applies of one revision reach the repository's locked check.
+    """A users.yaml at a new commit, with the same bytes, changes nothing."""
+    first = github_provenance("a" * 40)
 
-    The service's lock-free pre-check is disabled so both requests reach the
-    repository, whose locked duplicate check applies the document exactly once.
-    """
-    monkeypatch.setattr(
-        authorization_refresh_service, "same_refresh_source", lambda *_: False
+    applied = apply_users_yaml(unit_of_work_factory, INITIAL, first)
+    repeated = apply_users_yaml(
+        unit_of_work_factory, INITIAL, replace(first, source_revision="b" * 40)
     )
-    ready = Barrier(2)
 
-    def synchronize() -> RefreshOutcome:
-        ready.wait(timeout=3)
-        return apply_users_yaml(
-            unit_of_work_factory, INITIAL, github_provenance("a" * 40)
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        outcomes = tuple(executor.map(lambda _: synchronize(), range(2)))
-
-    assert {outcome.unchanged for outcome in outcomes} == {True, False}
-    assert len({outcome.result["refresh_id"] for outcome in outcomes}) == 1
+    assert applied.unchanged is False
+    assert repeated.unchanged is True
+    assert repeated.result == applied.result
     with session_factory() as session:
-        assert len(session.scalars(select(AuthorizationRefreshRecord)).all()) == 1
         audits = session.scalars(
             select(AuditEventRecord).where(
                 AuditEventRecord.action == "authorization.refreshed"
@@ -421,28 +407,3 @@ def test_https_source_without_revision_is_unchanged_by_checksum(
     assert repeated.result == applied.result
     assert different.unchanged is False
     assert different.result["refresh_id"] != applied.result["refresh_id"]
-
-
-def test_latest_refresh_follows_apply_order_not_transaction_start(
-    unit_of_work_factory: UnitOfWorkFactory,
-) -> None:
-    """A transaction that starts first but applies last describes current state."""
-    first_applied = github_provenance("a" * 40)
-    last_applied = github_provenance("b" * 40)
-    with unit_of_work_factory() as late:
-        # Start this transaction before the other refresh begins.
-        late.auth.session.execute(select(1))
-        apply_users_yaml(unit_of_work_factory, INITIAL, first_applied)
-        late.auth.replace_authorizations(
-            users=(),
-            provenance=last_applied,
-            summary={"users": 0, "groups": 0, "assignments": 0},
-        )
-        late.commit()
-
-    with unit_of_work_factory() as uow:
-        latest = uow.auth.latest_refresh()
-        assert latest is not None
-        assert latest.source_revision == "b" * 40
-        assert latest.source_checksum == last_applied.source_checksum
-        assert latest.source_checksum != first_applied.source_checksum

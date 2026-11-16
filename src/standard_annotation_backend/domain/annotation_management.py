@@ -241,6 +241,19 @@ class GroupSabeManagedError(ConflictError, TerminalRefreshError):
         TerminalRefreshError.__init__(self, "group is SABE-managed")
 
 
+class AnnotationJobInProgressError(ConflictError):
+    """Report that a group already has an unfinished GPAD job of the other type.
+
+    A group has at most one unfinished GPAD job at a time: an ordinary refresh or
+    a cutover. Each is reused while unfinished, but a request for one while the
+    other is queued or running is rejected, so two jobs never stage or publish
+    the same group's annotations at once. The message does not name the group.
+    """
+
+    code = "annotation_job_in_progress"
+    message = "The source's group already has an unfinished GPAD refresh or cutover job"
+
+
 class NoValidAnnotationsError(ValueError):
     """Report a GPAD file with no annotations that can be imported.
 
@@ -272,9 +285,12 @@ class CutoverRejectedError(ValueError):
 
 
 class AnnotationImportConflictError(TerminalRefreshError):
-    """Report a job that cannot be staged or published.
+    """Report that a group's management row vanished while a publication locked it.
 
-    The job does not exist, is not a GPAD job, or has no staged import.
+    Publishing a GPAD import creates the group's management row if it is missing
+    and then locks it. The row can be missing after that only if another
+    transaction deleted it in between, which normal operation never does. The job
+    then fails with `invalid_parameters`.
     """
 
     failure_code = RefreshFailureCode.INVALID_PARAMETERS

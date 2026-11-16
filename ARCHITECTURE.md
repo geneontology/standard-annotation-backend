@@ -153,10 +153,10 @@ gathered by a repository and every check is a pure domain function. A write must
 the annotation, have the validator check it while the locks are held, and pass the
 validator's result to the repository, which refuses to write anything else. Previews
 and QC reports use the same checks without locks, so their answers are advisory.
-Checks use the reference data active when they run; nothing holds it active until the
-write commits, so a refresh can give stored annotations issues at any time. SABE does
-not store structurally invalid annotations; draft or quarantine storage for invalid
-annotations is not part of the design.
+Checks read the reference data snapshots that were active when their transaction
+resolved them (see Concurrency). A refresh can still give stored annotations issues at
+any time. SABE does not store structurally invalid annotations; draft or quarantine
+storage for invalid annotations is not part of the design.
 
 ## Data Store and Versioning
 
@@ -222,8 +222,10 @@ audit_event
 job
   records for import/export jobs and other asynchronous work
 
-ontology_metadata
-  loaded ontology versions, source metadata
+reference_snapshot
+  one stored version of an ontology, of the go-site rule data, or of an entity
+  catalog: its kind, source key, source provenance, reader version, and whether it
+  is active; one detail table and data tables per kind hold its contents
 
 ontology_closure
   precomputed ontology closure rows for approved predicates, with subject term,
@@ -562,13 +564,14 @@ those writes wait during publication.
 
 After acquiring the locks, the transaction should freshly read the annotation version
 and duplicate conflicts and gather the other semantic validation facts before making the
-change. Reference data is read without locks: an entity catalog publication or ontology
-activation can commit while a write is validated, and the write uses the snapshots that
-were active when its facts were gathered. `READ COMMITTED` ensures that a transaction
-which waited for a lock sees the preceding transaction's commit when it performs those
-reads. The checks, annotation and version writes, duplicate lookup changes, and audit
-recording must then commit or roll back together; the advisory locks are released when
-the transaction ends.
+change. Reference data snapshots are resolved once per transaction and locked against
+pruning until it ends: a write reads every fact from the ontology, rule data, and entity
+catalog snapshots that were active when it resolved them, even if a refresh activates
+newer snapshots meanwhile. Activation never waits for readers, and readers never wait
+for activation. `READ COMMITTED` ensures that a transaction which waited for a lock sees
+the preceding transaction's commit when it performs those reads. The checks, annotation
+and version writes, duplicate lookup changes, and audit recording must then commit or
+roll back together; the advisory locks are released when the transaction ends.
 
 ## Authentication, Authorization, and Audit
 
@@ -865,16 +868,17 @@ corrupting annotation state.
 SABE keeps authorization, GO Rule data, ontologies, entity catalogs, and group
 annotations current from the sources in `config/sources.yaml`. Every kind follows the
 same pattern. A refresh job fetches one source, records its provenance (type, locator,
-resolved revision, checksum, and fetch time), skips the source if that exact document is
-already active, and otherwise validates the document before any of it becomes active.
-Annotation refreshes qualify this in two ways. They skip only when the group also has no
-local changes and no schema upgrade since its last import, and an ordinary annotation
-refresh publishes the valid rows while reporting the rejected ones. Invalid documents
-and unreachable sources fail the job with a stable failure code and leave the previous
-data in place; the next scheduled refresh tries again. Jobs start from a schedule, a
-global-admin API request, or the `just refresh` CLI. All three reuse an unfinished job
-for the same source instead of creating another. The [refresh infrastructure
-guide](docs/refresh-infrastructure.md) shows how these pieces fit together in the code.
+resolved revision, checksum, and fetch time), skips the source if its active data
+already holds the same content, and otherwise validates the document before any of it
+becomes active. Annotation refreshes qualify this in two ways. They skip only when the
+group also has no local changes and no schema upgrade since its last import, and an
+ordinary annotation refresh publishes the valid rows while reporting the rejected ones.
+Invalid documents and unreachable sources fail the job with a stable failure code and
+leave the previous data in place; the next scheduled refresh tries again. Jobs start
+from a schedule, a global-admin API request, or the `just refresh` CLI. All three reuse
+an unfinished job for the same source instead of creating another. The [refresh
+infrastructure guide](docs/refresh-infrastructure.md) shows how these pieces fit
+together in the code.
 
 **Authorization.** The go-site `users.yaml` replaces SABE's users and grants as
 described under Authorization Model.
@@ -887,9 +891,22 @@ activates them together as one snapshot. An invalid or unreachable file fails th
 and leaves the previous snapshot active. This refresh is separate from the authorization
 refresh, which reads `users.yaml` from the same repository on its own schedule. The
 [refresh infrastructure guide](docs/refresh-infrastructure.md) describes its unchanged
-check, storage, retention, and warnings, and
+check, stored tables, and warnings, and
 [annotation validation](docs/annotation-validation.md#go-rules) describes how rules read
 the data.
+
+**Snapshots and jobs.** Ontologies, the go-site rule data, and entity catalogs are
+stored as snapshots in one `reference_snapshot` table, with one detail table and data
+tables per kind. `persistence/repositories/snapshots.py` states the contract: a refresh
+job loads and activates a snapshot in one transaction, together with the job's success;
+a refresh skips a source whose active snapshot already holds the same content (source
+type, locator, checksum, and reader version, plus an ontology's prefixes and
+predicates); readers lock the snapshots they resolve; each source keeps its active
+snapshot and the one it replaced, and every refresh job prunes the rest of its kind. A
+job that stops partway stores nothing and runs again from the start. At most one refresh
+job per source, and one GPAD job per group, is queued or running at a time. Raising a
+kind's reader version in `domain/snapshots.py` makes the next refresh of each of its
+sources read the document again.
 
 **Ontologies.** `config/sources.yaml` lists every ontology SABE loads and says how to
 read each one: the `ontology:` header the file must declare, the identifier prefixes the
@@ -902,23 +919,15 @@ entry must list `rdfs:subClassOf` among its closure predicates and require the
 check; SABE refuses to start otherwise. The other ontologies are loaded as term lists
 without closure. Before parsing, SABE removes the term clauses it does not read, such as
 definitions and cross-references, so a malformed clause there cannot stop a published
-file from loading. A refresh stages a complete snapshot of terms, their subsets,
-alternative identifiers, and closure rows, then activates it. Activation only switches
-which snapshot is active: it changes no annotations and does not block annotation
-writes. Each activation then queues a term replacement job for all groups, which
-replaces obsolete terms and alternative IDs wherever the result passes semantic
-validation. A closure row records the subject term, predicate, object term, and depth,
-where the subject is the more specific term and the object is the broader queried term.
-Complete term and closure data is kept only for the active snapshot, its newest
-successful predecessor, and candidates of unfinished jobs. Older snapshots keep their
-metadata, results, and audit events. A snapshot whose bulk data was pruned cannot become
-active or be used by operations that need terms or closure. Pruning and activation take
-the same per-ontology advisory lock, so cleanup cannot race with a refresh of that
-ontology. Pruning runs after each ontology job finishes (`sabe.ontology.prune`); a
-failure to schedule or run it leaves the job's status and result unchanged, and pruning
-is retried. Removing an ontology from `config/sources.yaml` stops its prefix from being
-checked once SABE's processes reload their configuration; its stored snapshots are not
-yet retired.
+file from loading. A refresh stores a complete snapshot of terms, their subsets,
+alternative identifiers, and closure rows, then activates it. Activation changes no
+annotations and does not block annotation writes, and it queues a term replacement job
+for all groups, which replaces obsolete terms and alternative IDs wherever the result
+passes semantic validation. A closure row records the subject term, predicate, object
+term, and depth, where the subject is the more specific term and the object is the
+broader queried term. Removing an ontology from `config/sources.yaml` stops its prefix
+from being checked once SABE's processes reload their configuration, and the next
+refresh of every ontology retires its snapshot.
 
 **Entities.** An entity is an annotatable subject identified by `db_object_id`. Each
 configured GPI source supplies a complete catalog. An identifier can be active in only
@@ -927,8 +936,9 @@ also stored in their own columns, for validation. An invalid file fails the job,
 job records each invalid row's line number and reason. Semantic validation requires an
 active `db_object_id` for client creates and updates; deletes and imports do not need
 one. Replacing or retiring a catalog never modifies existing annotations, and report
-jobs find annotations whose subject was removed. Removing a source from the
-configuration retires its catalog on the next refresh of all entity sources.
+jobs find annotations whose subject was removed. Validation reads entity facts from the
+same resolved catalog snapshots as the other facts. Removing a source from the
+configuration retires its catalog on the next refresh of every entity source.
 
 **Annotation refreshes.** Each entry in the `annotations` section of the sources file
 names a GPAD 2.0 file and the group (`owning_group_id`) whose annotations it supplies. A
@@ -940,19 +950,22 @@ cutover publishes. After it, SABE rejects refreshes and cutovers for that group 
 global-admin API, never from the schedule or CLI. Each publication queues a term
 replacement job for the group.
 
-Staging happens outside the global annotation-write lock. A row the reader cannot parse,
-or that fails structural validation, is rejected and reported with its line number, and
-the rest of the file is still staged. Publication takes the global annotation-write lock
-exclusively, so readers keep seeing the complete old data while annotation writes wait,
-then see the complete new data after commit. For the target group only, it deletes
-annotations (with their versions, comments, and lookup rows), all change sets including
-pending create proposals, and the audit events tied to those annotations or change sets.
-It then inserts the staged annotations as version 1 imports. Other groups, jobs, job
-audit events, and `annotation_import` records are never deleted. A failure rolls
-everything back, and nothing can be undone after commit.
+Staging and publication happen in the job's transaction. Staging takes no annotation
+lock. A row the reader cannot parse, or that fails structural validation, is rejected
+and reported with its line number, and the rest of the file is still staged.
+Publication takes the global annotation-write lock exclusively, so readers keep seeing
+the complete old data while annotation writes wait, then see the complete new data
+after commit. For the target group only, it deletes annotations (with their versions,
+comments, and lookup rows), all change sets including pending create proposals, and the
+audit events tied to those annotations or change sets. It then inserts the staged
+annotations as version 1 imports. Other groups, jobs, job audit events, and
+`annotation_import` records are never deleted. A failure rolls everything back, and
+nothing can be undone after commit.
 
-Jobs for one group run one at a time. A job that finds the group busy is retried later
-instead of waiting on a worker. Jobs for different groups stage in parallel.
+A group has at most one unfinished GPAD job, refresh or cutover, so jobs for one group
+never overlap. Asking for the type of job that is already unfinished reuses it. Asking
+for the other type fails with `409 annotation_job_in_progress`, and a refresh of every
+source skips the group. Jobs for different groups run in parallel.
 
 Any refresh, ordinary or cutover, fails with `no_valid_annotations` and publishes
 nothing when no valid annotation remains after staging. A cutover that has at least one
@@ -972,10 +985,9 @@ stored annotations that the new schema rejects cannot be loaded, which blocks re
 them, until their group is imported again. SABE-managed groups are never re-imported, so
 such annotations in those groups must be corrected directly.
 
-If a job is redelivered after publication committed, it returns the stored result
-without fetching. Interrupted staging is discarded and staged again. Removing a source
-from the configuration stops its refreshes only; the group's annotations and mode are
-unchanged.
+A job that stops before it commits changes nothing and runs again from the start; a job
+that succeeded is not run again. Removing a source from the configuration stops its
+refreshes only; the group's annotations and mode are unchanged.
 
 ### Annotation Import and Export
 
@@ -993,13 +1005,11 @@ over independently, with no single global cutover date.
 Imports are never semantically validated: an annotation whose entity is not active is
 imported, and report jobs find it.
 
-Per-group locking serializes jobs for one group, while different groups stage
-concurrently. After fetching the document and finding it changed, the worker takes a
-PostgreSQL session-level advisory lock for the group (while the annotation refresh
-service applies the document) and holds it through staging and publication; loss of the
-database session releases it. A job that finds the lock held is retried later. This
-prevents overlapping jobs from publishing a group's files out of order without blocking
-normal annotation reads or writes.
+A group has at most one unfinished GPAD job, enforced by a unique index on unfinished
+jobs, so jobs for one group never overlap while different groups' jobs run
+concurrently. A job runs its whole replacement, from staging through publication, in
+one transaction. This prevents overlapping jobs from publishing a group's files out of
+order without blocking normal annotation reads or writes.
 
 A job parses the source file, structurally validates each record against the Standard
 Annotation model, assigns backend-generated SABE UUIDs outside the Standard Annotation
@@ -1009,9 +1019,9 @@ initial immutable version data and source provenance. Structurally invalid recor
 rejected and reported individually. Staging is isolated from live annotation state and
 acquires neither the global annotation-write lock nor per-signature duplicate locks.
 
-After staging succeeds, a publication transaction acquires the global annotation-write
-lock in exclusive mode and permanently deletes the target group's annotations together
-with their duplicate lookup data, immutable versions, comments, change sets, and
+After staging succeeds, the job's transaction acquires the global annotation-write lock
+in exclusive mode and permanently deletes the target group's annotations together with
+their duplicate lookup data, immutable versions, comments, change sets, and
 annotation-specific audit events. It then inserts the staged annotations, their initial
 immutable versions and duplicate lookup data, records the job's provenance, and commits.
 The job record, job-level audit events, and import report remain as the durable record
@@ -1159,12 +1169,13 @@ developers can run locally and operate in AWS with limited specialized DevOps bu
 | Decision area                                        | Status                                                                                                   | Owner or input needed                                                                                                                      | Implementation impact                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 |------------------------------------------------------|----------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | SABE annotation identifiers                          | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | The backend generates UUIDs as SABE metadata outside the Standard Annotation payload; UUID helpers and persistence may proceed.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Per-group GPAD replacement and cutover               | Settled for the initial implementation                                                                   | Each group's cutover is a global-admin decision; no further input is needed for the mechanism.                                             | Configured GPAD sources replace a `gpad_imported` group's annotations through staging tables keyed by job ID. A per-group try-lock serializes jobs for one group. One publication transaction takes the global annotation-write lock exclusively, permanently deletes the group's annotations and dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. A cutover does the same with zero rejections allowed and makes the group `sabe_managed` permanently. |
+| Per-group GPAD replacement and cutover               | Settled for the initial implementation                                                                   | Each group's cutover is a global-admin decision; no further input is needed for the mechanism.                                             | Configured GPAD sources replace a `gpad_imported` group's annotations through staging tables keyed by job ID. A group has at most one unfinished GPAD job, enforced by a unique index. The job's one transaction stages the file, takes the global annotation-write lock exclusively, permanently deletes the group's annotations and dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. A cutover does the same with zero rejections allowed and makes the group `sabe_managed` permanently. |
 | Duplicate handling during GPAD import                | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | Staging and publication perform no duplicate checks or rejection. Staging takes no duplicate locks; publication takes the global annotation-write lock exclusively but takes no signature locks. QC reports apply the settled pairwise predicate to stored annotations and list each annotation's peers rather than grouping duplicates into connected components.                                                                                                                                                                                                           |
 | Initial Protein2GO-aligned pairwise duplicate policy | Settled for the initial implementation                                                                   | No further input is needed. The accepted non-transitivity risk should be reviewed if multi-reference source data becomes material.         | Implementation may proceed with an indexed base signature and per-reference lookup rows. Creates and updates reject any peer as a `duplicate_annotation` issue; soft deletes remove conflicts. Every ordinary annotation mutation uses `READ COMMITTED`, takes the global annotation-write lock in shared mode before ordered signature locks, then freshly re-reads state and peers.                                                                                                                                                                                        |
 | Annotated-entity metadata for GPAD imports           | Settled for GPAD import; alternatives are deferred                                                       | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | GPAD imports do not check `db_object_id` against the entity catalog; semantic validation applies to client writes and term replacement writes, and QC reports flag stored annotations whose entity is unknown. No alternative source or reconciliation workflow is implied.                                                                                                                                                                                                                                                                                                  |
 | Structural validation                                | Settled for the initial implementation                                                                   | No further policy input is needed.                                                                                                         | Structural schema validation blocks all writes and individual import records. Invalid imported records are isolated and reported instead of failing the whole import.                                                                                                                                                                                                                                                                                                                                                                                                        |
 | GORULE-style semantic validation                     | Settled: entity, ontology-term, duplicate, and write-blocking GO Rule checks block client writes         | No further policy input is needed for the checks in `docs/annotation-validation.md`.                                                       | Client creates and updates must have no semantic issues; deletes and GPAD imports are not checked. The rules and SABE's reading of each are in `docs/annotation-validation.md`. Term replacement writes meet the same checks, and QC reports apply them to stored annotations.                                                                                                                                                                                                                                                                                               |
+| Reference data snapshots                             | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | One `reference_snapshot` table with one lifecycle; refresh jobs are one transaction. This removes recovery and staging state, three storage models, and four change rules, and readers never see pruned data. |
 
 ## Possible Future Expansion
 

@@ -7,12 +7,15 @@ values, so every check runs without a database.
 """
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import UUID
 
 from standard_annotation_backend.domain.errors import UnavailableError
 from standard_annotation_backend.domain.semantic_validation.rule_data import RuleData
+
+RULES_REFERENCE_DATA = "rules"
+"""The name `ReferenceDataUnavailableError` uses for the go-site rule data."""
 
 
 class TermStatus(StrEnum):
@@ -92,20 +95,35 @@ class ActiveSnapshots:
     """Identify the active snapshots that a set of facts is read from.
 
     A snapshot is one stored version of a reference data source. The snapshots are
-    looked up once, before any facts are read, so facts read together never mix two
-    versions of an ontology or of the rule data, even if a refresh activates a new
-    snapshot meanwhile.
+    looked up once, before any facts are read, and stay locked against pruning
+    until the transaction ends. Facts read together therefore never mix two
+    versions of an ontology, the rule data, or an entity catalog, even if a
+    refresh activates a newer snapshot meanwhile.
 
     Attributes:
         ontology_versions: Each configured ontology's active snapshot, keyed by
             ontology key.
         rules_snapshot_id: The active go-site rule data snapshot.
         rule_data: That snapshot's rule data.
+        entity_catalogs: Each active entity catalog's snapshot, keyed by source
+            key.
     """
 
     ontology_versions: Mapping[str, UUID]
     rules_snapshot_id: UUID
     rule_data: RuleData
+    entity_catalogs: Mapping[str, UUID] = field(default_factory=dict)
+
+    @property
+    def snapshot_ids(self) -> frozenset[UUID]:
+        """Return the ID of every snapshot these facts are read from."""
+        return frozenset(
+            {
+                *self.ontology_versions.values(),
+                self.rules_snapshot_id,
+                *self.entity_catalogs.values(),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,14 +143,16 @@ class ReplacementFacts:
 
 
 class ReferenceDataUnavailableError(UnavailableError):
-    """Report reference data that validation needs but that has no active snapshot.
+    """Report reference data that validation needs but cannot read.
 
     Every configured ontology and the go-site rule data must have an active
-    snapshot before SABE can validate annotations.
+    snapshot before SABE can validate annotations. The rule data is also
+    unavailable when an earlier release stored it in a form this release cannot
+    read; the next rules refresh stores it again.
 
     Attributes:
         missing: The ontology keys, and `rules` for the go-site rule data, that
-            have no active snapshot.
+            are unavailable.
     """
 
     code = "reference_data_unavailable"

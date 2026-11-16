@@ -1,17 +1,14 @@
 """Create and run reference data refresh jobs and QC reports with Celery.
 
-Four tasks handle reference data refreshes:
+Two tasks handle reference data refreshes:
 
 - `sabe.refresh.schedule(kind)` is published by Celery Beat once per refresh kind.
   It starts a job for every configured source of that kind through
   `RefreshStartService`, which commits each job to PostgreSQL before sending it.
-  Annotation sources whose group is SABE-managed are skipped.
+  Annotation sources whose group is SABE-managed, or has an unfinished cutover
+  job, are skipped.
 - `sabe.refresh.run(job_id)` runs one authorization, rules, ontology, entity, or
   annotation refresh job, or one annotation cutover job.
-- `sabe.entity_retirement.run(job_id)` retires the catalog of an entity source
-  that is no longer configured.
-- `sabe.ontology.prune(ontology_key)` deletes old snapshot data. `RefreshRunner`
-  schedules it after each ontology job finishes.
 
 Ontology activations and annotation publications queue term replacement jobs,
 which `sabe.term_replacement.run(job_id)` runs. QC reports are scheduled and run
@@ -25,12 +22,12 @@ already recorded and can be found, retried, or reported; if execution fails
 midway, Celery redelivers only the execution task, and the schedule is not
 repeated.
 
-Messages carry at most a job ID, a refresh kind, or an ontology key. Everything
-else, such as parameters, progress, and results, is read from and written to
-PostgreSQL. Redis carries the Celery messages but holds no job state, and a
-message never contains data that could become outdated or be exposed through the
-broker. `RefreshRunner`, `TermReplacementService`, and `QcReportRunner` make
-redelivered messages safe to run again.
+Messages carry at most a job ID or a refresh kind. Everything else, such as
+parameters, progress, and results, is read from and written to PostgreSQL. Redis
+carries the Celery messages but holds no job state, and a message never contains
+data that could become outdated or be exposed through the broker.
+`RefreshRunner`, `TermReplacementService`, and `QcReportRunner` make redelivered
+messages safe to run again.
 
 Every task retries on unexpected errors, logging only the exception type, so
 infrastructure details such as connection strings never reach Celery's logs.
@@ -43,12 +40,8 @@ from celery import Task
 from celery.exceptions import Reject, Retry
 
 from standard_annotation_backend.domain.auth import system_context
-from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.services.job_service import Job
-from standard_annotation_backend.services.ontology_refresh_service import (
-    OntologyRefreshBusyError,
-)
 from standard_annotation_backend.services.qc_report_service import QcReportService
 from standard_annotation_backend.services.refresh_start_service import (
     RefreshStartService,
@@ -66,33 +59,6 @@ class WorkerTaskUnavailableError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(_TASK_UNAVAILABLE)
-
-
-@celery_app.task(bind=True, max_retries=None, name="sabe.ontology.prune")
-def prune_ontology_snapshots(task: Task, ontology_key: str) -> None:
-    """Delete unneeded term and closure rows for one ontology.
-
-    The task takes the same per-ontology lock as refreshes. When that lock is
-    busy, or infrastructure is unavailable, it asks Celery to retry later.
-    An unknown key has nothing to prune, so the task returns without retrying.
-    """
-    failure_type: str | None = None
-    try:
-        # `_enqueue_prune` is passed only so the runtime is built the same way
-        # as for refresh tasks; pruning itself never enqueues another prune.
-        with worker_runtime(
-            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
-        ) as runtime:
-            # `prune` returns `False` only when another process holds the lock.
-            # Raise so the retry below runs once that process has finished.
-            if not runtime.ontology.prune(ontology_key):
-                raise OntologyRefreshBusyError
-    except Exception as error:
-        failure_type = type(error).__name__
-    # Retry outside the `except` block so the retry exception has no chained
-    # cause that could carry infrastructure details into Celery's logs.
-    if failure_type is not None:
-        _retry_safely(task, f"ontology:{ontology_key}", failure_type)
 
 
 def _retry_safely(task: Task, job_id: str, failure_type: str) -> None:
@@ -121,9 +87,9 @@ def run_refresh(task: Task, job_id: str) -> None:
 
     The message carries only the job ID; the job's parameters and every state
     change live in PostgreSQL. `RefreshRunner.run` handles locking, redelivery,
-    recovery, and failures that retrying cannot fix. Any other error is logged by
-    type only and retried after 30 seconds, keeping the job and its committed
-    work.
+    restarts, and failures that retrying cannot fix. Any other error is logged by
+    type only and retried after 30 seconds. The job stays running and the
+    attempt's changes roll back, so the retry runs it from the start.
     """
     failure_type: str | None = None
     try:
@@ -132,9 +98,7 @@ def run_refresh(task: Task, job_id: str) -> None:
         durable_job_id = UUID(job_id)
         # The runtime is built per task so its database engine and HTTP client
         # are closed when the task ends.
-        with worker_runtime(
-            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
-        ) as runtime:
+        with worker_runtime(dispatch_replacement=_dispatch_replacement) as runtime:
             runtime.runner.run(durable_job_id)
     except Exception as error:
         failure_type = type(error).__name__
@@ -144,38 +108,13 @@ def run_refresh(task: Task, job_id: str) -> None:
         _retry_safely(task, job_id, failure_type)
 
 
-@celery_app.task(bind=True, max_retries=None, name="sabe.entity_retirement.run")
-def run_entity_retirement(task: Task, job_id: str) -> None:
-    """Retire the catalog of an entity source that is no longer configured.
-
-    Retries follow the same rules as `run_refresh`.
-    """
-    failure_type: str | None = None
-    try:
-        durable_job_id = UUID(job_id)
-        with worker_runtime(
-            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
-        ) as runtime:
-            runtime.runner.run_retirement(durable_job_id)
-    except Exception as error:
-        failure_type = type(error).__name__
-    # As in `run_refresh`, retry outside the `except` block.
-    if failure_type is not None:
-        _retry_safely(task, job_id, failure_type)
-
-
 def dispatch_refresh_job(job: Job) -> None:
-    """Send one job to the Celery task that runs its job type.
+    """Send one refresh job to `sabe.refresh.run`.
 
     Only the job ID is sent; the worker reads everything else from PostgreSQL.
     `RefreshStartService` calls this after committing the job.
     """
-    task = (
-        run_entity_retirement
-        if job.job_type is JobType.ENTITY_RETIREMENT
-        else run_refresh
-    )
-    task.delay(str(job.job_id))
+    run_refresh.delay(str(job.job_id))
 
 
 @celery_app.task(bind=True, max_retries=None, name="sabe.refresh.schedule")
@@ -195,9 +134,7 @@ def schedule_refresh(task: Task, kind: str) -> None:
         return
     failure_type: str | None = None
     try:
-        with worker_runtime(
-            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
-        ) as runtime:
+        with worker_runtime(dispatch_replacement=_dispatch_replacement) as runtime:
             RefreshStartService(
                 runtime.unit_of_work_factory,
                 runtime.settings.sources,
@@ -220,9 +157,7 @@ def run_term_replacement(task: Task, job_id: str) -> None:
     failure_type: str | None = None
     try:
         durable_job_id = UUID(job_id)
-        with worker_runtime(
-            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
-        ) as runtime:
+        with worker_runtime(dispatch_replacement=_dispatch_replacement) as runtime:
             runtime.term_replacement.run(durable_job_id)
     except Exception as error:
         failure_type = type(error).__name__
@@ -242,9 +177,7 @@ def run_qc_report(task: Task, job_id: str) -> None:
     failure_type: str | None = None
     try:
         durable_job_id = UUID(job_id)
-        with worker_runtime(
-            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
-        ) as runtime:
+        with worker_runtime(dispatch_replacement=_dispatch_replacement) as runtime:
             runtime.qc_report.run(durable_job_id)
     except Exception as error:
         failure_type = type(error).__name__
@@ -271,9 +204,7 @@ def schedule_qc_report(task: Task) -> None:
     """
     failure_type: str | None = None
     try:
-        with worker_runtime(
-            enqueue_prune=_enqueue_prune, dispatch_replacement=_dispatch_replacement
-        ) as runtime:
+        with worker_runtime(dispatch_replacement=_dispatch_replacement) as runtime:
             QcReportService(runtime.unit_of_work_factory, dispatch_qc_report).start(
                 system_context("scheduler"), None
             )
@@ -286,8 +217,3 @@ def schedule_qc_report(task: Task) -> None:
 def _dispatch_replacement(job: Job) -> None:
     """Send a queued term replacement job to its Celery task."""
     run_term_replacement.delay(str(job.job_id))
-
-
-def _enqueue_prune(ontology_key: str) -> None:
-    """Send ontology pruning to its own Celery task after an ontology job ends."""
-    prune_ontology_snapshots.delay(ontology_key)

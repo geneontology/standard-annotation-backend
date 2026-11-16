@@ -5,27 +5,19 @@ from collections.abc import Callable
 from annotation_refresh_helpers import gpad_bytes, gpad_row
 from refresh_helpers import (
     TEST_SOURCES,
+    FakeFetchers,
     OboTerm,
-    go_document,
-    ignore_progress,
+    build_runner,
     obo,
-    source_document,
-    start_job,
 )
+from seeding import create_job
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.annotation_refresh_service import (
-    AnnotationRefreshService,
-)
-from standard_annotation_backend.services.job_service import Job
-from standard_annotation_backend.services.ontology_refresh_service import (
-    OntologyRefreshService,
-)
+from standard_annotation_backend.services.job_service import Job, JobService
 
 
 def _replacement_jobs(session_factory: sessionmaker[Session]) -> list[JobRecord]:
@@ -47,16 +39,19 @@ def test_an_activation_queues_and_dispatches_a_job_for_all_groups(
     The replacement job is requested by whoever requested the ontology refresh.
     """
     dispatched: list[Job] = []
-    service = OntologyRefreshService(
+    job = create_job(
         unit_of_work_factory,
-        TEST_SOURCES,
-        bind_try_lock(database_engine),
-        None,
-        dispatch_replacement=dispatched.append,
+        job_type=JobType.ONTOLOGY_REFRESH,
+        requested_by="curator",
+        parameters={"source_key": "go"},
     )
-    job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
 
-    service.apply(job, go_document(obo(OboTerm("GO:0000001"))), ignore_progress)
+    build_runner(
+        database_engine,
+        unit_of_work_factory,
+        FakeFetchers({"go": obo(OboTerm("GO:0000001"))}),
+        dispatch_replacement=dispatched.append,
+    ).run(job.job_id)
 
     (queued,) = _replacement_jobs(session_factory)
     assert (queued.status, queued.parameters, queued.requested_by) == (
@@ -64,52 +59,6 @@ def test_an_activation_queues_and_dispatches_a_job_for_all_groups(
         {},
         job.requested_by,
     )
-    assert [item.job_id for item in dispatched] == [queued.job_id]
-
-
-def test_a_failed_dispatch_leaves_the_job_queued_for_the_next_trigger(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-) -> None:
-    """A dispatch failure does not fail the refresh, and the job stays queued.
-
-    The next activation joins that queued job and dispatches it again.
-    """
-
-    def broken(_job: Job) -> None:
-        raise RuntimeError("broker unavailable")
-
-    lock = bind_try_lock(database_engine)
-    failing = OntologyRefreshService(
-        unit_of_work_factory, TEST_SOURCES, lock, None, dispatch_replacement=broken
-    )
-    first = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
-
-    outcome = failing.apply(
-        first, go_document(obo(OboTerm("GO:0000001"))), ignore_progress
-    )
-
-    assert outcome.result["ontology_version_id"] is not None
-    (queued,) = _replacement_jobs(session_factory)
-    assert queued.status is JobStatus.QUEUED
-
-    dispatched: list[Job] = []
-    working = OntologyRefreshService(
-        unit_of_work_factory,
-        TEST_SOURCES,
-        lock,
-        None,
-        dispatch_replacement=dispatched.append,
-    )
-    second = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
-    working.apply(
-        second,
-        go_document(obo(OboTerm("GO:0000001"), OboTerm("GO:0000002"))),
-        ignore_progress,
-    )
-
-    assert [job.job_id for job in _replacement_jobs(session_factory)] == [queued.job_id]
     assert [item.job_id for item in dispatched] == [queued.job_id]
 
 
@@ -126,26 +75,31 @@ def test_a_publication_queues_a_job_for_its_group_and_an_unchanged_file_does_not
     """
     seed_active_subjects("UniProtKB:P12345")
     dispatched: list[Job] = []
-    service = AnnotationRefreshService(
+    runner = build_runner(
+        database_engine,
         unit_of_work_factory,
-        TEST_SOURCES,
-        bind_try_lock(database_engine),
+        FakeFetchers({"mgi-gpad": gpad_bytes(gpad_row("UniProtKB:P12345"))}),
         dispatch_replacement=dispatched.append,
     )
-    content = gpad_bytes(gpad_row("UniProtKB:P12345"))
-    first = start_job(unit_of_work_factory, JobType.ANNOTATION_REFRESH, "mgi-gpad")
-    service.apply(first, source_document("mgi-gpad", content), ignore_progress)
-    group_key = TEST_SOURCES.annotation_group("mgi-gpad")
+
+    def run_refresh() -> Job:
+        job = create_job(
+            unit_of_work_factory,
+            job_type=JobType.ANNOTATION_REFRESH,
+            requested_by="curator",
+            parameters={"source_key": "mgi-gpad"},
+        )
+        runner.run(job.job_id)
+        return JobService(unit_of_work_factory).find(job.job_id)
+
+    run_refresh()
 
     (queued,) = _replacement_jobs(session_factory)
-    assert queued.parameters == {"group_key": group_key}
+    assert queued.parameters == {"group_key": TEST_SOURCES.annotation_group("mgi-gpad")}
     assert [item.job_id for item in dispatched] == [queued.job_id]
 
-    second = start_job(unit_of_work_factory, JobType.ANNOTATION_REFRESH, "mgi-gpad")
-    outcome = service.apply(
-        second, source_document("mgi-gpad", content), ignore_progress
-    )
+    rerun = run_refresh()
 
-    assert outcome.unchanged
+    assert rerun.result is not None and rerun.result["unchanged"] is True
     assert len(_replacement_jobs(session_factory)) == 1
     assert len(dispatched) == 1

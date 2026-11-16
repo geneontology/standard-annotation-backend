@@ -11,10 +11,11 @@ from seeding import (
     DEFAULT_RULE_DATA,
     SeedTerm,
     create_job,
+    deactivate_reference_data,
     insert_annotation,
     set_rule_data,
 )
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER
 
@@ -24,11 +25,9 @@ from standard_annotation_backend.domain.annotations import (
     InvalidAnnotationPayloadError,
 )
 from standard_annotation_backend.domain.jobs import JobType
-from standard_annotation_backend.persistence.models import (
-    AnnotationRecord,
-    OntologyMetadataRecord,
-    RulesSnapshotRecord,
-)
+from standard_annotation_backend.domain.refresh import RULES_SOURCE_KEY
+from standard_annotation_backend.domain.snapshots import SnapshotKind
+from standard_annotation_backend.persistence.models import AnnotationRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_service import AnnotationService
 
@@ -167,15 +166,10 @@ def test_writes_need_loaded_reference_data_but_reads_and_deletes_do_not(
     """
     created = _create(integration_api_client, PAYLOAD)
     annotation_id = created.json()["annotation_id"]
-    with session_factory.begin() as session:
-        if missing == "rules":
-            session.execute(update(RulesSnapshotRecord).values(active=False))
-        else:
-            session.execute(
-                update(OntologyMetadataRecord)
-                .where(OntologyMetadataRecord.ontology_key == "chebi")
-                .values(active=False)
-            )
+    if missing == "rules":
+        deactivate_reference_data(session_factory, SnapshotKind.RULES, RULES_SOURCE_KEY)
+    else:
+        deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "chebi")
 
     create = _create(integration_api_client, {**PAYLOAD, "references": ["PMID:2"]})
     patch = integration_api_client.patch(
@@ -231,15 +225,10 @@ def test_change_sets_need_loaded_reference_data_except_for_deletes(
     )
     create_path = f"/change-sets/{create_proposal.json()['change_set_id']}"
     delete_path = f"/change-sets/{delete_proposal.json()['change_set_id']}"
-    with session_factory.begin() as session:
-        if missing == "rules":
-            session.execute(update(RulesSnapshotRecord).values(active=False))
-        else:
-            session.execute(
-                update(OntologyMetadataRecord)
-                .where(OntologyMetadataRecord.ontology_key == "chebi")
-                .values(active=False)
-            )
+    if missing == "rules":
+        deactivate_reference_data(session_factory, SnapshotKind.RULES, RULES_SOURCE_KEY)
+    else:
+        deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "chebi")
 
     for response in (
         client.post(f"{create_path}/preview"),
@@ -340,15 +329,10 @@ def test_structural_issues_are_reported_without_loaded_reference_data(
             "reason": "Review",
         },
     )
-    with session_factory.begin() as session:
-        if missing == "rules":
-            session.execute(update(RulesSnapshotRecord).values(active=False))
-        else:
-            session.execute(
-                update(OntologyMetadataRecord)
-                .where(OntologyMetadataRecord.ontology_key == "chebi")
-                .values(active=False)
-            )
+    if missing == "rules":
+        deactivate_reference_data(session_factory, SnapshotKind.RULES, RULES_SOURCE_KEY)
+    else:
+        deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "chebi")
 
     patch = client.patch(
         f"/annotations/{created.json()['annotation_id']}",

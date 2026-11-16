@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 from refresh_helpers import TEST_ONTOLOGIES
-from seeding import SeedTerm, insert_annotation
+from seeding import SeedTerm, deactivate_reference_data, insert_annotation
 from sqlalchemy import Engine, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -15,6 +15,7 @@ from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.semantic_validation.facts import (
     ReplacementFacts,
 )
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     bind_try_lock,
@@ -23,7 +24,6 @@ from standard_annotation_backend.persistence.locks import (
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AuditEventRecord,
-    OntologyMetadataRecord,
 )
 from standard_annotation_backend.persistence.repositories import (
     ValidationFactsRepository,
@@ -288,12 +288,7 @@ def test_missing_reference_data_fails_the_job_without_changes(
 ) -> None:
     """With no active GO snapshot, the job fails with `reference_data_unavailable`."""
     annotation_id = _insert(session_factory, _annotation(OBSOLETE))
-    with session_factory.begin() as session:
-        session.execute(
-            update(OntologyMetadataRecord)
-            .where(OntologyMetadataRecord.ontology_key == "go")
-            .values(active=False)
-        )
+    deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "go")
 
     job = _run(unit_of_work_factory, database_engine)
 
@@ -353,12 +348,7 @@ def test_a_job_with_nothing_to_scan_still_requires_reference_data(
     database_engine: Engine,
 ) -> None:
     """A group with no annotations fails with `reference_data_unavailable` too."""
-    with session_factory.begin() as session:
-        session.execute(
-            update(OntologyMetadataRecord)
-            .where(OntologyMetadataRecord.ontology_key == "go")
-            .values(active=False)
-        )
+    deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "go")
 
     job = _run(unit_of_work_factory, database_engine, group_key="ZFIN")
 

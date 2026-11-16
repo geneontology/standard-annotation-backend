@@ -1,5 +1,6 @@
 """Persist durable asynchronous jobs in caller-managed transactions."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -24,6 +25,14 @@ from standard_annotation_backend.persistence.models import JobRecord
 def lock_job_record(session: Session, job_id: UUID) -> JobRecord | None:
     """Load a job under a row lock held until the transaction ends.
 
+    The lock is PostgreSQL's `FOR NO KEY UPDATE`. It excludes other changes to
+    the job, but not inserts of rows that refer to the job by foreign key, which
+    lock the job only against changes to its key. A refresh job inserts such rows
+    in its own transaction while other connections record its progress, and
+    those progress updates must not wait for that transaction to end. The lock
+    still conflicts with the `FOR UPDATE` lock that `JobRepository.find_queued`
+    takes, so a job reused by a caller cannot start before that caller commits.
+
     The row is reloaded from the database even if the session already holds it,
     so callers see the state committed by any transaction that held the lock
     before them.
@@ -38,7 +47,7 @@ def lock_job_record(session: Session, job_id: UUID) -> JobRecord | None:
     return session.scalar(
         select(JobRecord)
         .where(JobRecord.job_id == job_id)
-        .with_for_update()
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
 
@@ -193,8 +202,18 @@ class JobRepository:
         *,
         result: dict[str, object],
         now: datetime,
+        progress: dict[str, object] | None = None,
+        warnings: Sequence[str] | None = None,
     ) -> JobMutation:
-        """Finish a running job successfully under a row lock."""
+        """Finish a running job successfully under a row lock.
+
+        Args:
+            job_id: The job to finish.
+            result: The result to store.
+            now: The completion time.
+            progress: Final progress to store with the success, if given.
+            warnings: Final warnings to store with the success, if given.
+        """
         record = self._lock(job_id)
         status = record.status
         if status is JobStatus.SUCCEEDED:
@@ -205,6 +224,10 @@ class JobRepository:
             raise InvalidJobTransitionError("only running jobs can succeed")
         record.status = JobStatus.SUCCEEDED
         record.result = result
+        if progress is not None:
+            record.progress = progress
+        if warnings is not None:
+            record.warnings = list(warnings)
         record.completed_at = now
         record.updated_at = now
         self.session.flush([record])

@@ -13,27 +13,31 @@ from refresh_helpers import (
     rule_files,
     sources_with_entities,
 )
+from seeding import active_snapshot, entity_identifiers, seed_entity_catalog
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
-from test_entity_refresh_service import publish_catalog
 
 from standard_annotation_backend.cli import refresh as cli
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
 )
 from standard_annotation_backend.domain.audit import AuditAction
+from standard_annotation_backend.domain.auth import system_context
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     JobRecord,
-    RulesSnapshotRecord,
     SabeUserRecord,
+)
+from standard_annotation_backend.persistence.repositories.snapshots import (
+    SnapshotRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh.sources import RefreshSources
-from standard_annotation_backend.services.entity_refresh_service import (
-    EntityRefreshService,
-)
 from standard_annotation_backend.services.job_service import Job, JobService
+from standard_annotation_backend.services.refresh_start_service import (
+    RefreshStartService,
+)
 from standard_annotation_backend.workers.runtime import create_refresh_runner
 
 USERS_YAML = b"""
@@ -129,21 +133,34 @@ def test_cli_exits_nonzero_and_prints_the_failure_code(
     assert any(line.startswith("entity_refresh rgd succeeded") for line in lines)
 
 
-def test_interrupted_job_stays_running_and_the_next_run_resumes_it(
-    use_runtime: InstallRuntime, capsys: pytest.CaptureFixture[str]
+def test_interrupted_job_stays_running_and_the_next_run_starts_it_again(
+    use_runtime: InstallRuntime,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An infrastructure error leaves the job running; the next run reuses it."""
-    use_runtime({"mgi": ConnectionResetError("database lost")})
-    assert cli.main(["entity", "mgi"]) == 1
+    """An infrastructure error leaves the job running; the next run reuses it.
+
+    The error comes after the catalog is stored, while it is activated. The next
+    run fetches the source again and finishes the same job.
+    """
+
+    def lose_database(*_args: object, **_kwargs: object) -> None:
+        raise ConnectionResetError("database lost")
+
+    use_runtime({"mgi": GPI})
+    with monkeypatch.context() as patch:
+        patch.setattr(SnapshotRepository, "activate", lose_database)
+        assert cli.main(["entity", "mgi"]) == 1
     first = capsys.readouterr().out
     assert "entity_refresh mgi running" in first
     job_id = first.split()[3]
 
-    use_runtime({"mgi": GPI})
+    fetchers = use_runtime({"mgi": GPI})
     assert cli.main(["entity", "mgi"]) == 0
 
     second = capsys.readouterr().out
     assert f"entity_refresh mgi succeeded {job_id}" in second
+    assert fetchers.calls == ["mgi"]
 
 
 def test_unknown_source_creates_no_job(
@@ -161,18 +178,16 @@ def test_unknown_source_creates_no_job(
         assert session.scalar(select(func.count()).select_from(JobRecord)) == 0
 
 
-def test_cli_runs_retirement_for_catalog_without_configured_source(
+def test_cli_retires_a_catalog_without_a_configured_source(
     use_runtime: InstallRuntime,
-    unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`refresh entity` also retires an active catalog whose source was removed."""
-    legacy = sources_with_entities(
-        {"legacy": {"type": "https", "url": "https://example.org/legacy.gpi"}}
-    )
-    imports = EntityRefreshService(unit_of_work_factory, legacy)
-    publish_catalog(imports, unit_of_work_factory, "legacy:1", source="legacy")
+    """`refresh entity` retires an active catalog whose source was removed.
+
+    The retirement is printed before the refresh jobs.
+    """
+    seed_entity_catalog(session_factory, ["ZFIN:1"], source_key="zfin")
     only_mgi = sources_with_entities(
         {"mgi": {"type": "https", "url": "https://example.org/mgi.gpi"}}
     )
@@ -181,17 +196,24 @@ def test_cli_runs_retirement_for_catalog_without_configured_source(
     assert cli.main(["entity"]) == 0
 
     lines = capsys.readouterr().out.splitlines()
-    assert any(line.startswith("entity_retirement legacy succeeded") for line in lines)
-    with session_factory() as session:
-        action = AuditAction.ENTITY_RETIRED
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AuditEventRecord)
-                .where(AuditEventRecord.action == action)
-            )
-            == 1
-        )
+    assert lines[0] == "entity zfin retired"
+    assert lines[1].startswith("entity_refresh mgi succeeded")
+    assert entity_identifiers(session_factory, "zfin") == set()
+
+
+def test_cli_reports_a_retirement_when_no_sources_remain_configured(
+    use_runtime: InstallRuntime,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Retiring the last catalogs is reported instead of "no sources configured"."""
+    seed_entity_catalog(session_factory, ["ZFIN:1"], source_key="zfin")
+    use_runtime({}, sources_with_entities({}))
+
+    assert cli.main(["entity"]) == 0
+
+    assert capsys.readouterr().out.splitlines() == ["entity zfin retired"]
+    assert entity_identifiers(session_factory, "zfin") == set()
 
 
 def test_cli_reports_when_no_sources_are_configured(
@@ -247,8 +269,7 @@ def test_cli_refreshes_rules_in_process(
     assert cli.main(["rules"]) == 0
 
     assert "rules_refresh go-site succeeded" in capsys.readouterr().out
-    with session_factory() as session:
-        assert session.scalar(select(RulesSnapshotRecord.active)) is True
+    assert active_snapshot(session_factory, SnapshotKind.RULES, "go-site") is not None
 
 
 def test_cli_runs_an_annotation_refresh_in_process(
@@ -289,6 +310,28 @@ def test_cli_rejects_a_sabe_managed_source_without_a_job(
         )
 
 
+def test_cli_rejects_a_source_whose_group_has_an_unfinished_cutover(
+    use_runtime: InstallRuntime,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CLI exits with an error while the group's cutover is unfinished."""
+    use_runtime({})
+    RefreshStartService(
+        unit_of_work_factory, TEST_SOURCES, lambda _job: None
+    ).start_cutover(context=system_context("admin"), source_key="mgi-gpad")
+    with session_factory() as session:
+        jobs_before = session.scalar(select(func.count()).select_from(JobRecord))
+
+    assert cli.main(["annotation", "mgi-gpad"]) == 1
+    assert "unfinished GPAD" in capsys.readouterr().err
+    with session_factory() as session:
+        assert (
+            session.scalar(select(func.count()).select_from(JobRecord)) == jobs_before
+        )
+
+
 def test_cli_refresh_all_says_when_every_annotation_group_is_sabe_managed(
     use_runtime: InstallRuntime,
     session_factory: sessionmaker[Session],
@@ -309,7 +352,7 @@ def test_cli_refresh_all_says_when_every_annotation_group_is_sabe_managed(
     assert cli.main(["annotation"]) == 0
 
     output = capsys.readouterr().out
-    assert "SABE-managed" in output
+    assert "their groups are SABE-managed or have an unfinished cutover" in output
     assert "not configured" not in output
     with session_factory() as session:
         assert (

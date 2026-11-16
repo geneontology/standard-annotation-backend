@@ -2,7 +2,6 @@
 
 import os
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -35,13 +34,7 @@ from standard_annotation_backend.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
-from standard_annotation_backend.persistence.models import (
-    EntityCatalogSnapshotRecord,
-    EntityMembershipRecord,
-    EntitySourceRecord,
-    JobRecord,
-    SabeGroupRecord,
-)
+from standard_annotation_backend.persistence.models import SabeGroupRecord
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
@@ -53,87 +46,28 @@ from standard_annotation_backend.persistence.unit_of_work import (
 def seed_active_subjects(
     session_factory: sessionmaker[Session],
 ) -> Callable[..., None]:
-    """Return a helper that makes the given identifiers active in the entity catalog.
+    """Return a helper that makes the given identifiers active in an entity catalog.
 
-    The helper writes catalog rows directly, so it records no refresh audit events.
-    Each subject also gets a source record, with type `PR:000000001` and taxon
-    `NCBITaxon:7955` unless the call names others, as a published catalog has.
+    Each call activates one new catalog that lists the identifiers. The helper
+    writes catalog rows directly, so it records no refresh audit events. Each
+    subject gets type `PR:000000001` and taxon `NCBITaxon:7955` unless the call
+    names others, as a published catalog records them.
     """
+    # Imported here because unit tests import this module without the
+    # integration directory on the import path.
+    from seeding import seed_entity_catalog
 
     def seed(
         *identifiers: str,
         db_object_type: str = "PR:000000001",
         db_object_taxon_id: str = "NCBITaxon:7955",
     ) -> None:
-        now = datetime.now(UTC)
-        with session_factory() as session:
-            job_id, snapshot_id = uuid4(), uuid4()
-            source_key = f"seed-{uuid4().hex}"
-            session.add(
-                JobRecord(
-                    job_id=job_id,
-                    job_type="entity_refresh",
-                    status="succeeded",
-                    requested_by="test-supplier",
-                    parameters={"source_key": source_key},
-                    progress={},
-                    warnings=[],
-                    created_at=now,
-                    updated_at=now,
-                    started_at=now,
-                    completed_at=now,
-                    result={},
-                )
-            )
-            session.flush()
-            session.add(
-                EntityCatalogSnapshotRecord(
-                    snapshot_id=snapshot_id,
-                    job_id=job_id,
-                    source_key=source_key,
-                    source_type="https",
-                    source_locator="https://example.org/test.gpi",
-                    source_checksum="a" * 64,
-                    source_format="gpi-2.0",
-                    source_metadata={},
-                    source_statistics={},
-                    record_statistics={},
-                    fetched_at=now,
-                    staged_at=now,
-                    published_at=now,
-                    active=True,
-                )
-            )
-            session.flush()
-            session.add_all(
-                [
-                    EntityMembershipRecord(
-                        db_object_id=identifier,
-                        source_key=source_key,
-                        snapshot_id=snapshot_id,
-                    )
-                    for identifier in identifiers
-                ]
-            )
-            session.flush()
-            session.add_all(
-                [
-                    EntitySourceRecord(
-                        db_object_id=identifier,
-                        line_number=line_number,
-                        entity={
-                            "db_object_id": identifier,
-                            "db_object_type": db_object_type,
-                            "db_object_taxon_id": db_object_taxon_id,
-                            "canonical_object_id": identifier,
-                        },
-                        db_object_taxon_id=db_object_taxon_id,
-                        db_object_type=db_object_type,
-                    )
-                    for line_number, identifier in enumerate(identifiers, start=1)
-                ]
-            )
-            session.commit()
+        seed_entity_catalog(
+            session_factory,
+            identifiers,
+            db_object_type=db_object_type,
+            db_object_taxon_id=db_object_taxon_id,
+        )
 
     return seed
 
@@ -168,19 +102,25 @@ def active_annotation_subjects(
     seed_active_subjects("UniProtKB:P12345", "UniProtKB:Q99999")
 
 
+LOCK_TIMEOUT = "30s"
+"""How long a test connection may wait for a lock before the wait fails."""
+
 APPLICATION_TABLES = (
     "annotation_staging_duplicate_reference",
     "annotation_staging_multivalued_value",
     "annotation_staging",
     "group_annotation_management",
     "annotation_import",
-    "entity_source_record",
-    "entity_membership",
-    "entity_staging_record",
-    "entity_catalog_snapshot",
+    "entity_record",
+    "entity_snapshot_detail",
+    "retracted_publication",
+    "rule_data",
+    "rules_snapshot_detail",
     "ontology_closure",
+    "ontology_alt_id",
     "ontology_term",
-    "ontology_metadata",
+    "ontology_snapshot_detail",
+    "reference_snapshot",
     "api_token",
     "token_management_session",
     "authorization_assignment",
@@ -225,6 +165,22 @@ def _test_database_url() -> URL:
             "SABE_TEST_DATABASE_URL must target a database whose name ends in '_test'"
         )
     return database_url
+
+
+def _with_lock_timeout(database_url: URL) -> URL:
+    """Return the URL with a PostgreSQL option that bounds every lock wait.
+
+    A lock wait that reaches the limit raises an error. Without a limit, a test
+    that waits on a lock it should not need hangs the whole run instead of
+    failing. The limit is far longer than any wait a test intends.
+    """
+    existing = database_url.query.get("options")
+    if isinstance(existing, tuple):
+        existing = " ".join(existing)
+    options = f"-c lock_timeout={LOCK_TIMEOUT}"
+    if existing:
+        options = f"{existing} {options}"
+    return database_url.update_query_dict({"options": options})
 
 
 def _create_test_database_if_missing(database_url: URL) -> None:
@@ -275,7 +231,9 @@ def database_engine(alembic_config: Config) -> Iterator[Engine]:
     command.downgrade(alembic_config, "base")
     command.upgrade(alembic_config, "head")
 
-    engine = create_database_engine(database_url.render_as_string(False))
+    engine = create_database_engine(
+        _with_lock_timeout(database_url).render_as_string(False)
+    )
     try:
         yield engine
     finally:

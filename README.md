@@ -83,8 +83,8 @@ ontology, and the entity catalogs, so load them before writing annotations:
 
 ```bash
 just refresh rules
-just refresh ontology
 just refresh entity
+just refresh ontology
 ```
 
 `just refresh KIND [SOURCE]` refreshes `authorization`, `rules`, `ontology`, `entity`,

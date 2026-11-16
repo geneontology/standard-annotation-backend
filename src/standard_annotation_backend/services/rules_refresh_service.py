@@ -6,9 +6,8 @@ anything is stored. The new snapshot (one stored version of the rule data), its
 list of retracted publications, and its audit event are committed in one
 transaction, so the six files always become active together. A file that is
 invalid or cannot be decoded fails the job and leaves the previous snapshot
-active. Unlike some other kinds, a rules refresh writes no intermediate staging
-rows. If Celery delivers the same job again after an interruption, the job
-finds the snapshot it already stored by its job ID.
+active. A refresh stores nothing until the six files are valid, and stores the
+snapshot in the job's transaction.
 """
 
 from dataclasses import dataclass
@@ -31,16 +30,16 @@ from standard_annotation_backend.domain.semantic_validation.rule_data import (
     STORED_RULE_DATA,
     unrecognized_extension_namespaces,
 )
+from standard_annotation_backend.domain.snapshots import SnapshotKind, SourceContent
 from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.go_site.rule_files import (
     InvalidRuleFileError,
+    RuleFiles,
     parse_rule_files,
 )
-from standard_annotation_backend.persistence.models import RulesSnapshotRecord
-from standard_annotation_backend.persistence.repositories.rules import same_rule_files
+from standard_annotation_backend.persistence.models import ReferenceSnapshotRecord
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
-    UnitOfWorkFactory,
 )
 from standard_annotation_backend.refresh.decoding import decode_source_text
 from standard_annotation_backend.services.audit_service import AuditService
@@ -58,7 +57,7 @@ class RulesRefreshResult:
         source_revision: The commit the files were read from.
         source_checksum: SHA-256 checksum of the combined source document.
         fetched_at: When the files were fetched.
-        refreshed_at: When the snapshot was stored.
+        refreshed_at: When the snapshot was activated.
         database_count: Databases in `db-xrefs.yaml`.
         go_ref_count: References in `gorefs.yaml`.
         group_count: Groups in `groups.yaml`.
@@ -96,15 +95,11 @@ class RulesRefreshService:
     """Validate all six go-site files before activating them as one snapshot.
 
     Args:
-        unit_of_work_factory: Opens the transactions for snapshots and audit.
         ontologies: The configured ontologies. An `extensions-constraints.yaml`
             namespace that one of them owns as a prefix produces no warning.
     """
 
-    def __init__(
-        self, unit_of_work_factory: UnitOfWorkFactory, ontologies: OntologyCatalog
-    ) -> None:
-        self._unit_of_work_factory = unit_of_work_factory
+    def __init__(self, ontologies: OntologyCatalog) -> None:
         self._ontologies = ontologies
 
     @property
@@ -117,82 +112,60 @@ class RulesRefreshService:
         """Return `rules_refresh`."""
         return frozenset({JobType.RULES_REFRESH})
 
-    def recover(self, job: Job) -> RefreshOutcome | None:
-        """Return the outcome of the snapshot this job stored, if it still exists."""
-        with self._unit_of_work_factory() as unit_of_work:
-            record = unit_of_work.rules.get_by_job(job.job_id)
-            if record is None:
-                return None
-            return self._outcome(record, unchanged=False)
-
     def apply(
-        self, job: Job, document: SourceDocument, report: ProgressReporter
+        self,
+        unit_of_work: SqlAlchemyUnitOfWork,
+        job: Job,
+        document: SourceDocument,
+        report: ProgressReporter,
     ) -> RefreshOutcome:
-        """Validate the six files, then store and activate them as one snapshot.
+        """Store and activate the six files as one snapshot unless already active.
 
-        Files identical to those of the active snapshot are not stored again, even
-        when they come from a newer commit, provided the snapshot already holds
-        the data they parse to. The files are always parsed before this check, so
-        after an upgrade to a SABE release that parses them differently, the
-        first refresh stores them again.
+        Files whose content the active snapshot already holds, read with the same
+        reader version, are not stored again, even when they come from a newer
+        commit. Either way, rules snapshots that are no longer kept are pruned.
 
         Raises:
-            SourceError: With `invalid_gzip` or `invalid_utf8` if a file cannot be
-                decoded.
+            SourceError: With `invalid_gzip` or `invalid_utf8` if a file cannot
+                be decoded.
             TerminalRefreshError: With `invalid_document` if the content was not
                 written by `pack_source_files`, or a file is missing or invalid.
         """
-        try:
-            files = unpack_source_files(document.content)
-        except ValueError:
-            raise TerminalRefreshError(
-                failure_code=RefreshFailureCode.INVALID_DOCUMENT
-            ) from None
-        texts = {path: decode_source_text(content) for path, content in files.items()}
-        try:
-            parsed = parse_rule_files(texts)
-        except InvalidRuleFileError as error:
-            raise TerminalRefreshError(
-                failure_code=RefreshFailureCode.INVALID_DOCUMENT,
-                failure_details=validation_failure_details(error.issues),
-            ) from None
-        rule_data = STORED_RULE_DATA.dump(parsed.data)
-        with self._unit_of_work_factory() as unit_of_work:
-            active = unit_of_work.rules.get_active()
-            if (
-                active is not None
-                and same_rule_files(active, document.provenance)
-                and unit_of_work.rules.stores(active, rule_data, parsed.retracted_pmids)
-            ):
-                return self._outcome(active, unchanged=True)
-        with self._unit_of_work_factory() as unit_of_work:
-            activation = unit_of_work.rules.activate(
-                job_id=job.job_id,
-                provenance=document.provenance,
-                rule_data=rule_data,
-                retracted_pmids=parsed.retracted_pmids,
+        snapshots = unit_of_work.snapshots
+        content = SourceContent.of(RefreshKindName.RULES, document.provenance)
+        active = snapshots.matching_active(
+            SnapshotKind.RULES, document.source_key, content
+        )
+        if active is not None:
+            outcome = self._outcome(unit_of_work, active, unchanged=True)
+        else:
+            parsed = _parse(document)
+            record = snapshots.create(
+                SnapshotKind.RULES, document.source_key, job.job_id, document.provenance
             )
-            # Another job may have activated the same files first.
-            outcome = self._outcome(activation.record, unchanged=not activation.applied)
-            if activation.applied:
-                AuditService(unit_of_work.audit).record_rules_refreshed(
-                    actor_id=job.requested_by,
-                    job_id=job.job_id,
-                    details=outcome.result,
-                )
-            unit_of_work.commit()
+            unit_of_work.rules.insert(
+                record.snapshot_id,
+                STORED_RULE_DATA.dump(parsed.data),
+                parsed.retracted_pmids,
+            )
+            snapshots.activate(record)
+            outcome = self._outcome(unit_of_work, record, unchanged=False)
+            AuditService(unit_of_work.audit).record_rules_refreshed(
+                actor_id=job.requested_by,
+                job_id=job.job_id,
+                details=outcome.result,
+            )
+        snapshots.prune(SnapshotKind.RULES)
         return outcome
 
-    def discard_staging(self, uow: SqlAlchemyUnitOfWork, job_id: UUID) -> None:
-        """Do nothing; rules refreshes write no staging rows."""
-
-    def after_terminal(self, source_key: str) -> None:
-        """Do nothing; rules refreshes have no follow-up work."""
-
     def _outcome(
-        self, record: RulesSnapshotRecord, *, unchanged: bool
+        self,
+        unit_of_work: SqlAlchemyUnitOfWork,
+        record: ReferenceSnapshotRecord,
+        *,
+        unchanged: bool,
     ) -> RefreshOutcome:
-        """Build the job's outcome from a stored snapshot.
+        """Build the job's outcome from an active rules snapshot.
 
         Warnings about unrecognized extension namespaces use the ontologies
         configured now, so adding an ontology removes the warning for its prefix.
@@ -200,7 +173,9 @@ class RulesRefreshService:
         Raises:
             StoredDataError: If the stored rule data is invalid.
         """
-        data = STORED_RULE_DATA.load(record.rule_data)
+        if record.activated_at is None:
+            raise RuntimeError("a rules snapshot was read before it was activated")
+        data = unit_of_work.rules.rule_data(record.snapshot_id)
         namespaces = unrecognized_extension_namespaces(data, self._ontologies.prefixes)
         result = RulesRefreshResult(
             snapshot_id=record.snapshot_id,
@@ -209,11 +184,13 @@ class RulesRefreshService:
             source_revision=record.source_revision,
             source_checksum=record.source_checksum,
             fetched_at=record.fetched_at,
-            refreshed_at=record.refreshed_at,
+            refreshed_at=record.activated_at,
             database_count=len(data.databases),
             go_ref_count=len(data.go_refs),
             group_count=len(data.group_shorthands),
-            retracted_publication_count=record.retracted_publication_count,
+            retracted_publication_count=(
+                unit_of_work.rules.retracted_publication_count(record.snapshot_id)
+            ),
             eco_usage_constraint_count=len(data.eco_usage_constraints),
             extension_constraint_count=len(data.extension_constraints),
             unrecognized_extension_namespaces=namespaces,
@@ -236,3 +213,26 @@ class RulesRefreshService:
             ),
             unchanged=unchanged,
         )
+
+
+def _parse(document: SourceDocument) -> RuleFiles:
+    """Unpack, decode, and validate the six go-site files.
+
+    Raises:
+        SourceError: With `invalid_gzip` or `invalid_utf8`.
+        TerminalRefreshError: With `invalid_document`.
+    """
+    try:
+        files = unpack_source_files(document.content)
+    except ValueError:
+        raise TerminalRefreshError(
+            failure_code=RefreshFailureCode.INVALID_DOCUMENT
+        ) from None
+    texts = {path: decode_source_text(content) for path, content in files.items()}
+    try:
+        return parse_rule_files(texts)
+    except InvalidRuleFileError as error:
+        raise TerminalRefreshError(
+            failure_code=RefreshFailureCode.INVALID_DOCUMENT,
+            failure_details=validation_failure_details(error.issues),
+        ) from None

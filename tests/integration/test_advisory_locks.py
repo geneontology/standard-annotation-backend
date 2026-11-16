@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from standard_annotation_backend.persistence.locks import (
     LockNamespace,
     acquire_transaction_lock,
-    bind_try_lock,
     lock_key,
     try_advisory_lock,
 )
@@ -48,14 +47,14 @@ def test_try_lock_does_not_block_other_values_or_namespaces(
     database_engine: Engine,
 ) -> None:
     """A held try-lock leaves other values and other namespaces available."""
-    with try_advisory_lock(database_engine, LockNamespace.ONTOLOGY, "go") as acquired:
+    with try_advisory_lock(database_engine, LockNamespace.QC_REPORT, "go") as acquired:
         assert acquired is True
         with try_advisory_lock(
-            database_engine, LockNamespace.ONTOLOGY, "future-ontology"
+            database_engine, LockNamespace.QC_REPORT, "future-ontology"
         ) as other_value:
             assert other_value is True
         with try_advisory_lock(
-            database_engine, LockNamespace.ANNOTATION_GROUP, "go"
+            database_engine, LockNamespace.TERM_REPLACEMENT, "go"
         ) as other_namespace:
             assert other_namespace is True
 
@@ -66,13 +65,11 @@ def test_try_lock_is_released_when_the_context_raises(
     """An error inside the context still releases the lock."""
     with (
         pytest.raises(RuntimeError, match="injected"),
-        try_advisory_lock(
-            database_engine, LockNamespace.ANNOTATION_GROUP, "mgi"
-        ) as acquired,
+        try_advisory_lock(database_engine, LockNamespace.QC_REPORT, "mgi") as acquired,
     ):
         assert acquired is True
         raise RuntimeError("injected")
-    assert _available_elsewhere(database_engine, LockNamespace.ANNOTATION_GROUP, "mgi")
+    assert _available_elsewhere(database_engine, LockNamespace.QC_REPORT, "mgi")
 
 
 def test_transaction_lock_is_held_until_the_transaction_ends(
@@ -86,20 +83,9 @@ def test_transaction_lock_is_held_until_the_transaction_ends(
                 database_engine, LockNamespace.REFRESH_START, None
             )
             assert _available_elsewhere(
-                database_engine, LockNamespace.AUTHORIZATION_REFRESH, None
+                database_engine, LockNamespace.QC_REPORT_START, None
             )
             finish(session)
             assert _available_elsewhere(
                 database_engine, LockNamespace.REFRESH_START, None
             )
-
-
-def test_bound_try_lock_excludes_the_unbound_helper(database_engine: Engine) -> None:
-    """A try-lock bound to an engine shares keys with `try_advisory_lock`."""
-    try_lock = bind_try_lock(database_engine)
-    with try_lock(LockNamespace.ONTOLOGY, "go") as acquired:
-        assert acquired is True
-        with try_advisory_lock(
-            database_engine, LockNamespace.ONTOLOGY, "go"
-        ) as competing:
-            assert competing is False

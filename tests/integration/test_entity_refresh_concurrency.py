@@ -1,20 +1,17 @@
-"""Verify entity catalog replacement and validation across independent connections."""
+"""Verify entity catalog activation across independent connections."""
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Event
+from threading import Barrier
 from time import monotonic
 
-from refresh_helpers import TEST_SOURCES
-from sqlalchemy import Engine, event, text
+import pytest
+from refresh_helpers import TEST_SOURCES, FakeFetchers, build_runner, gpi_bytes
+from seeding import create_job, entity_identifiers
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
-from test_entity_refresh_service import (
-    active_ids,
-    publish_catalog,
-    stage_catalog,
-    stored_result,
-)
+from test_entity_refresh_service import active_ids, publish_catalog
 
-from standard_annotation_backend.domain.entities import EntityCatalogCollisionError
+from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.repositories.entities import (
     EntityRepository,
 )
@@ -22,7 +19,7 @@ from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFacto
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
-from standard_annotation_backend.services.job_service import Job
+from standard_annotation_backend.services.job_service import JobService
 
 TIMEOUT = 10
 
@@ -50,116 +47,67 @@ def wait_for_lock(engine: Engine, backend_pid: int) -> None:
     raise AssertionError("second connection did not wait on a PostgreSQL lock")
 
 
-def test_same_source_publications_serialize_and_readers_see_complete_catalogs(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-) -> None:
-    """A second publication for a source waits for the first to commit.
-
-    Until then, readers still see the previous catalog. Afterward, the second
-    publication's catalog is the active one.
-    """
-    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    publish_catalog(service, unit_of_work_factory, "MGI:old1", "MGI:old2")
-    first = stage_catalog(service, unit_of_work_factory, "MGI:first1", "MGI:first2")
-    second = stage_catalog(service, unit_of_work_factory, "MGI:second1", "MGI:second2")
-    entered = Event()
-    pids: list[int] = []
-
-    def publish_second() -> None:
-        with session_factory() as session:
-            pids.append(session.scalar(text("SELECT pg_backend_pid()")))
-            entered.set()
-            EntityRepository(session).publish(second.job_id)
-            session.commit()
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        with unit_of_work_factory() as uow:
-            uow.entities.publish(first.job_id)
-            future = pool.submit(publish_second)
-            assert entered.wait(TIMEOUT)
-            wait_for_lock(database_engine, pids[0])
-            assert active_ids(session_factory) == ["MGI:old1", "MGI:old2"]
-            uow.commit()
-        future.result(TIMEOUT)
-    assert active_ids(session_factory) == ["MGI:second1", "MGI:second2"]
-
-
-def test_different_nonconflicting_sources_publish_without_waiting(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """Publishing one source does not block a source with distinct identifiers.
-
-    The second source commits while the first source's transaction is still open.
-    """
-    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    first = stage_catalog(service, unit_of_work_factory, "MGI:1")
-    other = stage_catalog(service, unit_of_work_factory, "RGD:1", source="rgd")
-    with ThreadPoolExecutor(max_workers=1) as pool, unit_of_work_factory() as uow:
-        uow.entities.publish(first.job_id)
-        outcome = pool.submit(service.recover, other).result(TIMEOUT)
-        assert outcome is not None
-        assert outcome.result["source_key"] == "rgd"
-        assert active_ids(session_factory) == ["RGD:1"]
-        uow.commit()
-    assert active_ids(session_factory) == ["MGI:1", "RGD:1"]
-
-
 def test_cross_source_membership_race_has_one_complete_winner(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     database_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two sources publishing the same identifier at once produce exactly one winner.
 
-    The other publication fails with a collision and its source keeps its previous
-    catalog.
+    Both jobs store their catalogs and hold their transactions open before either
+    activates. The other job fails with a collision and its source keeps its
+    previous catalog.
     """
-    service = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    service = EntityRefreshService(TEST_SOURCES)
     prefixes = {"mgi": "MGI", "rgd": "RGD"}
-    jobs: dict[str, Job] = {}
     for key, prefix in prefixes.items():
         publish_catalog(service, unit_of_work_factory, f"{prefix}:old", source=key)
-        jobs[key] = stage_catalog(
-            service, unit_of_work_factory, "SHARED:1", f"{prefix}:new", source=key
-        )
-    barrier = Barrier(2)
-
-    def synchronize_membership_insert(
-        connection: object,
-        cursor: object,
-        statement: str,
-        parameters: object,
-        context: object,
-        executemany: bool,
-    ) -> None:
-        if statement.startswith("INSERT INTO entity_membership"):
-            barrier.wait(TIMEOUT)
-
-    def publish(key: str) -> tuple[str, bool]:
-        try:
-            service.recover(jobs[key])
-        except EntityCatalogCollisionError:
-            return key, False
-        return key, True
-
-    event.listen(
-        database_engine, "before_cursor_execute", synchronize_membership_insert
+    runner = build_runner(
+        database_engine,
+        unit_of_work_factory,
+        FakeFetchers(
+            {
+                key: gpi_bytes("SHARED:1", f"{prefix}:new")
+                for key, prefix in prefixes.items()
+            }
+        ),
     )
-    try:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            outcomes = dict(pool.map(publish, ("mgi", "rgd")))
-    finally:
-        event.remove(
-            database_engine, "before_cursor_execute", synchronize_membership_insert
-        )
-    assert sum(outcomes.values()) == 1
-    winner = next(key for key, won in outcomes.items() if won)
-    loser = next(key for key, won in outcomes.items() if not won)
+    jobs = {
+        key: create_job(
+            unit_of_work_factory,
+            job_type=JobType.ENTITY_REFRESH,
+            requested_by="curator",
+            parameters={"source_key": key},
+        ).job_id
+        for key in prefixes
+    }
+    both_stored = Barrier(2)
+    original_lock_activation = EntityRepository.lock_activation
+
+    def activate_together(self: EntityRepository) -> None:
+        both_stored.wait(TIMEOUT)
+        original_lock_activation(self)
+
+    monkeypatch.setattr(EntityRepository, "lock_activation", activate_together)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(runner.run, jobs.values()))
+
+    finished = {
+        key: JobService(unit_of_work_factory).find(job_id)
+        for key, job_id in jobs.items()
+    }
+    winner = next(
+        key for key, job in finished.items() if job.status is JobStatus.SUCCEEDED
+    )
+    loser = next(key for key, job in finished.items() if key != winner)
+    assert finished[loser].status is JobStatus.FAILED
+    assert finished[loser].progress["failure_code"] == "catalog_collision"
+    assert entity_identifiers(session_factory, winner) == {
+        "SHARED:1",
+        f"{prefixes[winner]}:new",
+    }
+    assert entity_identifiers(session_factory, loser) == {f"{prefixes[loser]}:old"}
     assert active_ids(session_factory) == sorted(
         [f"{prefixes[winner]}:new", f"{prefixes[loser]}:old", "SHARED:1"]
     )
-    assert stored_result(unit_of_work_factory, jobs[winner]) is not None
-    assert stored_result(unit_of_work_factory, jobs[loser]) is None

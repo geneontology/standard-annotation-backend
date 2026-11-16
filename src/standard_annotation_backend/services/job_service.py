@@ -167,6 +167,46 @@ class JobService:
             unit_of_work.commit()
         return completed
 
+    def record_success(
+        self,
+        unit_of_work: SqlAlchemyUnitOfWork,
+        job_id: UUID,
+        *,
+        result: dict[str, object],
+        progress: dict[str, object],
+        warnings: tuple[str, ...] = (),
+    ) -> Job:
+        """Mark a running job succeeded in the caller's transaction.
+
+        The success, final progress, warnings, and `job.succeeded` audit event
+        commit only when the caller commits. A refresh job commits its success
+        together with the data it stored, so an interrupted job never leaves
+        stored data without a recorded success, or a success without its data.
+
+        Args:
+            unit_of_work: The caller's open transaction.
+            job_id: The running job.
+            result: The result to store.
+            progress: The final progress to store.
+            warnings: The final warnings to store.
+
+        Raises:
+            InvalidJobTransitionError: If the job is not running, or already
+                succeeded with another result.
+        """
+        mutation = unit_of_work.jobs.succeed(
+            job_id,
+            result=result,
+            now=datetime.now(UTC),
+            progress=progress,
+            warnings=warnings,
+        )
+        if mutation.changed:
+            AuditService(unit_of_work.audit).record_job_lifecycle(
+                action=AuditAction.JOB_SUCCEEDED, record=mutation.record
+            )
+        return job_from_record(mutation.record)
+
     def fail_refresh(
         self,
         job_id: UUID,
@@ -189,8 +229,8 @@ class JobService:
             error: Nonblank public error message.
             failure_code: Why the job failed.
             failure_details: JSON-compatible description of the failure.
-            cleanup: Kind-specific work, such as deleting staging rows, done in
-                the same transaction.
+            cleanup: Job-specific work, such as deleting a report's stored rows,
+                done in the same transaction.
 
         Raises:
             ValueError: If `error` is blank.

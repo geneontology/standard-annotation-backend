@@ -92,7 +92,6 @@ def test_change_set_transition_records_request_identity_and_operation() -> None:
     [
         ("record_ontology_refreshed", AuditAction.ONTOLOGY_REFRESHED),
         ("record_entity_refreshed", AuditAction.ENTITY_REFRESHED),
-        ("record_entity_retired", AuditAction.ENTITY_RETIRED),
         ("record_authorization_refreshed", AuditAction.AUTHORIZATION_REFRESHED),
     ],
 )

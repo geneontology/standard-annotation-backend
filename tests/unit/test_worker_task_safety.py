@@ -2,7 +2,6 @@
 
 import traceback
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -10,8 +9,6 @@ import pytest
 from celery import Task
 from celery.exceptions import Retry
 
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.workers import tasks
 
 CANARY = "raw-database-credential-diagnostic"
@@ -50,14 +47,9 @@ def _assert_safe_retry(caught: pytest.ExceptionInfo[Retry], logs: str) -> None:
     ("task", "arguments"),
     [
         (tasks.run_refresh, (str(uuid4()),)),
-        (tasks.run_entity_retirement, (str(uuid4()),)),
         (tasks.schedule_refresh, ("entity",)),
     ],
-    ids=[
-        "refresh",
-        "entity_retirement",
-        "refresh_schedule",
-    ],
+    ids=["refresh", "refresh_schedule"],
 )
 def test_runtime_startup_failure_retries_without_diagnostic_chain(
     monkeypatch: pytest.MonkeyPatch,
@@ -82,16 +74,9 @@ def test_runtime_startup_failure_retries_without_diagnostic_chain(
     _assert_safe_retry(caught, caplog.text)
 
 
-@pytest.mark.parametrize(
-    ("task", "method"),
-    [(tasks.run_refresh, "run"), (tasks.run_entity_retirement, "run_retirement")],
-    ids=["refresh", "entity_retirement"],
-)
 def test_runner_failure_retries_without_diagnostic_chain(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    task: Task,
-    method: str,
 ) -> None:
     """An unexpected runner error requests a retry without its error details."""
 
@@ -100,55 +85,16 @@ def test_runner_failure_retries_without_diagnostic_chain(
 
     @contextmanager
     def runtime(**_kwargs: object):
-        yield SimpleNamespace(runner=SimpleNamespace(**{method: fail}))
+        yield SimpleNamespace(runner=SimpleNamespace(run=fail))
 
     monkeypatch.setattr(tasks, "worker_runtime", runtime)
-    _safe_retry(monkeypatch, task)
+    _safe_retry(monkeypatch, tasks.run_refresh)
     _enable_task_logs(monkeypatch)
 
     with pytest.raises(Retry) as caught:
-        task.run(str(uuid4()))
+        tasks.run_refresh.run(str(uuid4()))
 
     _assert_safe_retry(caught, caplog.text)
-
-
-def _job(job_id: UUID, job_type: JobType) -> Job:
-    now = datetime(2026, 10, 1, tzinfo=UTC)
-    return Job(
-        job_id=job_id,
-        job_type=job_type,
-        status=JobStatus.QUEUED,
-        requested_by="scheduler",
-        parameters={"source_key": "go"},
-        progress={},
-        warnings=(),
-        result=None,
-        error=None,
-        created_at=now,
-        updated_at=now,
-        started_at=None,
-        completed_at=None,
-    )
-
-
-def test_dispatcher_routes_retirement_and_refresh_jobs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Retirement jobs go to the retirement task; every other job to `sabe.refresh.run`."""
-    sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        tasks.run_refresh, "delay", lambda job_id: sent.append(("refresh", job_id))
-    )
-    monkeypatch.setattr(
-        tasks.run_entity_retirement,
-        "delay",
-        lambda job_id: sent.append(("retirement", job_id)),
-    )
-
-    tasks.dispatch_refresh_job(_job(UUID(int=1), JobType.ONTOLOGY_REFRESH))
-    tasks.dispatch_refresh_job(_job(UUID(int=2), JobType.ENTITY_RETIREMENT))
-
-    assert sent == [("refresh", str(UUID(int=1))), ("retirement", str(UUID(int=2)))]
 
 
 def test_schedule_ignores_unknown_kind_without_retry(

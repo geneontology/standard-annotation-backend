@@ -2,17 +2,9 @@
 
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from seeding import (
-    DEFAULT_RULE_DATA,
-    SHIPPED_SOURCES,
-    SeedTerm,
-    _succeeded_job,
-    set_rule_data,
-)
-from sqlalchemy import update
+from seeding import DEFAULT_RULE_DATA, SHIPPED_SOURCES, SeedTerm, set_rule_data
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation
@@ -23,10 +15,6 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
 )
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     ExtensionConstraint,
-)
-from standard_annotation_backend.persistence.models import (
-    OntologyMetadataRecord,
-    OntologyTermRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 
@@ -91,67 +79,6 @@ def test_facts_describe_terms_entities_and_peers_from_active_snapshots(
     assert first.duplicate_peer_ids == (PEER,)
     assert second.entity is None
     assert second.duplicate_peer_ids == ()
-
-
-def test_facts_come_from_resolved_snapshots_even_after_another_activation(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    reference_data: Callable[..., None],
-) -> None:
-    """Facts come from the snapshots resolved first, not one activated afterwards.
-
-    After the snapshots are resolved, another connection activates a GO snapshot
-    in which the term is obsolete. Facts gathered from the resolved snapshots still
-    describe the term as current, while a later gather sees it as obsolete.
-    """
-    with unit_of_work_factory() as uow:
-        snapshots = uow.validation_facts.active_snapshots(ONTOLOGIES)
-        with session_factory.begin() as other:
-            other.execute(
-                update(OntologyMetadataRecord)
-                .where(
-                    OntologyMetadataRecord.ontology_key == "go",
-                    OntologyMetadataRecord.active.is_(True),
-                )
-                .values(active=False)
-            )
-            newer = OntologyMetadataRecord(
-                version_id=uuid4(),
-                ontology_key="go",
-                source_type="https",
-                source_locator="https://example.org/go-newer.obo",
-                source_revision=None,
-                source_checksum="d" * 64,
-                document_version=None,
-                loaded_predicates=["rdfs:subClassOf"],
-                identifier_prefixes=["GO"],
-                refresh_result=None,
-                job_id=_succeeded_job(other, "ontology_refresh", "go"),
-                fetched_at=datetime.now(UTC),
-                active=True,
-            )
-            other.add(newer)
-            other.flush([newer])
-            other.add(
-                OntologyTermRecord(
-                    version_id=newer.version_id,
-                    term_id="GO:0008150",
-                    obsolete=True,
-                    replaced_by=[],
-                    consider=[],
-                    subsets=[],
-                )
-            )
-        (facts,) = uow.validation_facts.gather(
-            [_annotation()], [()], ONTOLOGIES, snapshots=snapshots
-        )
-    with unit_of_work_factory() as uow:
-        (later,) = uow.validation_facts.gather([_annotation()], [()], ONTOLOGIES)
-
-    assert facts.terms["GO:0008150"] == TermFact(
-        TermStatus.CURRENT, checked_ancestors=frozenset({"GO:0008150"})
-    )
-    assert later.terms["GO:0008150"].status is TermStatus.OBSOLETE
 
 
 def test_go_facts_include_subsets_checked_ancestors_rule_data_and_retracted_pmids(

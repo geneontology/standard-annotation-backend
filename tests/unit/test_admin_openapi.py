@@ -95,7 +95,6 @@ def test_job_resource_documents_exact_fields_and_vocabulary(schema: dict) -> Non
         "annotation_refresh",
         "authorization_refresh",
         "entity_refresh",
-        "entity_retirement",
         "ontology_refresh",
         "rules_refresh",
         "term_replacement",
@@ -162,3 +161,5 @@ def test_cutover_requires_a_source_key_and_documents_conflict(schema: dict) -> N
     assert "group_sabe_managed" in operation["responses"]["409"]["description"]
     refresh = schema["paths"]["/admin/annotation-refreshes"]["post"]
     assert "group_sabe_managed" in refresh["responses"]["409"]["description"]
+    assert "annotation_job_in_progress" in operation["responses"]["409"]["description"]
+    assert "annotation_job_in_progress" in refresh["responses"]["409"]["description"]

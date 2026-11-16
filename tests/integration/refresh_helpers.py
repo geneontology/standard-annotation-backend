@@ -5,14 +5,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Literal, Protocol, cast
+from typing import Literal, cast
 
-import pytest
 from seeding import create_job
 from sqlalchemy import Engine
 
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import (
+    ProgressReporter,
     RefreshOutcome,
     SourceDocument,
     SourceProvenance,
@@ -20,7 +20,7 @@ from standard_annotation_backend.domain.refresh import (
 )
 from standard_annotation_backend.go_site.rule_files import RULE_FILE_PATHS
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.refresh.runner import RefreshRunner
+from standard_annotation_backend.refresh.runner import RefreshKind, RefreshRunner
 from standard_annotation_backend.refresh.sources import (
     ConfiguredSource,
     GitHubRulesSource,
@@ -184,7 +184,6 @@ def build_runner(
     fetchers: FakeFetchers,
     *,
     sources: RefreshSources = TEST_SOURCES,
-    enqueue_prune: Callable[[str], None] | None = None,
     dispatch_replacement: Callable[[Job], None] | None = None,
 ) -> RefreshRunner:
     """Build the production runner and kinds around fake fetchers."""
@@ -193,7 +192,6 @@ def build_runner(
         unit_of_work_factory=unit_of_work_factory,
         sources=sources,
         fetchers=fetchers,
-        enqueue_prune=enqueue_prune,
         dispatch_replacement=dispatch_replacement,
     ).runner
 
@@ -282,6 +280,20 @@ def start_job(
     return JobService(factory).start(created.job_id)
 
 
+def source_gpi(*identifiers: str) -> str:
+    """Return valid GPI text with one line per identifier, in the given order."""
+    text = "!gpi-version: 2.0\n!generated-by: TestDB\n!date-generated: 2026-09-29\n"
+    return text + "".join(
+        f"{identifier}\tSYM{index}\tProtein\t\tSO:0001217\tNCBITaxon:9606\t\t{identifier}\t\t\t\n"
+        for index, identifier in enumerate(identifiers)
+    )
+
+
+def gpi_bytes(*identifiers: str) -> bytes:
+    """Return a valid GPI 2.0 file that lists `identifiers`."""
+    return source_gpi(*identifiers).encode()
+
+
 def users_document(yaml_text: str, provenance: SourceProvenance) -> SourceDocument:
     """Build a `users.yaml` document described by `provenance`."""
     return SourceDocument(
@@ -306,8 +318,11 @@ def apply_users_yaml(
     job = start_job(
         factory, JobType.AUTHORIZATION_REFRESH, "go-site", requested_by=requested_by
     )
-    return AuthorizationRefreshService(factory).apply(
-        job, users_document(yaml_text, provenance), ignore_progress
+    return apply_in_transaction(
+        factory,
+        AuthorizationRefreshService(),
+        job,
+        users_document(yaml_text, provenance),
     )
 
 
@@ -319,45 +334,32 @@ def ignore_progress(
     """Accept progress reports from `apply` without storing them."""
 
 
-class RefreshKindLike(Protocol):
-    """Describe the `apply` method that `stage_without_publishing` calls."""
-
-    def apply(
-        self,
-        job: Job,
-        document: SourceDocument,
-        report: Callable[..., None],
-    ) -> RefreshOutcome:
-        """Apply `document` for `job`, reporting progress through `report`."""
-        ...
-
-
-class _StopAfterStaging(Exception):
-    """Interrupt `apply` after its staging transaction has committed."""
-
-
-def stage_without_publishing(
-    service: RefreshKindLike,
+def apply_in_transaction(
+    factory: UnitOfWorkFactory,
+    kind: RefreshKind,
     job: Job,
     document: SourceDocument,
-    publication: tuple[type, str],
-) -> None:
-    """Run `apply` but stop at publication, leaving committed staging.
+    report: ProgressReporter = ignore_progress,
+) -> RefreshOutcome:
+    """Run a kind's `apply` and record the job's success in one transaction.
 
-    This reproduces a worker that stopped between staging and publication.
-
-    Args:
-        service: The refresh service under test.
-        job: A started job.
-        document: The document to stage.
-        publication: The repository class and method name that begins
-            publication, for example `(EntityRepository, "publish")`.
+    As the runner does, the job's result and final progress commit together with
+    what `apply` stored, so a job that `apply` finishes never stays running. If
+    `apply` raises, nothing commits and the job stays running. Jobs that `apply`
+    queued are not sent.
     """
-
-    def stop(*_args: object, **_kwargs: object) -> None:
-        raise _StopAfterStaging
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(*publication, stop)
-        with pytest.raises(_StopAfterStaging):
-            service.apply(job, document, ignore_progress)
+    with factory() as unit_of_work:
+        outcome = kind.apply(unit_of_work, job, document, report)
+        JobService(factory).record_success(
+            unit_of_work,
+            job.job_id,
+            result={**outcome.result, "unchanged": outcome.unchanged},
+            progress={
+                **outcome.counts,
+                "phase": "completed",
+                "unchanged": outcome.unchanged,
+            },
+            warnings=outcome.warnings,
+        )
+        unit_of_work.commit()
+    return outcome

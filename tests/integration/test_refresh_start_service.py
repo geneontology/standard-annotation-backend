@@ -7,25 +7,19 @@ from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
-from annotation_refresh_helpers import seed_group_import
-from refresh_helpers import TEST_SOURCES, sources_with_entities
+from refresh_helpers import TEST_SOURCES
+from seeding import seed_entity_catalog
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
-from test_entity_refresh_service import publish_catalog
 
-from standard_annotation_backend.domain.annotation_management import (
-    AnnotationManagementMode,
-)
 from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.entity_refresh_service import (
-    EntityRefreshService,
-)
 from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.refresh_start_service import (
+    RefreshStart,
     RefreshStartService,
 )
 from standard_annotation_backend.workers import tasks
@@ -37,35 +31,31 @@ def _service(
     return RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatched.append)
 
 
-def _publish_unconfigured_catalog(unit_of_work_factory: UnitOfWorkFactory) -> None:
-    """Publish a `zfin` catalog, a source that `TEST_SOURCES` does not configure."""
-    zfin = sources_with_entities(
-        {"zfin": {"type": "https", "url": "https://example.org/zfin.gpi"}}
-    )
-    service = EntityRefreshService(unit_of_work_factory, zfin)
-    publish_catalog(service, unit_of_work_factory, "ZFIN:1", source="zfin")
-
-
 def _targets(jobs: tuple[Job, ...]) -> list[tuple[JobType, str]]:
     return [(job.job_type, str(job.parameters["source_key"])) for job in jobs]
 
 
-def test_refresh_all_entities_retires_removed_sources_first(
+def test_refresh_all_entities_refreshes_every_configured_source(
     unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
 ) -> None:
-    """Every configured source is refreshed and every removed one retired."""
-    _publish_unconfigured_catalog(unit_of_work_factory)
+    """Every configured source is refreshed and a removed one is retired.
+
+    Only refresh jobs are created, one per configured source.
+    """
+    seed_entity_catalog(session_factory, ["ZFIN:1"], source_key="zfin")
     dispatched: list[Job] = []
 
-    jobs = _service(unit_of_work_factory, dispatched).start(
+    started = _service(unit_of_work_factory, dispatched).start(
         RefreshKindName.ENTITY, context=system_context("scheduler"), source_key=None
     )
 
+    jobs = started.jobs
     assert _targets(jobs) == [
-        (JobType.ENTITY_RETIREMENT, "zfin"),
         (JobType.ENTITY_REFRESH, "mgi"),
         (JobType.ENTITY_REFRESH, "rgd"),
     ]
+    assert started.retired == ("zfin",)
     assert all(job.status is JobStatus.QUEUED for job in jobs)
     assert all(job.requested_by == "scheduler" for job in jobs)
     assert [job.job_id for job in dispatched] == [job.job_id for job in jobs]
@@ -73,29 +63,6 @@ def test_refresh_all_entities_retires_removed_sources_first(
         job.parameters == {"source_key": key}
         for job, (_, key) in zip(jobs, _targets(jobs), strict=True)
     )
-
-
-@pytest.mark.parametrize(
-    ("kind", "expected"),
-    [
-        (RefreshKindName.AUTHORIZATION, [(JobType.AUTHORIZATION_REFRESH, "go-site")]),
-        (RefreshKindName.ONTOLOGY, [(JobType.ONTOLOGY_REFRESH, "go")]),
-        (RefreshKindName.RULES, [(JobType.RULES_REFRESH, "go-site")]),
-    ],
-)
-def test_refresh_all_for_kinds_without_retirement(
-    unit_of_work_factory: UnitOfWorkFactory,
-    kind: RefreshKindName,
-    expected: list[tuple[JobType, str]],
-) -> None:
-    """Refreshes of kinds other than entity never create retirement jobs."""
-    _publish_unconfigured_catalog(unit_of_work_factory)
-
-    jobs = _service(unit_of_work_factory, []).start(
-        kind, context=system_context("scheduler"), source_key=None
-    )
-
-    assert _targets(jobs) == expected
 
 
 @pytest.mark.parametrize("starting_status", [JobStatus.QUEUED, JobStatus.RUNNING])
@@ -106,22 +73,24 @@ def test_unfinished_jobs_are_reused_and_dispatched_again(
 ) -> None:
     """A queued or running job for the same source is reused and sent again.
 
-    Sending a running job again lets a job whose worker was lost resume.
+    Sending a running job again lets a job whose worker was lost run again.
     """
-    first = _service(unit_of_work_factory, []).start(
+    created = _service(unit_of_work_factory, []).start(
         RefreshKindName.ENTITY, context=system_context("admin"), source_key="mgi"
     )
+    [first] = created.jobs
     if starting_status is JobStatus.RUNNING:
-        JobService(unit_of_work_factory).start(first[0].job_id)
+        JobService(unit_of_work_factory).start(first.job_id)
     dispatched: list[Job] = []
 
-    second = _service(unit_of_work_factory, dispatched).start(
+    reused = _service(unit_of_work_factory, dispatched).start(
         RefreshKindName.ENTITY, context=system_context("scheduler"), source_key="mgi"
     )
+    [second] = reused.jobs
 
-    assert [job.job_id for job in second] == [first[0].job_id]
-    assert second[0].status is starting_status
-    assert [job.job_id for job in dispatched] == [first[0].job_id]
+    assert second.job_id == first.job_id
+    assert second.status is starting_status
+    assert [job.job_id for job in dispatched] == [first.job_id]
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(JobRecord)) == 1
 
@@ -135,11 +104,11 @@ def test_dispatch_failure_fails_only_new_jobs_with_kind_message(
         if job.parameters["source_key"] == "mgi":
             raise ConnectionError("broker down")
 
-    jobs = RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatch).start(
+    started = RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatch).start(
         RefreshKindName.ENTITY, context=system_context("scheduler"), source_key=None
     )
 
-    by_key = {str(job.parameters["source_key"]): job for job in jobs}
+    by_key = {str(job.parameters["source_key"]): job for job in started.jobs}
     assert by_key["mgi"].status is JobStatus.FAILED
     assert by_key["mgi"].error == "Entity refresh could not be dispatched"
     assert by_key["mgi"].progress == {
@@ -156,16 +125,18 @@ def test_dispatch_failure_keeps_a_reused_job_unfinished(
 
     An earlier dispatch may already have placed the job in the broker.
     """
-    [first] = _service(unit_of_work_factory, []).start(
+    created = _service(unit_of_work_factory, []).start(
         RefreshKindName.ENTITY, context=system_context("admin"), source_key="mgi"
     )
+    [first] = created.jobs
 
     def dispatch(_job: Job) -> None:
         raise ConnectionError("broker down")
 
-    [second] = RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatch).start(
+    reused = RefreshStartService(unit_of_work_factory, TEST_SOURCES, dispatch).start(
         RefreshKindName.ENTITY, context=system_context("admin"), source_key="mgi"
     )
+    [second] = reused.jobs
 
     assert second.job_id == first.job_id
     assert second.status is JobStatus.QUEUED
@@ -178,7 +149,7 @@ def test_concurrent_starts_on_independent_connections_create_one_job_each(
     """Two simultaneous starts on separate connections cannot duplicate jobs."""
     barrier = Barrier(2)
 
-    def start(_: int) -> tuple[Job, ...]:
+    def start(_: int) -> RefreshStart:
         barrier.wait()
         return _service(unit_of_work_factory, []).start(
             RefreshKindName.ENTITY, context=system_context("scheduler"), source_key=None
@@ -187,7 +158,7 @@ def test_concurrent_starts_on_independent_connections_create_one_job_each(
     with ThreadPoolExecutor(max_workers=2) as executor:
         first, second = executor.map(start, range(2))
 
-    assert {job.job_id for job in first} == {job.job_id for job in second}
+    assert {job.job_id for job in first.jobs} == {job.job_id for job in second.jobs}
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(JobRecord)) == 2
 
@@ -202,7 +173,6 @@ def test_scheduled_refresh_creates_scheduler_jobs_for_every_source(
     The jobs are requested by `scheduler`.
     """
     refreshed: list[str] = []
-    retired: list[str] = []
 
     @contextmanager
     def runtime(**_kwargs: object) -> Iterator[object]:
@@ -213,7 +183,6 @@ def test_scheduled_refresh_creates_scheduler_jobs_for_every_source(
 
     monkeypatch.setattr(tasks, "worker_runtime", runtime)
     monkeypatch.setattr(tasks.run_refresh, "delay", refreshed.append)
-    monkeypatch.setattr(tasks.run_entity_retirement, "delay", retired.append)
 
     tasks.schedule_refresh.run("entity")
 
@@ -234,47 +203,33 @@ def test_scheduled_refresh_creates_scheduler_jobs_for_every_source(
         ("entity_refresh", "queued", "scheduler", "rgd"),
     ]
     assert sorted(refreshed) == job_ids
-    assert retired == []
 
 
-def test_refresh_all_annotations_skips_sabe_managed_groups_and_never_cuts_over(
+def test_refresh_all_skips_a_group_with_an_unfinished_cutover(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
 ) -> None:
-    """Refresh-all creates ordinary jobs only for groups GPAD still manages."""
-    seed_group_import(
-        session_factory,
-        group_key="RGD",
-        source_key="rgd-gpad",
-        mode=AnnotationManagementMode.SABE_MANAGED,
-    )
-    dispatched: list[Job] = []
+    """Refresh-all leaves out a group whose cutover is unfinished."""
+    service = _service(unit_of_work_factory, [])
+    service.start_cutover(context=system_context("admin"), source_key="mgi-gpad")
 
-    jobs = _service(unit_of_work_factory, dispatched).start(
+    started = service.start(
         RefreshKindName.ANNOTATION, context=system_context("scheduler"), source_key=None
     )
 
-    assert _targets(jobs) == [(JobType.ANNOTATION_REFRESH, "mgi-gpad")]
+    assert _targets(started.jobs) == [(JobType.ANNOTATION_REFRESH, "rgd-gpad")]
 
 
-def test_cutover_reuses_only_an_unfinished_cutover(
+def test_a_cutover_request_reuses_an_unfinished_cutover(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
-    """A cutover request reuses an unfinished cutover but never an ordinary refresh."""
+    """A second cutover request returns the first, still unfinished, cutover job."""
     service = _service(unit_of_work_factory, [])
-    (refresh,) = service.start(
-        RefreshKindName.ANNOTATION,
-        context=system_context("admin"),
-        source_key="mgi-gpad",
-    )
-
-    cutover = service.start_cutover(
+    first = service.start_cutover(
         context=system_context("admin"), source_key="mgi-gpad"
     )
     again = service.start_cutover(
         context=system_context("admin"), source_key="mgi-gpad"
     )
 
-    assert cutover.job_type is JobType.ANNOTATION_CUTOVER
-    assert cutover.job_id != refresh.job_id
-    assert again.job_id == cutover.job_id
+    assert first.job_type is JobType.ANNOTATION_CUTOVER
+    assert again.job_id == first.job_id

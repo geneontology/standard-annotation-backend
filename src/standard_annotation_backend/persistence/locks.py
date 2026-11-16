@@ -20,22 +20,14 @@ class LockNamespace(Enum):
     """Name a family of advisory locks that serialize one kind of operation.
 
     Each member's value is the BLAKE2b `person` parameter used to derive its lock
-    keys, so equal values in different namespaces get unrelated keys. The values
-    must not change: workers from different releases exclude each other only if
-    they derive the same keys.
+    keys, so equal values in different namespaces get unrelated keys.
 
     Attributes:
         JOB: One job's execution, keyed by job ID.
-        ONTOLOGY: Staging, activation, and pruning of one ontology, keyed by
-            ontology key.
-        ENTITY_CATALOG: Publication and retirement of one entity source's
-            catalog, keyed by source key.
-        ANNOTATION_GROUP: GPAD staging and publication for one group, keyed by
-            group key.
-        AUTHORIZATION_REFRESH: Replacement of users and grants. Used without a
-            value.
-        RULES_REFRESH: Activation of a stored copy of the go-site files that GO
-            Rules read. Used without a value.
+        ENTITY_ACTIVATION: Activation of an entity catalog snapshot, so that the
+            check that no other source's active catalog lists one of its
+            identifiers and the activation itself run one at a time. Used
+            without a value.
         REFRESH_START: Creation of refresh jobs of every kind. Used without a
             value.
         QC_REPORT: Running of a QC report. Keyed by group key for a report on
@@ -52,11 +44,7 @@ class LockNamespace(Enum):
     """
 
     JOB = b"SABEJOB"
-    ONTOLOGY = b"SABEONTO"
-    ENTITY_CATALOG = b"SABEENT"
-    ANNOTATION_GROUP = b"SABEGPAD"
-    AUTHORIZATION_REFRESH = b"SABEAUTH"
-    RULES_REFRESH = b"SABERULES"
+    ENTITY_ACTIVATION = b"SABEENTACT"
     REFRESH_START = b"SABERSTRT"
     QC_REPORT = b"SABEQC"
     QC_REPORT_START = b"SABEQCSTRT"

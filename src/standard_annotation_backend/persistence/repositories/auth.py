@@ -11,10 +11,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, joinedload
 
 from standard_annotation_backend.domain.errors import UnavailableError
-from standard_annotation_backend.domain.refresh import SourceProvenance
-from standard_annotation_backend.persistence.locks import (
-    LockNamespace,
-    acquire_transaction_lock,
+from standard_annotation_backend.domain.refresh import (
+    RefreshKindName,
+    SourceProvenance,
+)
+from standard_annotation_backend.domain.snapshots import (
+    SourceContent,
+    current_reader_version,
 )
 from standard_annotation_backend.persistence.models import (
     ApiTokenRecord,
@@ -85,29 +88,20 @@ class SyncUser:
     authorizations: tuple[SyncAuthorization, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class AuthorizationReplacement:
-    """Pair a refresh record with whether the current call created it."""
-
-    record: AuthorizationRefreshRecord
-    applied: bool
-
-
 def same_refresh_source(
     record: AuthorizationRefreshRecord, provenance: SourceProvenance
 ) -> bool:
-    """Return whether a stored refresh came from the same source document."""
-    return (
-        record.source_type,
-        record.source_locator,
-        record.source_revision,
-        record.source_checksum,
-    ) == (
-        provenance.source_type,
-        provenance.source_locator,
-        provenance.source_revision,
-        provenance.source_checksum,
-    )
+    """Return whether a stored refresh holds the same content as `provenance`.
+
+    The content is the source type, locator, and checksum, read with the same
+    reader version. A new commit with identical bytes is the same content.
+    """
+    return SourceContent(
+        source_type=record.source_type,
+        source_locator=record.source_locator,
+        source_checksum=record.source_checksum,
+        reader_version=record.reader_version,
+    ) == SourceContent.of(RefreshKindName.AUTHORIZATION, provenance)
 
 
 class AuthRepository:
@@ -126,15 +120,13 @@ class AuthRepository:
         users: Sequence[SyncUser],
         provenance: SourceProvenance,
         summary: dict[str, object],
-    ) -> AuthorizationReplacement:
+    ) -> AuthorizationRefreshRecord:
         """Replace active grants atomically and retain removed grants as history.
 
-        A transaction-scoped advisory lock lets only one refresh run at a time; a
-        second one waits for the first to commit or roll back. Under that lock, if
-        the most recent refresh came from the same source document (same type,
-        locator, revision, and checksum), nothing changes and that record is
-        returned with `applied=False`. Concurrent or redelivered refreshes of one
-        document therefore apply it once.
+        The caller decides whether the document is already applied (see
+        `same_refresh_source`). Refreshes never overlap: a refresh runs only in an
+        authorization refresh job, and at most one such job is unfinished at a
+        time.
 
         Unchanged active assignments retain their IDs. Previously deactivated
         assignments are never reactivated, so regranting cannot revive old tokens.
@@ -150,15 +142,8 @@ class AuthRepository:
             summary: Credential-free counts to retain with the refresh.
 
         Returns:
-            Stored refresh record and whether this call applied it.
+            The stored refresh record.
         """
-        # Hold the lock from the duplicate-source check through the replacement,
-        # so a concurrent refresh waits for this transaction to finish.
-        acquire_transaction_lock(self.session, LockNamespace.AUTHORIZATION_REFRESH)
-        latest = self.latest_refresh()
-        if latest is not None and same_refresh_source(latest, provenance):
-            return AuthorizationReplacement(latest, False)
-
         current_users = {
             user.github_login.lower(): user
             for user in self.session.scalars(select(SabeUserRecord)).all()
@@ -223,16 +208,15 @@ class AuthRepository:
             source_revision=provenance.source_revision,
             source_checksum=provenance.source_checksum,
             fetched_at=provenance.fetched_at,
-            # `now()` is the transaction's start time, which can precede another
-            # refresh that took the lock first. The clock at insert time follows
-            # the order in which refreshes were applied, because the lock is held
-            # from here until commit.
+            reader_version=current_reader_version(RefreshKindName.AUTHORIZATION),
+            # The clock at insert time, unlike `now()`, also orders several
+            # refreshes applied in one transaction.
             refreshed_at=func.clock_timestamp(),
             summary=summary,
         )
         self.session.add(record)
         self.session.flush()
-        return AuthorizationReplacement(record, True)
+        return record
 
     def latest_refresh(self) -> AuthorizationRefreshRecord | None:
         """Return the most recent applied refresh, which describes current state."""

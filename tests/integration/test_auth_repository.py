@@ -1,21 +1,17 @@
 """Verify synchronized authorization and user credential persistence."""
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Event
-from time import monotonic
 from uuid import uuid4
 
 import pytest
 from source_provenance import github_provenance
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.persistence import models
 from standard_annotation_backend.persistence.repositories.auth import (
-    AuthRepository,
     SyncAuthorization,
     SyncUser,
 )
@@ -264,81 +260,3 @@ def test_duplicate_grants_in_one_sync_share_assignment_identity(
         }
         assert len(assignments) == 2
         uow.commit()
-
-
-def test_concurrent_syncs_replace_the_complete_committed_state(
-    session_factory: sessionmaker[Session],
-) -> None:
-    """Independent sync transactions serialize before reading and replacing grants."""
-    started = Event()
-    finished = Event()
-    with (
-        session_factory() as first,
-        session_factory() as second,
-        session_factory() as observer,
-    ):
-        for session in (first, second, observer):
-            session.execute(text("SET LOCAL statement_timeout = '5s'"))
-        first_pid = first.scalar(text("SELECT pg_backend_pid()"))
-        second_pid = second.scalar(text("SELECT pg_backend_pid()"))
-        observer_pid = observer.scalar(text("SELECT pg_backend_pid()"))
-        assert len({first_pid, second_pid, observer_pid}) == 3
-        AuthRepository(first).replace_authorizations(
-            users=(
-                SyncUser("first", None, (SyncAuthorization("edit", "group", "MGI"),)),
-            ),
-            provenance=github_provenance("a" * 40, "repo"),
-            summary={},
-        )
-
-        def synchronize_second() -> None:
-            started.set()
-            try:
-                AuthRepository(second).replace_authorizations(
-                    users=(
-                        SyncUser(
-                            "second", None, (SyncAuthorization("read", "global", None),)
-                        ),
-                    ),
-                    provenance=github_provenance("b" * 40, "repo"),
-                    summary={},
-                )
-                second.commit()
-            finally:
-                second.rollback()
-                finished.set()
-
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(synchronize_second)
-            try:
-                assert started.wait(3)
-                deadline = monotonic() + 3
-                blocked = False
-                while monotonic() < deadline:
-                    blockers = observer.scalar(
-                        text("SELECT pg_blocking_pids(:pid)"), {"pid": second_pid}
-                    )
-                    if first_pid in blockers:
-                        blocked = True
-                        break
-                    if finished.wait(0.01):
-                        break
-                assert blocked, (
-                    "second synchronization must wait for the complete first transaction"
-                )
-                first.commit()
-            finally:
-                first.rollback()
-            future.result(timeout=6)
-    with session_factory() as session:
-        repository = AuthRepository(session)
-        assert repository.get_user_by_github_login("first") is None
-        owner = repository.get_user_by_github_login("second")
-        assert owner is not None
-        assert len(repository.list_active_assignments(owner.user_id)) == 1
-        assert (
-            session.scalar(
-                select(func.count()).select_from(models.AuthorizationRefreshRecord)
-            )
-            == 2
-        )

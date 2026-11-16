@@ -324,3 +324,40 @@ def test_failed_refresh_cleanup_commits_with_the_failure(
     assert service.find(job_id).status is JobStatus.FAILED
     assert cleaned == [job_id]
     assert len(_failure_audits(session_factory)) == 1
+
+
+def test_success_recorded_in_a_callers_transaction_commits_only_with_it(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A success recorded in a transaction that rolls back leaves the job running.
+
+    Committed, the same call stores the result, final progress, warnings, and one
+    `job.succeeded` audit event.
+    """
+    job_id = _running_refresh(unit_of_work_factory)
+    service = _service(unit_of_work_factory)
+    with unit_of_work_factory() as uow:
+        service.record_success(
+            uow, job_id, result={"done": True}, progress={"phase": "completed"}
+        )
+
+    assert service.find(job_id).status is JobStatus.RUNNING
+    assert "job.succeeded" not in _audit_actions(session_factory)
+
+    with unit_of_work_factory() as uow:
+        service.record_success(
+            uow,
+            job_id,
+            result={"done": True},
+            progress={"phase": "completed"},
+            warnings=("one warning",),
+        )
+        uow.commit()
+
+    stored = service.find(job_id)
+    assert stored.status is JobStatus.SUCCEEDED
+    assert stored.result == {"done": True}
+    assert stored.progress == {"phase": "completed"}
+    assert stored.warnings == ("one warning",)
+    assert _audit_actions(session_factory).count("job.succeeded") == 1

@@ -16,6 +16,8 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
     OntologyTerm,
 )
+from standard_annotation_backend.domain.refresh import SourceProvenance
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 
@@ -100,11 +102,22 @@ def _load_active_ontology(unit_of_work_factory: UnitOfWorkFactory) -> None:
         )
         uow.jobs.session.add(job)
         uow.jobs.session.flush([job])
-        version = uow.ontologies.stage(
-            job_id=job_id,
-            document=document,
-            snapshot=snapshot,
-            closure_rows=(
+        record = uow.snapshots.create(
+            SnapshotKind.ONTOLOGY,
+            GO_ONTOLOGY_KEY,
+            job_id,
+            SourceProvenance(
+                source_type="https",
+                source_locator="https://example.org/go.obo",
+                source_revision="closure-api",
+                source_checksum="d" * 64,
+                fetched_at=now,
+            ),
+        )
+        uow.ontologies.insert(
+            record.snapshot_id,
+            snapshot,
+            (
                 *(
                     OntologyClosureRow(term_id, predicate, term_id, 0)
                     for predicate in snapshot.closure_predicates
@@ -116,7 +129,7 @@ def _load_active_ontology(unit_of_work_factory: UnitOfWorkFactory) -> None:
                 OntologyClosureRow("GO:4", "BFO:0000050", "GO:2", 1),
             ),
         )
-        uow.ontologies.activate(version.version_id)
+        uow.snapshots.activate(record)
         uow.commit()
 
 

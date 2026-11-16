@@ -19,10 +19,6 @@ from uuid import UUID
 
 from pydantic import Field
 
-from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
-    TerminalRefreshError,
-)
 from standard_annotation_backend.domain.stored_json import StoredJson
 
 GO_ONTOLOGY_KEY = "go"
@@ -43,12 +39,6 @@ GORULE:0000008 uses `gocheck_do_not_annotate` and GORULE:0000065 uses
 would silently find nothing, so GO's entry in `config/sources.yaml` must list both
 in its `required_subsets`.
 """
-
-
-class OntologyCandidateConflictError(TerminalRefreshError):
-    """Report that a staged job conflicts with its source or activation order."""
-
-    failure_code = RefreshFailureCode.CANDIDATE_CONFLICT
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,7 +305,7 @@ class OntologyRefreshResult:
         return cls(None, document)
 
     def to_stored(self) -> StoredOntologyRefresh:
-        """Return the outcome in the form stored on snapshots and jobs.
+        """Return the outcome in the form stored on jobs.
 
         Snapshot details are used when a snapshot was activated. Otherwise only the
         fetched document's source details are known.
@@ -344,7 +334,7 @@ class OntologyRefreshResult:
 
 @dataclass(frozen=True, slots=True)
 class StoredOntologyRefresh:
-    """Describe an ontology refresh result as stored on its snapshot and job.
+    """Describe an ontology refresh result as stored on its job.
 
     The snapshot's details are written at the top level. When the fetched document
     already matched the active snapshot, only the document's source details are

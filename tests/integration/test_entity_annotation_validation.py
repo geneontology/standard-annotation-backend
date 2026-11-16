@@ -7,7 +7,7 @@ from refresh_helpers import TEST_ONTOLOGIES, TEST_SOURCES
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER, REVIEWER
-from test_entity_refresh_service import publish_catalog, stage_catalog
+from test_entity_refresh_service import publish_catalog
 
 from standard_annotation_backend.domain.annotations import (
     Annotation,
@@ -71,7 +71,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
     change set be accepted.
     """
     client = integration_api_client
-    imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    imports = EntityRefreshService(TEST_SOURCES)
     publish_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
     payload = writable_annotation.model_dump(mode="json")
     to_unknown = operation.endswith("_to_unknown")
@@ -158,7 +158,7 @@ def test_deletion_succeeds_after_subject_removal(
 
     The deleted annotation keeps its stored data and gains a new version.
     """
-    imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    imports = EntityRefreshService(TEST_SOURCES)
     publish_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
     annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     created = annotations.create(
@@ -188,28 +188,24 @@ def test_deletion_succeeds_after_subject_removal(
         )
 
 
-def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
+def test_only_the_exact_active_identifier_is_accepted(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     writable_annotation: Annotation,
 ) -> None:
     """Only an exact active catalog identifier is accepted for a new annotation.
 
-    A staged but unpublished identifier and a differently cased identifier are
-    rejected, and rejected attempts write nothing.
+    A differently cased identifier is rejected and writes nothing, while the
+    identifier the catalog lists is accepted.
     """
-    imports = EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
-    job = stage_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
+    publish_catalog(
+        EntityRefreshService(TEST_SOURCES),
+        unit_of_work_factory,
+        writable_annotation.db_object_id,
+    )
     annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     payload = writable_annotation.model_dump(mode="json")
     before = _counts(session_factory)
-    with pytest.raises(InvalidAnnotationPayloadError) as staged:
-        annotations.create(
-            payload=payload, owning_group_id="other-group", context=PROPOSER
-        )
-    assert [issue["type"] for issue in staged.value.errors] == ["unknown_entity"]
-    assert _counts(session_factory) == before
-    assert imports.recover(job) is not None
     with pytest.raises(InvalidAnnotationPayloadError) as cased:
         annotations.create(
             payload={
@@ -221,6 +217,7 @@ def test_staged_subject_is_rejected_and_exact_active_subject_is_accepted(
             context=PROPOSER,
         )
     assert [issue["type"] for issue in cased.value.errors] == ["unknown_entity"]
+    assert _counts(session_factory) == before
     assert (
         annotations.create(
             payload=payload, owning_group_id="other-group", context=PROPOSER

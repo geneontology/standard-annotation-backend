@@ -1,63 +1,59 @@
 """Verify the shared refresh job lifecycle for every refresh kind."""
 
-import logging
-from contextlib import AbstractContextManager
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
+from annotation_refresh_helpers import gpad_bytes, gpad_row
 from refresh_helpers import (
     TEST_SOURCES,
     FakeFetchers,
+    OboTerm,
     build_runner,
-    ignore_progress,
+    gpi_bytes,
+    obo,
     rule_files,
-    start_job,
 )
-from seeding import create_job
+from seeding import create_job, snapshot_count
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY
-from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
-    RefreshKindName,
+from standard_annotation_backend.domain.ontology import (
+    OntologyClosureRow,
+    OntologySnapshot,
 )
+from standard_annotation_backend.domain.refresh import RefreshFailureCode
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.go_site.rule_files import GOREFS_PATH
-from standard_annotation_backend.persistence.locks import (
-    LockNamespace,
-    bind_try_lock,
-    try_advisory_lock,
-)
+from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import (
+    AnnotationImportRecord,
     AuditEventRecord,
+    AuthorizationRefreshRecord,
+    Base,
+    EntitySnapshotDetailRecord,
     JobRecord,
-    OntologyMetadataRecord,
+    OntologySnapshotDetailRecord,
+    ReferenceSnapshotRecord,
+    RulesSnapshotDetailRecord,
 )
-from standard_annotation_backend.persistence.repositories import OntologyRepository
+from standard_annotation_backend.persistence.repositories.snapshots import (
+    SnapshotRepository,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.refresh import runner as runner_module
+from standard_annotation_backend.refresh import runner as refresh_runner
 from standard_annotation_backend.refresh.fetchers import SourceError
 from standard_annotation_backend.refresh.runner import RefreshRunner
-from standard_annotation_backend.services import (
-    ontology_refresh_service as ontology_module,
-)
+from standard_annotation_backend.services import ontology_refresh_service
 from standard_annotation_backend.services.authorization_refresh_service import (
     AuthorizationRefreshService,
 )
-from standard_annotation_backend.services.entity_refresh_service import (
-    EntityRefreshService,
-)
-from standard_annotation_backend.services.job_service import JobService
-from standard_annotation_backend.services.ontology_refresh_service import (
-    OntologyRefreshBusyError,
-    OntologyRefreshService,
-)
-from standard_annotation_backend.workers.runtime import create_refresh_runner
+from standard_annotation_backend.services.job_service import Job, JobService
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 USERS_YAML = b"""
@@ -84,7 +80,6 @@ class KindCase:
         invalid_code: Failure code recorded for `invalid_content`.
         applied_action: Audit action recorded once per applied document.
         public_error: Error stored on failed jobs.
-        recovery_refetches: Whether recovery after a crash fetches again.
     """
 
     job_type: JobType
@@ -94,7 +89,6 @@ class KindCase:
     invalid_code: RefreshFailureCode
     applied_action: AuditAction
     public_error: str
-    recovery_refetches: bool
 
 
 CASES = {
@@ -106,7 +100,6 @@ CASES = {
         invalid_code=RefreshFailureCode.ROW_VALIDATION,
         applied_action=AuditAction.ENTITY_REFRESHED,
         public_error="Entity refresh failed",
-        recovery_refetches=False,
     ),
     "ontology": KindCase(
         job_type=JobType.ONTOLOGY_REFRESH,
@@ -116,7 +109,6 @@ CASES = {
         invalid_code=RefreshFailureCode.INVALID_DOCUMENT,
         applied_action=AuditAction.ONTOLOGY_REFRESHED,
         public_error="Ontology refresh failed",
-        recovery_refetches=False,
     ),
     "authorization": KindCase(
         job_type=JobType.AUTHORIZATION_REFRESH,
@@ -126,7 +118,6 @@ CASES = {
         invalid_code=RefreshFailureCode.INVALID_DOCUMENT,
         applied_action=AuditAction.AUTHORIZATION_REFRESHED,
         public_error="Authorization refresh failed",
-        recovery_refetches=True,
     ),
     "rules": KindCase(
         job_type=JobType.RULES_REFRESH,
@@ -136,7 +127,6 @@ CASES = {
         invalid_code=RefreshFailureCode.INVALID_DOCUMENT,
         applied_action=AuditAction.RULES_REFRESHED,
         public_error="Rules refresh failed",
-        recovery_refetches=False,
     ),
 }
 
@@ -145,6 +135,30 @@ CASES = {
 def case(request: pytest.FixtureRequest) -> KindCase:
     """Run each test once per refresh kind."""
     return CASES[request.param]
+
+
+ANNOTATION_CASE = KindCase(
+    job_type=JobType.ANNOTATION_REFRESH,
+    source_key="mgi-gpad",
+    content=gpad_bytes(gpad_row("UniProtKB:P12345")),
+    invalid_content=b"not gpad\n",
+    invalid_code=RefreshFailureCode.HEADER,
+    applied_action=AuditAction.ANNOTATION_REFRESH_PUBLISHED,
+    public_error="Annotation refresh failed",
+)
+"""The GPAD kind, which only the tests that name it cover."""
+
+STORED_RECORDS: dict[str, type[Base]] = {
+    "annotation": AnnotationImportRecord,
+    "authorization": AuthorizationRefreshRecord,
+    "entity": EntitySnapshotDetailRecord,
+    "ontology": OntologySnapshotDetailRecord,
+    "rules": RulesSnapshotDetailRecord,
+}
+"""The record each kind stores once for every document it applies.
+
+A snapshot kind stores one detail row for each snapshot it stores.
+"""
 
 
 def _job(factory: UnitOfWorkFactory, case: KindCase, **parameters: object) -> UUID:
@@ -176,6 +190,11 @@ def _count(session_factory: sessionmaker[Session], action: AuditAction) -> int:
         )
 
 
+def _row_count(session_factory: sessionmaker[Session], model: type[Base]) -> int:
+    with session_factory() as session:
+        return int(session.scalar(select(func.count()).select_from(model)) or 0)
+
+
 def test_refresh_applies_once_then_reports_unchanged(
     case: KindCase,
     unit_of_work_factory: UnitOfWorkFactory,
@@ -185,9 +204,10 @@ def test_refresh_applies_once_then_reports_unchanged(
     """A new document is applied; refreshing the same document applies nothing."""
     fetchers = FakeFetchers({case.source_key: case.content})
     runner = build_runner(database_engine, unit_of_work_factory, fetchers)
-    first, second = _job(unit_of_work_factory, case), _job(unit_of_work_factory, case)
 
+    first = _job(unit_of_work_factory, case)
     runner.run(first)
+    second = _job(unit_of_work_factory, case)
     runner.run(second)
 
     for job_id in (first, second):
@@ -299,6 +319,7 @@ def test_unconfigured_source_fails_without_fetching(
     "parameters",
     [
         {"source_key": "Not A Key"},
+        {"source_key": "https://user:secret@example.org/feed"},
         {"source_key": "go\n"},
         {"source_key": 7},
         {"source_key": "go", "other": 1},
@@ -307,12 +328,23 @@ def test_unconfigured_source_fails_without_fetching(
     ],
 )
 def test_invalid_parameters_fail_without_fetching(
+    monkeypatch: pytest.MonkeyPatch,
     case: KindCase,
     parameters: dict[str, object],
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
 ) -> None:
-    """Parameters other than exactly one valid `source_key` fail the job."""
+    """Parameters other than exactly one valid `source_key` fail the job.
+
+    The job records only the failure code, and the log names the job and the code
+    but never the stored parameter values.
+    """
+    log_records: list[str] = []
+
+    def record_log(message: str, *args: object) -> None:
+        log_records.append(message % args)
+
+    monkeypatch.setattr(refresh_runner.logger, "error", record_log)
     fetchers = FakeFetchers({})
     runner = build_runner(database_engine, unit_of_work_factory, fetchers)
     job_id = create_job(
@@ -327,8 +359,14 @@ def test_invalid_parameters_fail_without_fetching(
     record = _read(unit_of_work_factory, job_id)
     assert record.status == JobStatus.FAILED
     assert record.error == case.public_error
-    assert record.progress["failure_code"] == "invalid_parameters"
+    assert record.progress == {"phase": "failed", "failure_code": "invalid_parameters"}
     assert fetchers.calls == []
+    logs = "\n".join(log_records)
+    assert str(job_id) in logs
+    assert "failure_code=invalid_parameters" in logs
+    for value in parameters.values():
+        if isinstance(value, str) and len(value.strip()) > 2:
+            assert value not in logs
 
 
 def test_infrastructure_error_leaves_job_running_for_retry(
@@ -356,105 +394,6 @@ def test_infrastructure_error_leaves_job_running_for_retry(
     assert _read(unit_of_work_factory, job_id).status == JobStatus.SUCCEEDED
 
 
-def test_crash_after_apply_recovers_the_committed_result(
-    case: KindCase,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If the worker stops after applying, redelivery finishes without reapplying."""
-    fetchers = FakeFetchers({case.source_key: case.content})
-    runner = build_runner(database_engine, unit_of_work_factory, fetchers)
-    job_id = _job(unit_of_work_factory, case)
-    original_succeed = JobService.succeed
-
-    def crash(*_args: object, **_kwargs: object) -> None:
-        raise ConnectionResetError("worker lost")
-
-    monkeypatch.setattr(JobService, "succeed", crash)
-    with pytest.raises(ConnectionResetError):
-        runner.run(job_id)
-    monkeypatch.setattr(JobService, "succeed", original_succeed)
-
-    runner.run(job_id)
-
-    recovered = _read(unit_of_work_factory, job_id)
-    assert recovered.status == JobStatus.SUCCEEDED
-    # Kinds that recover the committed result report it as applied. A kind
-    # that fetches again finds its own committed document already active.
-    assert recovered.result is not None
-    assert recovered.result["unchanged"] is case.recovery_refetches
-    assert recovered.progress["unchanged"] is case.recovery_refetches
-    assert _count(session_factory, case.applied_action) == 1
-    expected_calls = 2 if case.recovery_refetches else 1
-    assert fetchers.calls == [case.source_key] * expected_calls
-
-
-def test_ontology_refresh_waits_for_the_ontology_lock_by_retrying(
-    unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """While another process holds the GO lock, the run raises so Celery retries."""
-    # Alembic's logging setup, run by earlier integration tests, disables loggers
-    # that already exist; re-enable this one so `caplog` can see its records.
-    monkeypatch.setattr(runner_module.logger, "disabled", False)
-    runner = build_runner(
-        database_engine,
-        unit_of_work_factory,
-        FakeFetchers({"go": CASES["ontology"].content}),
-    )
-    job_id = _job(unit_of_work_factory, CASES["ontology"])
-
-    with try_advisory_lock(
-        database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
-    ) as acquired:
-        assert acquired
-        with (
-            caplog.at_level(
-                logging.INFO, logger="standard_annotation_backend.refresh.runner"
-            ),
-            pytest.raises(OntologyRefreshBusyError),
-        ):
-            runner.run(job_id)
-
-    waiting = [r for r in caplog.records if "Refresh job waiting" in r.getMessage()]
-    assert [r.levelno for r in waiting] == [logging.INFO]
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert _read(unit_of_work_factory, job_id).status == JobStatus.RUNNING
-    runner.run(job_id)
-    assert _read(unit_of_work_factory, job_id).status == JobStatus.SUCCEEDED
-
-
-def test_finished_ontology_jobs_schedule_pruning_every_time(
-    unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
-) -> None:
-    """Pruning is scheduled after success, after failure, and on redelivery."""
-    scheduled: list[str] = []
-    ontology = CASES["ontology"]
-    succeeded = _job(unit_of_work_factory, ontology)
-    build_runner(
-        database_engine,
-        unit_of_work_factory,
-        FakeFetchers({"go": ontology.content}),
-        enqueue_prune=scheduled.append,
-    ).run(succeeded)
-    failed = _job(unit_of_work_factory, ontology)
-    failing = build_runner(
-        database_engine,
-        unit_of_work_factory,
-        FakeFetchers({"go": ontology.invalid_content}),
-        enqueue_prune=scheduled.append,
-    )
-    failing.run(failed)
-    failing.run(failed)
-
-    assert scheduled == ["go", "go", "go"]
-
-
 def test_invalid_users_yaml_reports_issues_without_values(
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
@@ -478,131 +417,16 @@ def test_invalid_users_yaml_reports_issues_without_values(
     assert "owner" not in str(details)
 
 
-def _go_versions(content: bytes, count: int) -> list[bytes]:
-    """Return `count` valid GO documents that differ only in `data-version`."""
-    return [
-        content.replace(
-            b"data-version: releases/2026-09-28",
-            f"data-version: releases/2026-09-{number:02d}".encode(),
-        )
-        for number in range(count)
-    ]
-
-
-def _pruned_snapshot_count(session_factory: sessionmaker[Session]) -> int:
-    with session_factory() as session:
-        return int(
-            session.scalar(
-                select(func.count())
-                .select_from(OntologyMetadataRecord)
-                .where(OntologyMetadataRecord.bulk_data_pruned_at.is_not(None))
-            )
-            or 0
-        )
-
-
-def test_in_process_pruning_deletes_old_snapshot_data(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-) -> None:
-    """Without `enqueue_prune`, finished ontology jobs prune old snapshots themselves."""
-    case = CASES["ontology"]
-    # Three distinct documents leave one active snapshot, one retained
-    # predecessor, and one snapshot that is eligible for pruning.
-    for content in _go_versions(case.content, 3):
-        runner = build_runner(
-            database_engine,
-            unit_of_work_factory,
-            FakeFetchers({"go": content}),
-            enqueue_prune=None,
-        )
-        job_id = _job(unit_of_work_factory, case)
-        runner.run(job_id)
-        assert _read(unit_of_work_factory, job_id).status == JobStatus.SUCCEEDED
-
-    assert _pruned_snapshot_count(session_factory) == 1
-
-
-def test_in_process_pruning_is_skipped_while_the_ontology_lock_is_held(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-) -> None:
-    """A busy ontology is left for the next finished job and does not raise."""
-    case = CASES["ontology"]
-    # Three snapshots leave one eligible for pruning; a no-op `enqueue_prune`
-    # keeps the runs themselves from pruning it.
-    for content in _go_versions(case.content, 3):
-        runner = build_runner(
-            database_engine,
-            unit_of_work_factory,
-            FakeFetchers({"go": content}),
-            enqueue_prune=lambda _key: None,
-        )
-        runner.run(_job(unit_of_work_factory, case))
-    components = create_refresh_runner(
-        engine=database_engine,
-        unit_of_work_factory=unit_of_work_factory,
-        sources=TEST_SOURCES,
-        fetchers=FakeFetchers({}),
-        enqueue_prune=None,
-    )
-
-    with try_advisory_lock(
-        database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
-    ) as acquired:
-        assert acquired
-        components.ontology.after_terminal("go")
-
-    assert _pruned_snapshot_count(session_factory) == 0
-    components.ontology.after_terminal("go")
-    assert _pruned_snapshot_count(session_factory) == 1
-
-
-def test_in_process_pruning_failure_is_logged_and_the_job_stays_succeeded(
-    unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """An exception while pruning is logged by type only and does not fail the run."""
-    # Alembic's logging setup, run by earlier integration tests, disables loggers
-    # that already exist; re-enable this one so `caplog` can see its records.
-    monkeypatch.setattr(ontology_module.logger, "disabled", False)
-
-    def broken(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("secret connection detail")
-
-    monkeypatch.setattr(OntologyRepository, "prune_candidates", broken)
-    case = CASES["ontology"]
-    runner = build_runner(
-        database_engine,
-        unit_of_work_factory,
-        FakeFetchers({"go": case.content}),
-        enqueue_prune=None,
-    )
-    job_id = _job(unit_of_work_factory, case)
-
-    with caplog.at_level("ERROR"):
-        runner.run(job_id)
-
-    assert _read(unit_of_work_factory, job_id).status == JobStatus.SUCCEEDED
-    assert "RuntimeError" in caplog.text
-    assert "go" in caplog.text
-    assert "secret connection detail" not in caplog.text
-
-
 def test_job_type_no_kind_claims_fails_generically_without_fetching(
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
 ) -> None:
-    """A retirement job delivered to the refresh task fails once, generically."""
+    """A job type the runner does not run fails once, generically."""
     fetchers = FakeFetchers({})
     runner = build_runner(database_engine, unit_of_work_factory, fetchers)
     job_id = create_job(
         unit_of_work_factory,
-        job_type=JobType.ENTITY_RETIREMENT,
+        job_type=JobType.TERM_REPLACEMENT,
         requested_by="curator",
         parameters={"source_key": "mgi"},
     ).job_id
@@ -616,60 +440,222 @@ def test_job_type_no_kind_claims_fails_generically_without_fetching(
     assert fetchers.calls == []
 
 
-def test_document_activated_while_waiting_for_the_lock_reports_unchanged(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-) -> None:
-    """A job that loses the race to the same document applies nothing."""
-    content = CASES["ontology"].content
-    other = _job(unit_of_work_factory, CASES["ontology"])
-    racing = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
-    other_runner = build_runner(
-        database_engine, unit_of_work_factory, FakeFetchers({"go": content})
-    )
-    bound = bind_try_lock(database_engine)
-
-    def try_lock_after_the_other_job(
-        namespace: LockNamespace, value: str | UUID | None = None
-    ) -> AbstractContextManager[bool]:
-        # The other job runs to completion between this job's pre-lock check
-        # and its lock acquisition.
-        if namespace is LockNamespace.ONTOLOGY:
-            other_runner.run(other)
-        return bound(namespace, value)
-
-    service = OntologyRefreshService(
-        unit_of_work_factory, TEST_SOURCES, try_lock_after_the_other_job, None
-    )
-    document = FakeFetchers({"go": content}).fetch(
-        "go", TEST_SOURCES.source(RefreshKindName.ONTOLOGY, "go")
-    )
-
-    outcome = service.apply(racing, document, ignore_progress)
-
-    assert outcome.unchanged is True
-    assert _count(session_factory, AuditAction.ONTOLOGY_REFRESHED) == 1
-    with session_factory() as session:
-        assert (
-            session.scalar(select(func.count()).select_from(OntologyMetadataRecord))
-            == 1
-        )
-
-
 def test_two_kinds_claiming_one_job_type_are_rejected(
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
 ) -> None:
     """Each job type is run by exactly one kind, so ambiguity fails at startup."""
-    authorization = AuthorizationRefreshService(unit_of_work_factory)
+    authorization = AuthorizationRefreshService()
 
     with pytest.raises(ValueError, match="more than one refresh kind"):
         RefreshRunner(
             try_lock=bind_try_lock(database_engine),
             jobs=JobService(unit_of_work_factory),
+            unit_of_work_factory=unit_of_work_factory,
             fetchers=FakeFetchers({}),
             sources=TEST_SOURCES,
             kinds=(authorization, authorization),
-            retirer=EntityRefreshService(unit_of_work_factory, TEST_SOURCES),
         )
+
+
+def test_an_error_partway_through_a_load_stores_nothing_and_the_retry_loads_again(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A load that fails after storing some rows leaves no snapshot and a running job.
+
+    The failure comes partway through storing the closure rows. Running the job
+    again, as a redelivered task would, loads the document from the start and
+    succeeds.
+    """
+    job = create_job(
+        unit_of_work_factory,
+        job_type=JobType.ONTOLOGY_REFRESH,
+        requested_by="scheduler",
+        parameters={"source_key": "go"},
+    )
+    runner = build_runner(
+        database_engine,
+        unit_of_work_factory,
+        FakeFetchers(
+            {
+                "go": obo(
+                    OboTerm("GO:0000001"), OboTerm("GO:0000002", is_a=("GO:0000001",))
+                )
+            }
+        ),
+    )
+    real_closure = ontology_refresh_service.compute_closure
+
+    def failing_closure(snapshot: OntologySnapshot) -> Iterator[OntologyClosureRow]:
+        rows = real_closure(snapshot)
+        yield next(rows)
+        raise RuntimeError("connection lost")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ontology_refresh_service, "compute_closure", failing_closure)
+        with pytest.raises(RuntimeError, match="connection lost"):
+            runner.run(job.job_id)
+
+    assert JobService(unit_of_work_factory).find(job.job_id).status is JobStatus.RUNNING
+    assert snapshot_count(session_factory, SnapshotKind.ONTOLOGY) == 0
+
+    runner.run(job.job_id)
+
+    finished = JobService(unit_of_work_factory).find(job.job_id)
+    assert finished.status is JobStatus.SUCCEEDED
+    assert finished.result is not None and finished.result["unchanged"] is False
+    assert snapshot_count(session_factory, SnapshotKind.ONTOLOGY) == 1
+
+
+@pytest.mark.parametrize("kind", sorted(STORED_RECORDS))
+def test_what_a_refresh_stores_commits_only_with_its_success(
+    kind: str,
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh whose success cannot be recorded stores nothing.
+
+    The run raises and the job stays running, with no applied-refresh audit event
+    and no stored snapshot, refresh, or import record. Running the job again
+    applies the document once.
+    """
+    applied = ANNOTATION_CASE if kind == "annotation" else CASES[kind]
+    stored = STORED_RECORDS[kind]
+    runner = build_runner(
+        database_engine,
+        unit_of_work_factory,
+        FakeFetchers({applied.source_key: applied.content}),
+    )
+    job_id = _job(unit_of_work_factory, applied)
+    original = JobService.record_success
+    failures = [RuntimeError("connection lost")]
+
+    def fail_once(self: JobService, *args: Any, **kwargs: Any) -> Job:
+        if failures:
+            raise failures.pop()
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(JobService, "record_success", fail_once)
+
+    with pytest.raises(RuntimeError, match="connection lost"):
+        runner.run(job_id)
+
+    assert _read(unit_of_work_factory, job_id).status == JobStatus.RUNNING
+    assert _count(session_factory, applied.applied_action) == 0
+    assert _row_count(session_factory, stored) == 0
+
+    runner.run(job_id)
+
+    finished = _read(unit_of_work_factory, job_id)
+    assert finished.status == JobStatus.SUCCEEDED
+    assert finished.result is not None and finished.result["unchanged"] is False
+    assert _count(session_factory, applied.applied_action) == 1
+    assert _row_count(session_factory, stored) == 1
+
+
+def test_follow_up_jobs_are_sent_after_the_refresh_commits(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """An activation's replacement job is sent once the refresh has succeeded."""
+    statuses_when_sent: list[JobStatus] = []
+    job = create_job(
+        unit_of_work_factory,
+        job_type=JobType.ONTOLOGY_REFRESH,
+        requested_by="curator",
+        parameters={"source_key": "go"},
+    )
+
+    def send(follow_up: Job) -> None:
+        assert follow_up.job_type is JobType.TERM_REPLACEMENT
+        with session_factory() as session:
+            refresh = session.get(JobRecord, job.job_id)
+            assert refresh is not None
+            statuses_when_sent.append(refresh.status)
+
+    build_runner(
+        database_engine,
+        unit_of_work_factory,
+        FakeFetchers({"go": obo(OboTerm("GO:0000001"))}),
+        dispatch_replacement=send,
+    ).run(job.job_id)
+
+    assert statuses_when_sent == [JobStatus.SUCCEEDED]
+
+
+def test_a_failed_follow_up_send_leaves_the_refresh_succeeded_and_the_job_queued(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A broker failure while sending a replacement job does not fail the refresh."""
+
+    def broken(_job: Job) -> None:
+        raise RuntimeError("broker unavailable")
+
+    job = create_job(
+        unit_of_work_factory,
+        job_type=JobType.ONTOLOGY_REFRESH,
+        requested_by="curator",
+        parameters={"source_key": "go"},
+    )
+    build_runner(
+        database_engine,
+        unit_of_work_factory,
+        FakeFetchers({"go": obo(OboTerm("GO:0000001"))}),
+        dispatch_replacement=broken,
+    ).run(job.job_id)
+
+    assert JobService(unit_of_work_factory).find(job.job_id).status is (
+        JobStatus.SUCCEEDED
+    )
+    with session_factory() as session:
+        (replacement,) = session.scalars(
+            select(JobRecord).where(JobRecord.job_type == JobType.TERM_REPLACEMENT)
+        )
+        assert replacement.status is JobStatus.QUEUED
+
+
+def test_progress_reported_during_apply_commits_before_the_job_does(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another connection sees a job's progress while its transaction is still open.
+
+    The entity refresh reports `publishing` after its rows are stored, and those
+    rows refer to the job, so the report must not wait for the job's transaction.
+    """
+    seen: list[object] = []
+    original = SnapshotRepository.activate
+
+    def observe_then_activate(
+        self: SnapshotRepository, record: ReferenceSnapshotRecord
+    ) -> ReferenceSnapshotRecord | None:
+        seen.append(
+            JobService(unit_of_work_factory).find(record.job_id).progress["phase"]
+        )
+        return original(self, record)
+
+    monkeypatch.setattr(SnapshotRepository, "activate", observe_then_activate)
+    job = create_job(
+        unit_of_work_factory,
+        job_type=JobType.ENTITY_REFRESH,
+        requested_by="scheduler",
+        parameters={"source_key": "mgi"},
+    )
+    build_runner(
+        database_engine,
+        unit_of_work_factory,
+        FakeFetchers({"mgi": gpi_bytes("MGI:MGI:1")}),
+    ).run(job.job_id)
+
+    assert seen == ["publishing"]
+    assert JobService(unit_of_work_factory).find(job.job_id).status is (
+        JobStatus.SUCCEEDED
+    )

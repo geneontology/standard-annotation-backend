@@ -5,11 +5,12 @@ through `RefreshStartService`, so every path reuses existing work the same way.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from standard_annotation_backend.domain.annotation_management import (
+    AnnotationJobInProgressError,
     GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.audit import AuditAction
@@ -28,6 +29,7 @@ from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     refresh_dispatch_failure_message,
 )
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
@@ -49,6 +51,27 @@ class _StartedJob:
 
     job: Job
     created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshStart:
+    """Describe what one call to `RefreshStartService.start` did.
+
+    Attributes:
+        jobs: The created or reused refresh jobs, in source-key order.
+        retired: The source keys whose active snapshots were retired because the
+            sources file no longer lists them, in source-key order.
+    """
+
+    jobs: tuple[Job, ...]
+    retired: tuple[str, ...] = ()
+
+
+_RETIRED_KINDS: Mapping[RefreshKindName, SnapshotKind] = {
+    RefreshKindName.ONTOLOGY: SnapshotKind.ONTOLOGY,
+    RefreshKindName.ENTITY: SnapshotKind.ENTITY,
+}
+"""Kinds whose sources can be removed from the configuration and retired."""
 
 
 class RefreshStartService:
@@ -77,15 +100,18 @@ class RefreshStartService:
         *,
         context: AuthorizationContext,
         source_key: str | None,
-    ) -> tuple[Job, ...]:
+    ) -> RefreshStart:
         """Create or reuse jobs, commit them, then dispatch each unfinished job.
 
         With `source_key`, one refresh job is started for that source. Without
-        it, every configured source of the kind gets a refresh job. For entity
-        refreshes, every source that still has an active catalog but is no
-        longer configured also gets a retirement job. For annotation refreshes,
-        groups whose annotations are SABE-managed are skipped when `source_key`
-        is omitted.
+        it, every configured source of the kind gets a refresh job, and for
+        ontologies and entity catalogs, every source that still has an active
+        snapshot but is no longer configured is retired in the same transaction.
+        A source with an unfinished refresh job is left for a later start.
+        Retired snapshots stop being read at once; the kind's next refresh job
+        deletes their data. For annotation refreshes, groups whose annotations
+        are SABE-managed or that have an unfinished cutover are skipped when
+        `source_key` is omitted.
 
         If a queued or running job of the same type already exists for a source,
         that job is returned and dispatched again instead of creating another.
@@ -99,7 +125,7 @@ class RefreshStartService:
             source_key: One source to refresh, or `None` for every source.
 
         Returns:
-            Retirement jobs first, then refresh jobs, each in source-key order.
+            The jobs started and the sources retired.
 
         Raises:
             PermissionDeniedError: If the caller lacks global admin. This is
@@ -108,6 +134,8 @@ class RefreshStartService:
             UnknownSourceError: If `source_key` is not configured for `kind`.
             GroupSabeManagedError: If `source_key` names an annotation source
                 whose group is SABE-managed. No job is created.
+            AnnotationJobInProgressError: If `source_key` names an annotation
+                source whose group has an unfinished cutover. No job is created.
         """
         authorize_role(context, PermissionAction.REFRESH_CREATE)
         return self._start(
@@ -119,14 +147,17 @@ class RefreshStartService:
 
         A cutover moves the source's group to SABE management permanently, so it
         is started only on request, never by the schedule or for every source.
-        An unfinished cutover job for the source is reused; an ordinary refresh
-        job is not.
+        An unfinished cutover job for the source is reused. A group has at most
+        one unfinished GPAD job, so an unfinished ordinary refresh blocks the
+        request.
 
         Raises:
             PermissionDeniedError: If the caller lacks global admin, checked
                 before the source lookup.
             UnknownSourceError: If `source_key` is not an annotation source.
             GroupSabeManagedError: If the group is already SABE-managed.
+            AnnotationJobInProgressError: If the group has an unfinished ordinary
+                refresh. No job is created.
         """
         authorize_role(context, PermissionAction.REFRESH_CREATE)
         (job,) = self._start(
@@ -134,7 +165,7 @@ class RefreshStartService:
             requested_by=context.actor_id,
             source_key=source_key,
             cutover=True,
-        )
+        ).jobs
         return job
 
     def _start(
@@ -144,7 +175,7 @@ class RefreshStartService:
         requested_by: str,
         source_key: str | None,
         cutover: bool,
-    ) -> tuple[Job, ...]:
+    ) -> RefreshStart:
         """Create or reuse the jobs for `start` or `start_cutover`, then dispatch."""
         # Reject an unconfigured key before touching the database, so a typo
         # creates no job and no audit event.
@@ -158,6 +189,11 @@ class RefreshStartService:
             # is held until this transaction commits, so the "find, else create"
             # below cannot interleave with another start.
             uow.jobs.lock_refresh_starts()
+            retired = (
+                self._retire_unconfigured(uow, kind, requested_by)
+                if source_key is None
+                else ()
+            )
             for job_type, key in self._targets(uow, kind, source_key, cutover=cutover):
                 # Reuse a queued or running job for the same source instead of
                 # creating a duplicate. A running job may have lost its worker,
@@ -182,7 +218,47 @@ class RefreshStartService:
             # be able to read the job. Dispatching first could deliver a job ID
             # that does not exist yet.
             uow.commit()
-        return tuple(self._dispatch_started(kind, item) for item in started)
+        return RefreshStart(
+            jobs=tuple(self._dispatch_started(kind, item) for item in started),
+            retired=retired,
+        )
+
+    def _retire_unconfigured(
+        self, uow: SqlAlchemyUnitOfWork, kind: RefreshKindName, actor_id: str
+    ) -> tuple[str, ...]:
+        """Retire the active snapshots of the kind's sources that are not configured.
+
+        Only ontologies and entity catalogs can lose a source. A source with an
+        unfinished refresh job is skipped: that job fails with `unknown_source`
+        when it runs, and a later start retires the source. Each retirement is
+        audited with the requester as the actor.
+
+        Returns:
+            The retired source keys, in order.
+        """
+        snapshot_kind = _RETIRED_KINDS.get(kind)
+        if snapshot_kind is None:
+            return ()
+        configured = set(self._sources.keys(kind))
+        refresh_type = REFRESH_JOB_TYPES[kind]
+        removed = [
+            key
+            for key in uow.snapshots.active_source_keys(snapshot_kind)
+            if key not in configured
+            and uow.jobs.find_active(job_type=refresh_type, source_key=key) is None
+        ]
+        retired = uow.snapshots.retire(snapshot_kind, removed)
+        audit = AuditService(uow.audit)
+        for record in retired:
+            audit.record_snapshot_retired(
+                kind=snapshot_kind,
+                actor_id=actor_id,
+                details={
+                    "source_key": record.source_key,
+                    "snapshot_id": str(record.snapshot_id),
+                },
+            )
+        return tuple(record.source_key for record in retired)
 
     def _targets(
         self,
@@ -198,45 +274,47 @@ class RefreshStartService:
         refresh_type = REFRESH_JOB_TYPES[kind]
         if source_key is not None:
             return [(refresh_type, source_key)]
-        configured = self._sources.keys(kind)
-        retirements: list[tuple[JobType, str]] = []
-        # Only entity catalogs are retired. A catalog whose source key was
-        # removed from the sources file (or renamed) stays active until a
-        # retirement job removes it. Reading active catalogs under the start
-        # lock keeps this list consistent with the jobs created alongside it.
-        if kind is RefreshKindName.ENTITY:
-            retirements = [
-                (JobType.ENTITY_RETIREMENT, key)
-                for key in uow.entities.active_source_keys()
-                if key not in configured
-            ]
-        return retirements + [(refresh_type, key) for key in configured]
+        return [(refresh_type, key) for key in self._sources.keys(kind)]
 
     def _annotation_targets(
         self, uow: SqlAlchemyUnitOfWork, source_key: str | None, *, cutover: bool
     ) -> list[tuple[JobType, str]]:
-        """List annotation jobs to start, leaving out SABE-managed groups.
+        """List annotation jobs to start, leaving out groups that cannot take one.
 
-        Modes are read while the start lock is held, so they match the jobs
-        created in the same transaction. Publication checks the group's mode
-        again, so a group that is cut over after this check still cannot be
-        overwritten.
+        A group whose annotations are SABE-managed never gets a GPAD job. A group
+        has at most one unfinished GPAD job: an unfinished job of the requested
+        type is reused by `_start`, but one of the other type blocks the request.
+        Modes and unfinished jobs are read while the start lock is held, so they
+        match the jobs created in the same transaction. Publication checks the
+        group's mode again, so a group that is cut over after this check still
+        cannot be overwritten.
 
         Raises:
             GroupSabeManagedError: If `source_key` names a source whose group is
                 SABE-managed.
+            AnnotationJobInProgressError: If `source_key` names a source whose
+                group has an unfinished GPAD job of the other type.
         """
         job_type = JobType.ANNOTATION_CUTOVER if cutover else JobType.ANNOTATION_REFRESH
+        other_type = (
+            JobType.ANNOTATION_REFRESH if cutover else JobType.ANNOTATION_CUTOVER
+        )
         managed = uow.annotation_imports.sabe_managed_groups()
         if source_key is not None:
             group = self._sources.annotation_group(source_key)
             if group in managed:
                 raise GroupSabeManagedError(group)
+            if (
+                uow.jobs.find_active(job_type=other_type, source_key=source_key)
+                is not None
+            ):
+                raise AnnotationJobInProgressError
             return [(job_type, source_key)]
         return [
             (job_type, key)
             for key in self._sources.keys(RefreshKindName.ANNOTATION)
             if self._sources.annotation_group(key) not in managed
+            and uow.jobs.find_active(job_type=other_type, source_key=key) is None
         ]
 
     def _dispatch_started(self, kind: RefreshKindName, item: _StartedJob) -> Job:

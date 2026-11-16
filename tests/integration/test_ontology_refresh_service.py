@@ -9,15 +9,15 @@ from refresh_helpers import (
     GO_ENTRY,
     TEST_SOURCES,
     OboTerm,
+    apply_in_transaction,
     go_document,
-    ignore_progress,
     obo,
     source_document,
     sources_with,
     start_job,
 )
 from seeding import insert_annotation
-from sqlalchemy import Engine, select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
@@ -33,18 +33,18 @@ from standard_annotation_backend.domain.ontology import (
     OntologySnapshot,
     OntologyTerm,
 )
-from standard_annotation_backend.domain.refresh import TerminalRefreshError
+from standard_annotation_backend.domain.refresh import (
+    SourceProvenance,
+    TerminalRefreshError,
+)
 from standard_annotation_backend.domain.semantic_validation.facts import (
     TermFact,
     TermStatus,
 )
-from standard_annotation_backend.domain.stored_json import StoredDataError
-from standard_annotation_backend.persistence.locks import bind_try_lock
-from standard_annotation_backend.persistence.models import (
-    AuditEventRecord,
-    OntologyMetadataRecord,
-)
+from standard_annotation_backend.domain.snapshots import SnapshotKind
+from standard_annotation_backend.persistence.models import AuditEventRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.job_service import JobService
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
 )
@@ -107,14 +107,25 @@ def _prepare(
     """Activate an old snapshot directly and create the annotations it covers."""
     old_job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
     old_snapshot = _old_snapshot(old_terms)
+    document = old_snapshot.document
     with unit_of_work_factory() as uow:
-        old = uow.ontologies.stage(
-            job_id=old_job.job_id,
-            document=old_snapshot.document,
-            snapshot=old_snapshot,
-            closure_rows=(),
+        old = uow.snapshots.create(
+            SnapshotKind.ONTOLOGY,
+            GO_ONTOLOGY_KEY,
+            old_job.job_id,
+            SourceProvenance(
+                source_type=document.source_type,
+                source_locator=document.source_locator,
+                source_revision=document.source_revision,
+                source_checksum=document.source_checksum,
+                fetched_at=document.fetched_at,
+            ),
         )
-        uow.ontologies.activate(old.version_id)
+        uow.ontologies.insert(old.snapshot_id, old_snapshot, ())
+        uow.snapshots.activate(old)
+        JobService(unit_of_work_factory).record_success(
+            uow, old_job.job_id, result={}, progress={}
+        )
         for annotation_id, annotation in annotations:
             insert_annotation(
                 uow.annotations.session,
@@ -142,7 +153,6 @@ def _refresh_audits(session: Session) -> tuple[AuditEventRecord, ...]:
 def test_activation_leaves_annotations_unchanged(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    database_engine: Engine,
 ) -> None:
     """Activation only makes the snapshot active; annotations keep their terms.
 
@@ -156,18 +166,18 @@ def test_activation_leaves_annotations_unchanged(
         old_terms={OLD_TERM: OntologyTerm(OLD_TERM, False, (), ())},
     )
     job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
-    service = OntologyRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
-    )
+    service = OntologyRefreshService(TEST_SOURCES)
 
-    outcome = service.apply(job, go_document(CANDIDATE), ignore_progress)
+    outcome = apply_in_transaction(
+        unit_of_work_factory, service, job, go_document(CANDIDATE)
+    )
 
     assert "annotation_update_count" not in outcome.result
     assert outcome.counts == {"ontology_warning_count": 0}
     with unit_of_work_factory() as uow:
-        active = uow.ontologies.get_active(GO_ONTOLOGY_KEY)
+        active = uow.snapshots.active(SnapshotKind.ONTOLOGY, GO_ONTOLOGY_KEY)
         assert active is not None
-        assert str(active.version_id) == outcome.result["ontology_version_id"]
+        assert str(active.snapshot_id) == outcome.result["ontology_version_id"]
         record = uow.annotations.get(annotation_id)
         assert record is not None
         assert record.current_version == 1
@@ -178,38 +188,8 @@ def test_activation_leaves_annotations_unchanged(
         ]
 
 
-def test_recovery_rejects_a_stored_result_with_an_invalid_count(
-    unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """Recovery reports an invalid stored count instead of reading it as zero."""
-    annotation_id = UUID("00000000-0000-0000-0000-000000000045")
-    _prepare(
-        unit_of_work_factory,
-        annotations=((annotation_id, _annotation(OLD_TERM)),),
-        old_terms={OLD_TERM: OntologyTerm(OLD_TERM, False, (), ())},
-    )
-    job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
-    service = OntologyRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
-    )
-    outcome = service.apply(job, go_document(CANDIDATE), ignore_progress)
-    assert service.recover(job) is not None
-    with session_factory() as session, session.begin():
-        session.execute(
-            update(OntologyMetadataRecord)
-            .where(OntologyMetadataRecord.job_id == job.job_id)
-            .values(refresh_result={**outcome.result, "term_count": "1"})
-        )
-
-    with pytest.raises(StoredDataError):
-        service.recover(job)
-
-
 def test_an_ontology_other_than_go_is_read_as_its_entry_describes(
     unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
 ) -> None:
     """An ontology loads with the header, prefixes, and closure its entry sets."""
     sources = sources_with(
@@ -234,14 +214,11 @@ id: CL:0000001
 is_a: CL:0000000
 """
     job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "cl")
-    service = OntologyRefreshService(
-        unit_of_work_factory,
-        sources,
-        bind_try_lock(database_engine),
-        None,
-    )
+    service = OntologyRefreshService(sources)
 
-    outcome = service.apply(job, source_document("cl", content), ignore_progress)
+    outcome = apply_in_transaction(
+        unit_of_work_factory, service, job, source_document("cl", content)
+    )
 
     assert (
         outcome.result["ontology"],
@@ -249,12 +226,11 @@ is_a: CL:0000000
         outcome.result["closure_count"],
     ) == ("cl", 2, 0)
     with unit_of_work_factory() as uow:
-        assert uow.ontologies.get_active("cl") is not None
+        assert uow.snapshots.active(SnapshotKind.ONTOLOGY, "cl") is not None
 
 
 def test_validation_reads_subsets_and_alternative_identifiers_from_a_refresh(
     unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
     reference_data: Callable[..., None],
 ) -> None:
     """Validation sees each refreshed term's subsets and each alternative ID's term."""
@@ -273,11 +249,9 @@ subset: gocheck_do_not_annotate
 id: GO:0000002
 """
     job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
-    service = OntologyRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
-    )
+    service = OntologyRefreshService(TEST_SOURCES)
 
-    service.apply(job, go_document(content), ignore_progress)
+    apply_in_transaction(unit_of_work_factory, service, job, go_document(content))
 
     with unit_of_work_factory() as uow:
         tagged, plain, alternative = (
@@ -300,11 +274,11 @@ id: GO:0000002
 
 def test_a_go_file_without_the_rule_subsets_is_refused(
     unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
 ) -> None:
     """GO must declare the subsets GO Rules check, or nothing is loaded.
 
-    The job fails as an invalid document and no snapshot is staged or activated.
+    The job fails as an invalid document, and the failure details name the
+    missing subset.
     """
     content = b"""\
 format-version: 1.4
@@ -315,18 +289,13 @@ subsetdef: gocheck_do_not_annotate "Term not to be used for direct annotation"
 id: GO:0000001
 """
     job = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
-    service = OntologyRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
-    )
+    service = OntologyRefreshService(TEST_SOURCES)
 
     with pytest.raises(TerminalRefreshError) as raised:
-        service.apply(job, go_document(content), ignore_progress)
+        apply_in_transaction(unit_of_work_factory, service, job, go_document(content))
 
     assert raised.value.failure_code == "invalid_document"
     assert "gocheck_obsoletion_candidate" in str(raised.value.failure_details)
-    with unit_of_work_factory() as uow:
-        assert uow.ontologies.get_by_job(job.job_id) is None
-        assert uow.ontologies.get_active(GO_ONTOLOGY_KEY) is None
 
 
 @pytest.mark.parametrize(
@@ -339,7 +308,6 @@ id: GO:0000001
 )
 def test_an_unchanged_file_is_loaded_again_when_its_definition_changes(
     unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
     change: dict[str, object],
 ) -> None:
     """A change to an ontology's entry applies on the next refresh.
@@ -347,23 +315,24 @@ def test_an_unchanged_file_is_loaded_again_when_its_definition_changes(
     The refresh loads the file again even though the file itself has not changed.
     """
     content = obo(OboTerm("GO:0000001"), OboTerm("GO:0000002", is_a=("GO:0000001",)))
-    lock = bind_try_lock(database_engine)
     first = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
-    OntologyRefreshService(unit_of_work_factory, TEST_SOURCES, lock, None).apply(
-        first, go_document(content), ignore_progress
+    apply_in_transaction(
+        unit_of_work_factory,
+        OntologyRefreshService(TEST_SOURCES),
+        first,
+        go_document(content),
     )
     changed = sources_with(ontologies={"go": {**GO_ENTRY, **change}})
     second = start_job(unit_of_work_factory, JobType.ONTOLOGY_REFRESH, "go")
 
-    outcome = OntologyRefreshService(unit_of_work_factory, changed, lock, None).apply(
-        second, go_document(content), ignore_progress
+    outcome = apply_in_transaction(
+        unit_of_work_factory,
+        OntologyRefreshService(changed),
+        second,
+        go_document(content),
     )
 
     assert outcome.unchanged is False
-    with unit_of_work_factory() as uow:
-        active = uow.ontologies.get_active(GO_ONTOLOGY_KEY)
-        assert active is not None
-        assert active.job_id == second.job_id
-        assert active.loaded_predicates == list(
-            changed.ontology_definition(GO_ONTOLOGY_KEY).closure_predicates
-        )
+    assert outcome.result["loaded_predicates"] == list(
+        changed.ontology_definition(GO_ONTOLOGY_KEY).closure_predicates
+    )

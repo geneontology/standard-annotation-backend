@@ -4,13 +4,11 @@ from collections.abc import Callable
 from uuid import UUID
 
 import pytest
-from annotation_refresh_helpers import gpad_bytes, gpad_row, gpad_text
+from annotation_refresh_helpers import gpad_bytes, gpad_row
 from refresh_helpers import (
     TEST_SOURCES,
     FakeFetchers,
     build_runner,
-    source_document,
-    stage_without_publishing,
     start_job,
 )
 from seeding import create_job as queue_job
@@ -27,8 +25,6 @@ from standard_annotation_backend.domain.auth import system_context
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.refresh import RefreshKindName
 from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
-from standard_annotation_backend.domain.stored_json import StoredDataError
-from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import (
     AnnotationCommentRecord,
     AnnotationImportRecord,
@@ -37,13 +33,7 @@ from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     ChangeSetRecord,
 )
-from standard_annotation_backend.persistence.repositories import (
-    AnnotationImportRepository,
-)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.annotation_refresh_service import (
-    AnnotationRefreshService,
-)
 from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.refresh_start_service import (
     RefreshStartService,
@@ -63,16 +53,6 @@ def create_job(
 ) -> Job:
     """Create and start a GPAD job requested by `curator`, and return it."""
     return start_job(unit_of_work_factory, job_type, source_key)
-
-
-def stage(service: AnnotationRefreshService, job: Job, text: str) -> None:
-    """Commit staging for `job` without publishing, as an interrupted worker would."""
-    stage_without_publishing(
-        service,
-        job,
-        source_document(SOURCE, text.encode()),
-        (AnnotationImportRepository, "publish"),
-    )
 
 
 @pytest.fixture
@@ -251,82 +231,6 @@ def test_refresh_publishes_rows_whose_subject_is_unknown_and_reports_unreadable_
         ("UniProtKB:P12345", ["UniProtKB:Q2"]),
         ("UniProtKB:UNKNOWN", None),
     ]
-
-
-def test_recovering_a_job_with_a_corrupt_stored_rejection_report_is_reported(
-    run: RunJob,
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    seed_active_subjects: Callable[..., None],
-) -> None:
-    """A published import whose rejection report is malformed raises `StoredDataError`.
-
-    The job is not treated as having no usable import, and the report is not
-    trusted.
-    """
-    seed_active_subjects("UniProtKB:P12345")
-    job = run(GOOD)
-    with session_factory() as session:
-        session.execute(
-            update(AnnotationImportRecord)
-            .where(AnnotationImportRecord.job_id == job.job_id)
-            .values(rejection_report={"issue_count": "x"})
-        )
-        session.commit()
-    service = AnnotationRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
-    )
-
-    with pytest.raises(StoredDataError):
-        service.recover(job)
-
-
-def test_rerun_after_interrupted_staging_publishes_only_the_fetched_document(
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    seed_active_subjects: Callable[..., None],
-) -> None:
-    """A job resumed after staging but before publishing imports the new fetch only.
-
-    Nothing staged by the interrupted attempt appears among the published
-    annotations.
-    """
-    seed_active_subjects("UniProtKB:P12345")
-    jobs = JobService(unit_of_work_factory)
-    job = create_job(unit_of_work_factory)
-    stage(
-        AnnotationRefreshService(
-            unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
-        ),
-        job,
-        gpad_text(gpad_row("UniProtKB:P12345", reference="PMID:1")),
-    )
-
-    build_runner(
-        database_engine,
-        unit_of_work_factory,
-        FakeFetchers(
-            {
-                SOURCE: gpad_bytes(
-                    gpad_row("UniProtKB:P12345", reference="PMID:2"),
-                    gpad_row("UniProtKB:P12345", reference="PMID:3"),
-                )
-            }
-        ),
-    ).run(job.job_id)
-
-    job = jobs.find(job.job_id)
-    assert job.status is JobStatus.SUCCEEDED
-    assert job.result is not None and job.result["annotations_published"] == 2
-    assert sorted(
-        (
-            record.annotation_data["references"]
-            for record in annotations_of(session_factory)
-        ),
-        key=str,
-    ) == [["PMID:2"], ["PMID:3"]]
 
 
 def _apply_local_change(
@@ -717,4 +621,4 @@ def test_cutover_moves_the_group_to_sabe_management_permanently(
     refresh_all = starts.start(
         RefreshKindName.ANNOTATION, context=system_context("scheduler"), source_key=None
     )
-    assert [job.parameters["source_key"] for job in refresh_all] == ["rgd-gpad"]
+    assert [job.parameters["source_key"] for job in refresh_all.jobs] == ["rgd-gpad"]
