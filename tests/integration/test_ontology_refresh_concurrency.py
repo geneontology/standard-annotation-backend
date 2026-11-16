@@ -1,69 +1,49 @@
 """Verify ontology refreshes coordinate safely across PostgreSQL connections."""
 
-import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from pathlib import Path
-from threading import Event
 from uuid import UUID
 
-import httpx2
 import pytest
 from refresh_helpers import (
     REVISION,
     TEST_SOURCES,
     OboTerm,
+    apply_in_transaction,
     go_document,
-    ignore_progress,
     obo,
     start_job,
 )
-from seeding import create_job, insert_annotation
-from sqlalchemy import Engine, select
+from seeding import insert_annotation
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
     ChangeSource,
 )
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import (
     GO_ONTOLOGY_KEY,
     OntologyDocument,
     OntologySnapshot,
     OntologyTerm,
 )
-from standard_annotation_backend.domain.refresh import SourceDocument
+from standard_annotation_backend.domain.refresh import (
+    SourceDocument,
+    SourceProvenance,
+)
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.locks import (
-    LockNamespace,
     acquire_global_annotation_write_lock,
-    bind_try_lock,
-    try_advisory_lock,
 )
-from standard_annotation_backend.persistence.models import (
-    JobRecord,
-    OntologyMetadataRecord,
-)
-from standard_annotation_backend.persistence.repositories import (
-    OntologyRepository,
-)
+from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
 )
-from standard_annotation_backend.workers import tasks
-from standard_annotation_backend.workers.tasks import (
-    WorkerTaskUnavailableError,
-    prune_ontology_snapshots,
-)
-
-OBO = (
-    Path(__file__).parents[1] / "fixtures" / "ontology" / "minimal-go.obo"
-).read_bytes()
 
 
 @pytest.fixture(autouse=True)
@@ -134,26 +114,36 @@ def _prepare_load(
             JobRecord(
                 job_id=OLD_JOB_ID,
                 job_type="ontology_refresh",
-                status="queued",
+                status="succeeded",
                 requested_by="test",
                 parameters={"source_key": "go"},
                 progress={},
                 warnings=[],
+                result={},
                 created_at=NOW,
                 updated_at=NOW,
+                started_at=NOW,
+                completed_at=NOW,
             )
         )
         session.commit()
 
     old = _snapshot("old", {OLD_TERM: OntologyTerm(OLD_TERM, False, (), ())})
     with unit_of_work_factory() as unit_of_work:
-        old_record = unit_of_work.ontologies.stage(
-            job_id=OLD_JOB_ID,
-            document=old.document,
-            snapshot=old,
-            closure_rows=(),
+        old_record = unit_of_work.snapshots.create(
+            SnapshotKind.ONTOLOGY,
+            GO_ONTOLOGY_KEY,
+            OLD_JOB_ID,
+            SourceProvenance(
+                source_type=old.document.source_type,
+                source_locator=old.document.source_locator,
+                source_revision=old.document.source_revision,
+                source_checksum=old.document.source_checksum,
+                fetched_at=old.document.fetched_at,
+            ),
         )
-        unit_of_work.ontologies.activate(old_record.version_id)
+        unit_of_work.ontologies.insert(old_record.snapshot_id, old, ())
+        unit_of_work.snapshots.activate(old_record)
         insert_annotation(
             unit_of_work.annotations.session,
             annotation=_annotation(OLD_TERM, object_id="UniProtKB:P12345"),
@@ -189,7 +179,7 @@ def _active_state(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> tuple[str | None, str, int]:
     with unit_of_work_factory() as unit_of_work:
-        active = unit_of_work.ontologies.get_active(GO_ONTOLOGY_KEY)
+        active = unit_of_work.snapshots.active(SnapshotKind.ONTOLOGY, GO_ONTOLOGY_KEY)
         annotation = unit_of_work.annotations.get(REPLACED_ANNOTATION_ID)
         assert active is not None
         assert annotation is not None
@@ -200,106 +190,9 @@ def _active_state(
         )
 
 
-def test_pruning_task_retries_until_same_ontology_refresh_lock_is_available(
-    configured_environment: None,
-    database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pruning retries while a refresh holds the same ontology lock, then runs."""
-    monkeypatch.setenv("SABE_DATABASE_URL", os.environ["SABE_TEST_DATABASE_URL"])
-    get_settings.cache_clear()
-    calls: list[datetime] = []
-
-    def record_pruning(
-        _repository: OntologyRepository, key: str, pruned_at: datetime
-    ) -> tuple[UUID, ...]:
-        calls.append(pruned_at)
-        return ()
-
-    monkeypatch.setattr(OntologyRepository, "prune_candidates", record_pruning)
-
-    with try_advisory_lock(
-        database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
-    ) as acquired:
-        assert acquired is True
-        with pytest.raises(WorkerTaskUnavailableError):
-            prune_ontology_snapshots.run(GO_ONTOLOGY_KEY)
-        assert calls == []
-
-    prune_ontology_snapshots.run(GO_ONTOLOGY_KEY)
-
-    assert len(calls) == 1
-
-
-def test_refresh_task_retries_while_the_ontology_lock_is_held_then_succeeds(
-    configured_environment: None,
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The Celery task requests a retry while another process refreshes GO.
-
-    The job stays running while it waits, and a later delivery finishes it.
-    """
-    monkeypatch.setenv("SABE_DATABASE_URL", os.environ["SABE_TEST_DATABASE_URL"])
-    get_settings.cache_clear()
-    monkeypatch.setattr(prune_ontology_snapshots, "delay", lambda _key: None)
-    # Replace only the network: resolving the ref, then fetching the OBO bytes.
-    responses = [
-        httpx2.Response(200, json={"sha": "a" * 40}),
-        httpx2.Response(200, content=OBO),
-    ]
-
-    def handle_request(
-        _transport: httpx2.HTTPTransport, request: httpx2.Request
-    ) -> httpx2.Response:
-        response = responses.pop(0)
-        return httpx2.Response(
-            response.status_code, content=response.content, request=request
-        )
-
-    monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", handle_request)
-    job_id = create_job(
-        unit_of_work_factory,
-        job_type=JobType.ONTOLOGY_REFRESH,
-        requested_by="test",
-        parameters={"source_key": "go"},
-    ).job_id
-
-    try:
-        with try_advisory_lock(
-            database_engine, LockNamespace.ONTOLOGY, GO_ONTOLOGY_KEY
-        ) as acquired:
-            assert acquired is True
-            with pytest.raises(WorkerTaskUnavailableError):
-                tasks.run_refresh.run(str(job_id))
-        with unit_of_work_factory() as unit_of_work:
-            record = unit_of_work.jobs.get(job_id)
-            assert record is not None
-            assert record.status == JobStatus.RUNNING.value
-
-        # The first attempt fetched and then waited for the lock, so the retry
-        # fetches again with a fresh pair of responses.
-        responses.extend(
-            [
-                httpx2.Response(200, json={"sha": "a" * 40}),
-                httpx2.Response(200, content=OBO),
-            ]
-        )
-        tasks.run_refresh.run(str(job_id))
-    finally:
-        get_settings.cache_clear()
-
-    with unit_of_work_factory() as unit_of_work:
-        record = unit_of_work.jobs.get(job_id)
-        assert record is not None
-        assert record.status == JobStatus.SUCCEEDED.value
-
-
 def test_activation_does_not_wait_for_annotation_writes(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
-    database_engine: Engine,
 ) -> None:
     """An activation completes while an annotation write is in progress.
 
@@ -308,12 +201,12 @@ def test_activation_does_not_wait_for_annotation_writes(
     becomes active and the annotation on its obsolete term is left unchanged.
     """
     job, document = _prepare_load(unit_of_work_factory, session_factory)
-    service = OntologyRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
-    )
+    service = OntologyRefreshService(TEST_SOURCES)
     with session_factory() as writer, ThreadPoolExecutor(max_workers=1) as executor:
         acquire_global_annotation_write_lock(writer)
-        activation = executor.submit(service.apply, job, document, ignore_progress)
+        activation = executor.submit(
+            apply_in_transaction, unit_of_work_factory, service, job, document
+        )
         try:
             activation.result(timeout=FAILURE_GUARD_SECONDS)
         finally:
@@ -322,47 +215,3 @@ def test_activation_does_not_wait_for_annotation_writes(
             writer.rollback()
 
     assert _active_state(unit_of_work_factory) == (REVISION, OLD_TERM, 1)
-
-
-def test_failed_activation_never_exposes_partial_state(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A reader during and after a failed activation sees the prior complete state."""
-    job, document = _prepare_load(unit_of_work_factory, session_factory)
-    service = OntologyRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine), None
-    )
-    update_flushed = Event()
-    allow_failure = Event()
-    original = OntologyRepository.activate
-
-    def fail_after_activation(
-        self: OntologyRepository, version_id: UUID
-    ) -> OntologyMetadataRecord:
-        original(self, version_id)
-        update_flushed.set()
-        if not allow_failure.wait(FAILURE_GUARD_SECONDS):
-            raise TimeoutError("failure test was not released")
-        raise RuntimeError("injected activation failure")
-
-    monkeypatch.setattr(OntologyRepository, "activate", fail_after_activation)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        activation = executor.submit(service.apply, job, document, ignore_progress)
-        assert update_flushed.wait(FAILURE_GUARD_SECONDS)
-        assert _active_state(unit_of_work_factory) == ("old", OLD_TERM, 1)
-        allow_failure.set()
-        with pytest.raises(RuntimeError, match="injected activation failure"):
-            activation.result(timeout=FAILURE_GUARD_SECONDS)
-
-    assert _active_state(unit_of_work_factory) == ("old", OLD_TERM, 1)
-    with session_factory() as session:
-        candidate = session.scalar(
-            select(OntologyMetadataRecord).where(
-                OntologyMetadataRecord.job_id == job.job_id
-            )
-        )
-        assert candidate is not None
-        assert candidate.active is False

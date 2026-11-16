@@ -39,7 +39,9 @@ it owns.
 Every annotation version SABE writes, other than by import, passed semantic validation
 when it was written. The checks use the reference data active when they run, so a later
 refresh of an ontology, entity catalog, or the go-site metadata can give an existing
-annotation issues. Imported annotations may have issues from the start. An annotation
+annotation issues. Each check reads the ontology, rule data, and entity catalog
+snapshots that were active when its transaction resolved them, and those stay readable
+until it ends. Imported annotations may have issues from the start. An annotation
 with issues can be deleted, or updated to a state with no issues. That includes one of
 two existing duplicates: it can be updated only once the other is deleted or changed.
 
@@ -199,7 +201,9 @@ lists its peers; reports do not group duplicates further.
   return `410 report_findings_expired`. The findings of a report that has not
   succeeded return `409 report_not_completed`.
 - **Missing reference data.** If a configured ontology or the go-site metadata has no
-  active snapshot, the report fails with `reference_data_unavailable`.
+  active snapshot, the report fails with `reference_data_unavailable`. It fails the same
+  way when the stored rule data came from an earlier release and this release cannot
+  read it; a rules refresh fixes that.
 
 ## Errors
 
@@ -229,5 +233,6 @@ Structural issue types are Pydantic's.
 
 If a configured ontology or the go-site metadata has never been loaded, creates,
 updates, change-set previews, and change-set acceptance return
-`503 reference_data_unavailable`. A missing entity source is not an error; its
-identifiers are reported as `unknown_entity`.
+`503 reference_data_unavailable`. So do they when the stored rule data came from an
+earlier release and this release cannot read it, until a rules refresh. A missing
+entity source is not an error; its identifiers are reported as `unknown_entity`.

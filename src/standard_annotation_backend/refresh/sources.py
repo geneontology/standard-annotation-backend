@@ -106,7 +106,7 @@ class GitHubSource(BaseModel):
 
 
 class HttpsSource(BaseModel):
-    """Configure a file published at an HTTPS URL."""
+    """Configure a file served at an HTTPS URL."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -133,7 +133,7 @@ class GitHubEntitySource(GitHubSource):
 
 
 class HttpsEntitySource(HttpsSource):
-    """Configure an entity source published over HTTPS.
+    """Configure an entity source served over HTTPS.
 
     Attributes:
         format: Serialization format of the file. GPI 2.0 is the only format.
@@ -156,7 +156,7 @@ class GitHubAnnotationSource(GitHubSource):
 
 
 class HttpsAnnotationSource(HttpsSource):
-    """Configure a group's GPAD annotation source published over HTTPS.
+    """Configure a group's GPAD annotation source served over HTTPS.
 
     Attributes:
         group: Group that owns every annotation in the file. Each successful
@@ -218,7 +218,7 @@ class GitHubOntologySource(GitHubSource):
 
 
 class HttpsOntologySource(HttpsSource):
-    """Configure an OBO ontology published over HTTPS.
+    """Configure an OBO ontology served over HTTPS.
 
     Attributes:
         document_ontology_id: The `ontology:` header value the file must declare,
@@ -261,7 +261,7 @@ class SourcesFile(BaseModel):
         ontologies: Ontology sources keyed by ontology, each saying how to read its
             file. GO is required.
         entities: Entity sources keyed by stable source key. Keys are stored with
-            published catalogs, so renaming a key retires the old catalog.
+            each catalog snapshot, so renaming a key retires the old catalog.
         annotations: GPAD annotation sources keyed by stable source key. No two
             may name the same group, because each refresh replaces the whole group.
     """

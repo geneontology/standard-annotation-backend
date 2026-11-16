@@ -3,7 +3,7 @@
 SABE keeps reference data current from external sources: authorization from
 go-site `users.yaml`, rule data from six other go-site files, ontologies from OBO
 files, entities from GPI files, and annotations from group GPAD files. Rule data
-is what GO Rules, GO's published checks on annotation quality, compare annotations
+is what GO Rules, GO's official checks on annotation quality, compare annotations
 against. Refreshing one source means fetching it and applying it. These values are
 shared by every kind and need neither HTTP nor a database.
 """
@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Protocol
+from uuid import UUID
 
 from standard_annotation_backend.domain.errors import InvalidInputError
 from standard_annotation_backend.domain.jobs import JobType
@@ -51,7 +52,7 @@ class RefreshFailureCode(StrEnum):
     `reference_data_unavailable` when a configured ontology or the go-site rule
     data has no active snapshot. The codes are fixed strings, so job records and
     logs never contain source URLs or content. Operators use them to tell
-    retrieval, decoding, parsing, and publication failures apart.
+    retrieval, decoding, parsing, and activation or publication failures apart.
     """
 
     INVALID_PARAMETERS = "invalid_parameters"
@@ -65,7 +66,6 @@ class RefreshFailureCode(StrEnum):
     INVALID_DOCUMENT = "invalid_document"
     HEADER = "header"
     ROW_VALIDATION = "row_validation"
-    CANDIDATE_CONFLICT = "candidate_conflict"
     CATALOG_COLLISION = "catalog_collision"
     NO_VALID_ANNOTATIONS = "no_valid_annotations"
     CUTOVER_REJECTED = "cutover_rejected"
@@ -194,20 +194,13 @@ class UnknownSourceError(InvalidInputError, TerminalRefreshError):
         return ("body", "source_key")
 
 
-class RetryableRefreshError(Exception):
-    """Report expected, temporary contention, such as a busy refresh lock.
-
-    `RefreshRunner` leaves the job running and re-raises, so Celery retries the
-    task later.
-    """
-
-
 @dataclass(frozen=True, slots=True)
 class RefreshOutcome:
-    """Describe the committed result of one refresh or retirement.
+    """Describe what one refresh's `apply` did, before its job is marked succeeded.
 
-    `RefreshRunner` adds `phase` to the progress and, for refresh jobs,
-    `unchanged` to both progress and result.
+    `RefreshRunner` adds `phase` to the progress and `unchanged` to both progress
+    and result, then commits them with the job's success in the transaction
+    `apply` ran in.
 
     Attributes:
         result: Kind-specific JSON-compatible result. Never contains
@@ -216,12 +209,16 @@ class RefreshOutcome:
         warnings: Short messages stored on the job.
         unchanged: Whether the document was already active, so nothing was
             applied.
+        follow_up_job_ids: Jobs that `apply` queued, such as a term replacement
+            job after an ontology activation. The runner sends them to workers
+            after the transaction commits.
     """
 
     result: dict[str, object]
     counts: Mapping[str, int] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
     unchanged: bool = False
+    follow_up_job_ids: tuple[UUID, ...] = ()
 
 
 class ProgressReporter(Protocol):
@@ -299,7 +296,7 @@ def validation_failure_details(issues: Sequence[ValidationIssue]) -> dict[str, o
 
 
 def job_source_key(parameters: Mapping[str, object]) -> str:
-    """Return the `source_key` stored on a refresh or retirement job.
+    """Return the `source_key` stored on a refresh job.
 
     Raises:
         ValueError: If the parameters are anything other than exactly one valid

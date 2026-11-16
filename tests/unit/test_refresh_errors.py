@@ -6,13 +6,7 @@ from standard_annotation_backend.domain.annotation_management import (
     AnnotationImportConflictError,
     GroupSabeManagedError,
 )
-from standard_annotation_backend.domain.entities import (
-    EntityCandidateConflictError,
-    EntityCatalogCollisionError,
-)
-from standard_annotation_backend.domain.ontology import (
-    OntologyCandidateConflictError,
-)
+from standard_annotation_backend.domain.entities import EntityCatalogCollisionError
 from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     RefreshKindName,
@@ -63,14 +57,9 @@ def test_terminal_error_without_any_code_is_a_programming_error() -> None:
             UnknownSourceError(RefreshKindName.ENTITY, "mgi"),
             RefreshFailureCode.UNKNOWN_SOURCE,
         ),
-        (EntityCandidateConflictError(), RefreshFailureCode.CANDIDATE_CONFLICT),
         (
             EntityCatalogCollisionError(("MGI:1",)),
             RefreshFailureCode.CATALOG_COLLISION,
-        ),
-        (
-            OntologyCandidateConflictError("newer snapshot active"),
-            RefreshFailureCode.CANDIDATE_CONFLICT,
         ),
         (GroupSabeManagedError("MGI"), RefreshFailureCode.GROUP_SABE_MANAGED),
         (AnnotationImportConflictError(), RefreshFailureCode.INVALID_PARAMETERS),

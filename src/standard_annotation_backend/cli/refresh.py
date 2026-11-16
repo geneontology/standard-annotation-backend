@@ -19,6 +19,7 @@ from pydantic_settings import SettingsError
 from sqlalchemy.exc import SQLAlchemyError
 
 from standard_annotation_backend.domain.annotation_management import (
+    AnnotationJobInProgressError,
     GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.auth import system_context
@@ -41,7 +42,7 @@ _SINGLE_SOURCE_KINDS = frozenset({RefreshKindName.AUTHORIZATION, RefreshKindName
 
 def run_refreshes(
     runtime: WorkerRuntime, kind: RefreshKindName, source_key: str | None
-) -> tuple[Job, ...]:
+) -> tuple[tuple[Job, ...], tuple[str, ...]]:
     """Start refreshes of one kind and run each job in this process.
 
     Args:
@@ -50,7 +51,8 @@ def run_refreshes(
         source_key: One source to refresh, or `None` for every configured source.
 
     Returns:
-        The state of every started job after it ran.
+        The state of every started job after it ran, and the keys of the sources
+        that starting the refreshes retired.
 
     Raises:
         UnknownSourceError: If `source_key` is not configured for `kind`.
@@ -60,15 +62,12 @@ def run_refreshes(
         # The start service calls this after committing the jobs, where the API
         # and the schedule would send the job to Celery instead.
         try:
-            if job.job_type is JobType.ENTITY_RETIREMENT:
-                runtime.runner.run_retirement(job.job_id)
-            else:
-                runtime.runner.run(job.job_id)
+            runtime.runner.run(job.job_id)
         except Exception as error:
             # A Celery worker would retry this job later. The CLI does not wait to
-            # retry: the job stays running with whatever work it committed, the
-            # summary below reports it, and the next start for the same source
-            # reuses the job and resumes it.
+            # retry: the job stays running with nothing committed, the summary
+            # below reports it, and the next start for the same source reuses
+            # the job and runs it again.
             logger.error(
                 "Refresh job stopped before finishing: job_id=%s failure_type=%s",
                 job.job_id,
@@ -79,7 +78,10 @@ def run_refreshes(
         runtime.unit_of_work_factory, runtime.settings.sources, run_in_process
     ).start(kind, context=system_context("cli"), source_key=source_key)
     # `start` returns each job as it was before it ran; read the outcome.
-    return tuple(runtime.jobs.find(job.job_id) for job in started)
+    return (
+        tuple(runtime.jobs.find(job.job_id) for job in started.jobs),
+        started.retired,
+    )
 
 
 def run_replacements(runtime: WorkerRuntime, queued: Sequence[Job]) -> tuple[Job, ...]:
@@ -108,7 +110,11 @@ def run_replacements(runtime: WorkerRuntime, queued: Sequence[Job]) -> tuple[Job
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse arguments, run the refreshes, and print one line per job.
+    """Parse arguments, run the refreshes, and print a line per retirement and job.
+
+    Refreshing every ontology or entity source also retires the sources that
+    `config/sources.yaml` no longer lists; each is printed as
+    `<kind> <source key> retired` before the job lines.
 
     Returns:
         Zero when every job succeeded or there was nothing to refresh, otherwise
@@ -133,10 +139,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if kind in _SINGLE_SOURCE_KINDS and arguments.source_key is not None:
         parser.error(f"{kind.value} has a single source; omit source_key")
     try:
-        # Without `enqueue_prune`, ontology pruning also runs in this process.
         replacements: list[Job] = []
         with worker_runtime(dispatch_replacement=replacements.append) as runtime:
-            jobs = run_refreshes(runtime, kind, arguments.source_key)
+            jobs, retired = run_refreshes(runtime, kind, arguments.source_key)
             jobs += run_replacements(runtime, replacements)
             sources_configured = bool(runtime.settings.sources.keys(kind))
     except UnknownSourceError:
@@ -149,25 +154,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    except AnnotationJobInProgressError:
+        # The CLI never starts cutovers, so the only conflict it meets is an
+        # unfinished cutover.
+        print(
+            "That annotation source's group has an unfinished GPAD cutover job",
+            file=sys.stderr,
+        )
+        return 1
     except (ValidationError, SettingsError):
         print("SABE configuration is invalid", file=sys.stderr)
         return 1
     except SQLAlchemyError:
         print("Refresh could not record its jobs in PostgreSQL", file=sys.stderr)
         return 1
-    if not jobs:
+    if not jobs and not retired:
         # That is not a failure, but say why instead of printing nothing.
         if sources_configured:
             # Only annotation refreshes can start nothing while sources exist:
-            # every source's group is SABE-managed.
+            # every source's group is either SABE-managed or has an unfinished
+            # cutover.
             print(
-                f"No {kind.value} sources need refreshing; their groups are SABE-managed"
+                f"No {kind.value} sources need refreshing; their groups are "
+                "SABE-managed or have an unfinished cutover"
             )
         else:
-            # Nothing is configured for this kind (and, for entities, nothing needs
-            # retiring).
+            # Nothing is configured for this kind.
             print(f"No {kind.value} sources are configured")
         return 0
+    for key in retired:
+        print(f"{kind.value} {key} retired")
     for job in jobs:
         print(_describe(job))
     return 0 if all(job.status is JobStatus.SUCCEEDED for job in jobs) else 1

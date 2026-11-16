@@ -25,6 +25,7 @@ class AuditAction(StrEnum):
     CHANGE_SET_REJECTED = "change_set.rejected"
     CHANGE_SET_MARKED_STALE = "change_set.marked_stale"
     ONTOLOGY_REFRESHED = "ontology.refreshed"
+    ONTOLOGY_RETIRED = "ontology.retired"
     ENTITY_REFRESHED = "entity.refreshed"
     ENTITY_RETIRED = "entity.retired"
     ANNOTATION_REFRESH_PUBLISHED = "annotation_refresh.published"

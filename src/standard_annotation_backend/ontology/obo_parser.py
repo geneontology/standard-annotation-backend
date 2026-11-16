@@ -2,7 +2,7 @@
 
 An OBO `[Term]` frame is a list of clauses, one tag and value per line, such as
 `is_a: GO:0008150`. SABE reads only a few tags. Before parsing, it removes the
-other clauses, so a clause SABE does not need cannot stop a published file from
+other clauses, so a clause SABE does not need cannot stop an ontology file from
 loading.
 """
 
@@ -48,8 +48,8 @@ def parse_obo(
 
     Only terms whose identifiers have one of the ontology's prefixes are kept, so a
     file that also contains terms from other ontologies still loads. Replacement
-    suggestions (`replaced_by` and `consider`) are kept as published, even when
-    they point to an obsolete term or into another ontology.
+    suggestions (`replaced_by` and `consider`) are kept as the file gives them, even
+    when they point to an obsolete term or into another ontology.
 
     Args:
         document: Immutable source bytes and retrieval metadata.
@@ -278,7 +278,7 @@ def _validate_edge_targets(
 def _without_unread_clauses(content: bytes) -> BytesIO:
     """Return the document, without the `[Term]` clauses SABE does not read.
 
-    Published ontologies sometimes contain clauses that `fastobo` rejects, such as
+    Ontology files sometimes contain clauses that `fastobo` rejects, such as
     `xref:` URLs with backslash escapes in UBERON or `def:` references written
     `[PMID: 1]` in SO. SABE never reads those clauses, so removing them lets such
     files load and makes large files faster to parse. The header and other

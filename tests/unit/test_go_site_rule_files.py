@@ -135,10 +135,10 @@ def _extension(field: str) -> str:
     )
 
 
-def test_published_files_parse_into_the_values_the_rules_use() -> None:
+def test_go_site_files_parse_into_the_values_the_rules_use() -> None:
     """Each file keeps only the values GO Rules check.
 
-    The fixtures follow the published files. They include fields SABE does not read,
+    The fixtures follow the real go-site files. They include fields SABE does not read,
     YAML anchors, comment lines, PMIDs followed by a PMCID, an evidence entry with an
     extra `allowed_references` list, and a namespace listed twice in one entry. The
     extension entry without a `relation_id` is left out, because no annotation can

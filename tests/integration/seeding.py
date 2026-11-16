@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
@@ -29,13 +29,17 @@ from standard_annotation_backend.domain.annotations import (
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import SUBCLASS_PREDICATE
-from standard_annotation_backend.domain.refresh import RefreshKindName
+from standard_annotation_backend.domain.refresh import RULES_SOURCE_KEY, RefreshKindName
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     STORED_RULE_DATA,
     DatabaseEntry,
     ExtensionConstraint,
     GoRefEntry,
     RuleData,
+)
+from standard_annotation_backend.domain.snapshots import (
+    SnapshotKind,
+    current_reader_version,
 )
 from standard_annotation_backend.persistence.annotation_data import (
     prepare_annotation_for_persistence,
@@ -45,13 +49,17 @@ from standard_annotation_backend.persistence.models import (
     AnnotationMultivaluedFieldValueRecord,
     AnnotationRecord,
     AnnotationVersionRecord,
+    EntitySnapshotDetailRecord,
     JobRecord,
     OntologyAltIdRecord,
     OntologyClosureRecord,
-    OntologyMetadataRecord,
+    OntologySnapshotDetailRecord,
     OntologyTermRecord,
+    ReferenceSnapshotRecord,
     RetractedPublicationRecord,
-    RulesSnapshotRecord,
+    RuleDataRecord,
+    RulesSnapshotDetailRecord,
+    StoredEntityRecord,
 )
 from standard_annotation_backend.persistence.repositories import AnnotationRepository
 from standard_annotation_backend.persistence.repositories.annotations import (
@@ -71,10 +79,15 @@ __all__ = [
     "DEFAULT_TERMS",
     "SHIPPED_SOURCES",
     "SeedTerm",
+    "active_snapshot",
     "create_job",
+    "deactivate_reference_data",
+    "entity_identifiers",
     "insert_annotation",
+    "seed_entity_catalog",
     "seed_reference_data",
     "set_rule_data",
+    "snapshot_count",
     "unvalidated_create",
     "unvalidated_update",
 ]
@@ -294,7 +307,31 @@ def _succeeded_job(session: Session, job_type: str, source_key: str) -> UUID:
     return job.job_id
 
 
-def _add_subclass_closure(session: Session, version_id: UUID, seed: SeedTerm) -> None:
+def _seeded_snapshot(
+    session: Session, kind: SnapshotKind, source_key: str, job_type: str
+) -> ReferenceSnapshotRecord:
+    """Add an active snapshot of a source, owned by a new succeeded job."""
+    now = datetime.now(UTC)
+    record = ReferenceSnapshotRecord(
+        snapshot_id=uuid4(),
+        kind=kind,
+        source_key=source_key,
+        job_id=_succeeded_job(session, job_type, source_key),
+        source_type="https",
+        source_locator=f"https://example.org/{source_key}",
+        source_revision=None,
+        source_checksum="b" * 64,
+        fetched_at=now,
+        reader_version=current_reader_version(RefreshKindName(kind.value)),
+        active=True,
+        activated_at=now,
+    )
+    session.add(record)
+    session.flush([record])
+    return record
+
+
+def _add_subclass_closure(session: Session, snapshot_id: UUID, seed: SeedTerm) -> None:
     """Store a new GO term's subclass closure: itself and every ancestor.
 
     Each parent's own closure rows supply the ancestors, so parents must be
@@ -306,7 +343,7 @@ def _add_subclass_closure(session: Session, version_id: UUID, seed: SeedTerm) ->
             select(
                 OntologyClosureRecord.object_term_id, OntologyClosureRecord.depth
             ).where(
-                OntologyClosureRecord.version_id == version_id,
+                OntologyClosureRecord.snapshot_id == snapshot_id,
                 OntologyClosureRecord.predicate_id == SUBCLASS_PREDICATE,
                 OntologyClosureRecord.subject_term_id == parent,
             )
@@ -315,7 +352,7 @@ def _add_subclass_closure(session: Session, version_id: UUID, seed: SeedTerm) ->
             depths[ancestor] = min(depths.get(ancestor, depth + 1), depth + 1)
     session.add_all(
         OntologyClosureRecord(
-            version_id=version_id,
+            snapshot_id=snapshot_id,
             subject_term_id=seed.term_id,
             predicate_id=SUBCLASS_PREDICATE,
             object_term_id=ancestor,
@@ -345,45 +382,40 @@ def seed_reference_data(
             `rdfs:subClassOf` closure.
     """
     seeds = [SeedTerm(term) if isinstance(term, str) else term for term in terms]
-    now = datetime.now(UTC)
     with session_factory() as session:
         for key in SHIPPED_SOURCES.keys(RefreshKindName.ONTOLOGY):
             definition = SHIPPED_SOURCES.ontology_definition(key)
             snapshot = session.scalar(
-                select(OntologyMetadataRecord).where(
-                    OntologyMetadataRecord.ontology_key == key,
-                    OntologyMetadataRecord.active.is_(True),
+                select(ReferenceSnapshotRecord).where(
+                    ReferenceSnapshotRecord.kind == SnapshotKind.ONTOLOGY,
+                    ReferenceSnapshotRecord.source_key == key,
+                    ReferenceSnapshotRecord.active.is_(True),
                 )
             )
             if snapshot is None:
-                snapshot = OntologyMetadataRecord(
-                    version_id=uuid4(),
-                    ontology_key=key,
-                    source_type="https",
-                    source_locator=f"https://example.org/{key}.obo",
-                    source_revision=None,
-                    source_checksum="b" * 64,
-                    document_version=None,
-                    loaded_predicates=list(definition.closure_predicates),
-                    identifier_prefixes=list(definition.identifier_prefixes),
-                    refresh_result=None,
-                    job_id=_succeeded_job(session, "ontology_refresh", key),
-                    fetched_at=now,
-                    active=True,
+                snapshot = _seeded_snapshot(
+                    session, SnapshotKind.ONTOLOGY, key, "ontology_refresh"
                 )
-                session.add(snapshot)
-                session.flush([snapshot])
+                session.add(
+                    OntologySnapshotDetailRecord(
+                        snapshot_id=snapshot.snapshot_id,
+                        document_version=None,
+                        loaded_predicates=list(definition.closure_predicates),
+                        identifier_prefixes=list(definition.identifier_prefixes),
+                    )
+                )
+                session.flush()
             stored = set(
                 session.scalars(
                     select(OntologyTermRecord.term_id).where(
-                        OntologyTermRecord.version_id == snapshot.version_id
+                        OntologyTermRecord.snapshot_id == snapshot.snapshot_id
                     )
                 )
             )
             stored_alt_ids = set(
                 session.scalars(
                     select(OntologyAltIdRecord.alt_id).where(
-                        OntologyAltIdRecord.version_id == snapshot.version_id
+                        OntologyAltIdRecord.snapshot_id == snapshot.snapshot_id
                     )
                 )
             )
@@ -394,7 +426,7 @@ def seed_reference_data(
             ]
             session.add_all(
                 OntologyTermRecord(
-                    version_id=snapshot.version_id,
+                    snapshot_id=snapshot.snapshot_id,
                     term_id=seed.term_id,
                     obsolete=seed.obsolete,
                     replaced_by=list(seed.replaced_by),
@@ -407,7 +439,7 @@ def seed_reference_data(
             session.flush()
             session.add_all(
                 OntologyAltIdRecord(
-                    version_id=snapshot.version_id,
+                    snapshot_id=snapshot.snapshot_id,
                     alt_id=alt_id,
                     term_id=seed.term_id,
                 )
@@ -418,25 +450,31 @@ def seed_reference_data(
             if SUBCLASS_PREDICATE in definition.closure_predicates:
                 for seed in owned:
                     if seed.term_id not in stored:
-                        _add_subclass_closure(session, snapshot.version_id, seed)
-        if (
-            session.scalar(
-                select(RulesSnapshotRecord).where(RulesSnapshotRecord.active.is_(True))
+                        _add_subclass_closure(session, snapshot.snapshot_id, seed)
+        rules = session.scalar(
+            select(ReferenceSnapshotRecord).where(
+                ReferenceSnapshotRecord.kind == SnapshotKind.RULES,
+                ReferenceSnapshotRecord.active.is_(True),
             )
-            is None
-        ):
-            session.add(
-                RulesSnapshotRecord(
-                    job_id=_succeeded_job(session, "rules_refresh", "go-site"),
-                    source_type="github",
-                    source_locator="github:geneontology/go-site",
-                    source_revision="c" * 40,
-                    source_checksum="c" * 64,
-                    fetched_at=now,
-                    active=True,
-                    rule_data=STORED_RULE_DATA.dump(DEFAULT_RULE_DATA),
-                    retracted_publication_count=0,
-                )
+        )
+        if rules is None:
+            rules = _seeded_snapshot(
+                session, SnapshotKind.RULES, RULES_SOURCE_KEY, "rules_refresh"
+            )
+            # Read from go-site at a commit, as a rules refresh records it.
+            rules.source_type = "github"
+            rules.source_locator = "github:geneontology/go-site"
+            rules.source_revision = "c" * 40
+            session.add_all(
+                [
+                    RulesSnapshotDetailRecord(
+                        snapshot_id=rules.snapshot_id, retracted_publication_count=0
+                    ),
+                    RuleDataRecord(
+                        snapshot_id=rules.snapshot_id,
+                        data=STORED_RULE_DATA.dump(DEFAULT_RULE_DATA),
+                    ),
+                ]
             )
         session.commit()
 
@@ -459,10 +497,15 @@ def set_rule_data(
     pmids = sorted(set(retracted_pmids))
     with session_factory.begin() as session:
         snapshot = session.scalars(
-            select(RulesSnapshotRecord).where(RulesSnapshotRecord.active.is_(True))
+            select(ReferenceSnapshotRecord).where(
+                ReferenceSnapshotRecord.kind == SnapshotKind.RULES,
+                ReferenceSnapshotRecord.active.is_(True),
+            )
         ).one()
-        snapshot.rule_data = STORED_RULE_DATA.dump(rule_data)
-        snapshot.retracted_publication_count = len(pmids)
+        stored = session.get_one(RuleDataRecord, snapshot.snapshot_id)
+        stored.data = STORED_RULE_DATA.dump(rule_data)
+        detail = session.get_one(RulesSnapshotDetailRecord, snapshot.snapshot_id)
+        detail.retracted_publication_count = len(pmids)
         session.execute(
             delete(RetractedPublicationRecord).where(
                 RetractedPublicationRecord.snapshot_id == snapshot.snapshot_id
@@ -471,6 +514,113 @@ def set_rule_data(
         session.add_all(
             RetractedPublicationRecord(snapshot_id=snapshot.snapshot_id, pmid=pmid)
             for pmid in pmids
+        )
+
+
+def seed_entity_catalog(
+    session_factory: sessionmaker[Session],
+    identifiers: Iterable[str],
+    *,
+    db_object_type: str = "PR:000000001",
+    db_object_taxon_id: str = "NCBITaxon:7955",
+    source_key: str | None = None,
+) -> UUID:
+    """Make `identifiers` active as one new entity catalog and return its snapshot.
+
+    The rows are written directly, so no refresh audit events are recorded.
+    """
+    key = source_key or f"seed-{uuid4().hex}"
+    with session_factory.begin() as session:
+        record = _seeded_snapshot(session, SnapshotKind.ENTITY, key, "entity_refresh")
+        session.add(
+            EntitySnapshotDetailRecord(
+                snapshot_id=record.snapshot_id,
+                source_format="gpi-2.0",
+                source_metadata={},
+                record_statistics={},
+            )
+        )
+        session.add_all(
+            StoredEntityRecord(
+                snapshot_id=record.snapshot_id,
+                db_object_id=identifier,
+                line_number=line_number,
+                entity={
+                    "db_object_id": identifier,
+                    "db_object_type": db_object_type,
+                    "db_object_taxon_id": db_object_taxon_id,
+                    "canonical_object_id": identifier,
+                },
+                db_object_taxon_id=db_object_taxon_id,
+                db_object_type=db_object_type,
+            )
+            for line_number, identifier in enumerate(identifiers, start=1)
+        )
+        return record.snapshot_id
+
+
+def deactivate_reference_data(
+    session_factory: sessionmaker[Session], kind: SnapshotKind, source_key: str
+) -> None:
+    """Leave a source without an active snapshot, as if it had never been loaded."""
+    with session_factory.begin() as session:
+        session.execute(
+            update(ReferenceSnapshotRecord)
+            .where(
+                ReferenceSnapshotRecord.kind == kind,
+                ReferenceSnapshotRecord.source_key == source_key,
+                ReferenceSnapshotRecord.active.is_(True),
+            )
+            .values(active=False)
+        )
+
+
+def active_snapshot(
+    session_factory: sessionmaker[Session], kind: SnapshotKind, source_key: str
+) -> ReferenceSnapshotRecord | None:
+    """Return a source's active snapshot, detached from its session."""
+    with session_factory() as session:
+        return session.scalar(
+            select(ReferenceSnapshotRecord).where(
+                ReferenceSnapshotRecord.kind == kind,
+                ReferenceSnapshotRecord.source_key == source_key,
+                ReferenceSnapshotRecord.active.is_(True),
+            )
+        )
+
+
+def snapshot_count(session_factory: sessionmaker[Session], kind: SnapshotKind) -> int:
+    """Return how many snapshots of a kind are stored, pruned or not."""
+    with session_factory() as session:
+        return int(
+            session.scalar(
+                select(func.count())
+                .select_from(ReferenceSnapshotRecord)
+                .where(ReferenceSnapshotRecord.kind == kind)
+            )
+            or 0
+        )
+
+
+def entity_identifiers(
+    session_factory: sessionmaker[Session], source_key: str
+) -> set[str]:
+    """Return the identifiers of a source's active entity catalog."""
+    with session_factory() as session:
+        return set(
+            session.scalars(
+                select(StoredEntityRecord.db_object_id)
+                .join(
+                    ReferenceSnapshotRecord,
+                    ReferenceSnapshotRecord.snapshot_id
+                    == StoredEntityRecord.snapshot_id,
+                )
+                .where(
+                    ReferenceSnapshotRecord.kind == SnapshotKind.ENTITY,
+                    ReferenceSnapshotRecord.source_key == source_key,
+                    ReferenceSnapshotRecord.active.is_(True),
+                )
+            )
         )
 
 

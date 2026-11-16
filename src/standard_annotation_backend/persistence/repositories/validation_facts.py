@@ -27,10 +27,10 @@ from standard_annotation_backend.domain.semantic_validation.checked_ancestors im
     checked_ancestor_terms,
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
+    RULES_REFERENCE_DATA,
     ActiveSnapshots,
     AnnotationFacts,
     EntityFact,
-    ReferenceDataUnavailableError,
     ReplacementFacts,
     TermFact,
     TermStatus,
@@ -39,24 +39,21 @@ from standard_annotation_backend.domain.semantic_validation.identifiers import (
     split_identifier,
     term_identifiers,
 )
-from standard_annotation_backend.domain.semantic_validation.rule_data import (
-    STORED_RULE_DATA,
-)
 from standard_annotation_backend.domain.term_replacement import replacement_step
 from standard_annotation_backend.persistence.models import (
-    EntityCatalogSnapshotRecord,
-    EntitySourceRecord,
     OntologyAltIdRecord,
     OntologyClosureRecord,
-    OntologyMetadataRecord,
+    OntologySnapshotDetailRecord,
     OntologyTermRecord,
+    ReferenceSnapshotRecord,
     RetractedPublicationRecord,
-    RulesSnapshotRecord,
+    StoredEntityRecord,
+)
+from standard_annotation_backend.persistence.repositories.snapshots import (
+    SnapshotRepository,
 )
 
 _QUERY_BATCH_SIZE = 5_000
-RULES_REFERENCE_DATA = "rules"
-"""The name `ReferenceDataUnavailableError` uses for the go-site rule data."""
 
 
 class ValidationFactsRepository:
@@ -68,6 +65,7 @@ class ValidationFactsRepository:
 
     def __init__(self, session: Session) -> None:
         self.session = session
+        self._snapshots = SnapshotRepository(session)
 
     def gather(
         self,
@@ -81,8 +79,9 @@ class ValidationFactsRepository:
 
         The active snapshots are looked up once, first, and every later query reads
         only those snapshots. One call therefore never mixes two snapshots of an
-        ontology or of the rule data, even if another one activates while it runs.
-        Queries are batched, so one call can handle one annotation or thousands.
+        ontology, the rule data, or an entity catalog, even if another one
+        activates while it runs. Queries are batched, so one call can handle one
+        annotation or thousands.
 
         Besides each identifier's status, the facts include the subsets of each
         term, the checked ancestors of each current GO term and of the entity's
@@ -99,32 +98,40 @@ class ValidationFactsRepository:
                 `lock_for_update`, which find them while holding the write locks.
             ontologies: The configured ontologies and the identifier prefixes each
                 owns.
-            snapshots: Snapshots the caller already looked up with
-                `active_snapshots`, for example a QC report that records which
-                ones it used. Looked up here when omitted.
+            snapshots: Snapshots the caller already resolved with
+                `SnapshotRepository.resolve`, for example a QC report that
+                records which ones it used. They must still be readable;
+                resolved here when omitted.
 
         Returns:
             One `AnnotationFacts` per annotation.
 
         Raises:
             ReferenceDataUnavailableError: If a configured ontology or the go-site
-                rule data has no active snapshot.
-            StoredDataError: If the stored rule data cannot be read.
+                rule data has no active snapshot, or the active rule data was
+                stored by an earlier reader version and can no longer be decoded.
+            SnapshotPrunedError: If `snapshots` were given and one of them was
+                pruned since it was resolved.
+            StoredDataError: If rule data stored by this release's reader
+                version cannot be decoded.
             ValueError: If `peers` and `annotations` differ in length.
         """
         if len(peers) != len(annotations):
             raise ValueError("every annotation needs its duplicate peers")
         if snapshots is None:
-            snapshots = self.active_snapshots(ontologies)
+            snapshots = self._snapshots.resolve(ontologies)
+        else:
+            self._snapshots.require_readable(snapshots.snapshot_ids)
         wanted: dict[UUID, set[str]] = {}
         for annotation in annotations:
             for occurrence in term_identifiers(annotation):
-                version_id = _snapshot_for(occurrence.prefix, ontologies, snapshots)
-                if version_id is not None:
-                    wanted.setdefault(version_id, set()).add(occurrence.identifier)
+                snapshot_id = _snapshot_for(occurrence.prefix, ontologies, snapshots)
+                if snapshot_id is not None:
+                    wanted.setdefault(snapshot_id, set()).add(occurrence.identifier)
         terms = self._term_facts(wanted)
         entities = self._entity_facts(
-            {annotation.db_object_id for annotation in annotations}
+            {annotation.db_object_id for annotation in annotations},
+            snapshots.entity_catalogs.values(),
         )
         go_prefixes = ontologies.go_prefixes
         current_go_terms = {
@@ -211,10 +218,12 @@ class ValidationFactsRepository:
 
         Raises:
             ReferenceDataUnavailableError: If a configured ontology or the go-site
-                rule data has no active snapshot.
-            StoredDataError: If the stored rule data cannot be read.
+                rule data has no active snapshot, or the active rule data was
+                stored by an earlier reader version and can no longer be decoded.
+            StoredDataError: If rule data stored by this release's reader
+                version cannot be decoded.
         """
-        snapshots = self.active_snapshots(ontologies)
+        snapshots = self._snapshots.resolve(ontologies)
         terms: dict[str, TermFact] = {}
         pending = {
             occurrence.identifier
@@ -224,11 +233,11 @@ class ValidationFactsRepository:
         while pending:
             wanted: dict[UUID, set[str]] = {}
             for identifier in pending:
-                version_id = _snapshot_for(
+                snapshot_id = _snapshot_for(
                     split_identifier(identifier)[0], ontologies, snapshots
                 )
-                if version_id is not None:
-                    wanted.setdefault(version_id, set()).add(identifier)
+                if snapshot_id is not None:
+                    wanted.setdefault(snapshot_id, set()).add(identifier)
             found = self._term_facts(wanted)
             terms.update(found)
             pending = {
@@ -245,94 +254,48 @@ class ValidationFactsRepository:
             },
         )
 
-    def active_snapshots(self, ontologies: OntologyCatalog) -> ActiveSnapshots:
-        """Return the active snapshot of each configured ontology and of the rule data.
-
-        Args:
-            ontologies: The configured ontologies. Each must have an active
-                snapshot.
-
-        Raises:
-            ReferenceDataUnavailableError: If any of them has no active snapshot.
-            StoredDataError: If the stored rule data cannot be read.
-        """
-        versions = {
-            key: version_id
-            for key, version_id in self.session.execute(
-                select(
-                    OntologyMetadataRecord.ontology_key,
-                    OntologyMetadataRecord.version_id,
-                ).where(
-                    OntologyMetadataRecord.ontology_key.in_(ontologies.keys),
-                    OntologyMetadataRecord.active.is_(True),
-                )
-            )
-        }
-        missing = set(ontologies.keys) - set(versions)
-        rules = self.session.execute(
-            select(
-                RulesSnapshotRecord.snapshot_id, RulesSnapshotRecord.rule_data
-            ).where(RulesSnapshotRecord.active.is_(True))
-        ).one_or_none()
-        if rules is None:
-            missing.add(RULES_REFERENCE_DATA)
-        if missing:
-            raise ReferenceDataUnavailableError(missing)
-        assert rules is not None
-        return ActiveSnapshots(
-            ontology_versions=versions,
-            rules_snapshot_id=rules.snapshot_id,
-            rule_data=STORED_RULE_DATA.load(rules.rule_data),
-        )
-
     def reference_versions(self, snapshots: ActiveSnapshots) -> ReferenceDataVersions:
-        """Return version details of `snapshots` and of the active entity catalogs.
-
-        QC reports record these to show which data they checked against. Entity
-        facts are not tied to a snapshot; they are always read from the active
-        entity catalogs, so this lists the catalogs active when it runs.
-        """
+        """Return version details of `snapshots`, as QC reports record them."""
         ontology_rows = self.session.execute(
             select(
-                OntologyMetadataRecord.ontology_key,
-                OntologyMetadataRecord.version_id,
-                OntologyMetadataRecord.document_version,
-                OntologyMetadataRecord.source_revision,
+                ReferenceSnapshotRecord.source_key,
+                ReferenceSnapshotRecord.snapshot_id,
+                OntologySnapshotDetailRecord.document_version,
+                ReferenceSnapshotRecord.source_revision,
+            )
+            .join(
+                OntologySnapshotDetailRecord,
+                OntologySnapshotDetailRecord.snapshot_id
+                == ReferenceSnapshotRecord.snapshot_id,
             )
             .where(
-                OntologyMetadataRecord.version_id.in_(
-                    list(snapshots.ontology_versions.values())
+                ReferenceSnapshotRecord.snapshot_id.in_(
+                    sorted(snapshots.ontology_versions.values())
                 )
             )
-            .order_by(OntologyMetadataRecord.ontology_key)
+            .order_by(ReferenceSnapshotRecord.source_key)
         )
         go_site_revision = self.session.scalar(
-            select(RulesSnapshotRecord.source_revision).where(
-                RulesSnapshotRecord.snapshot_id == snapshots.rules_snapshot_id
+            select(ReferenceSnapshotRecord.source_revision).where(
+                ReferenceSnapshotRecord.snapshot_id == snapshots.rules_snapshot_id
             )
-        )
-        catalogs = self.session.execute(
-            select(
-                EntityCatalogSnapshotRecord.source_key,
-                EntityCatalogSnapshotRecord.snapshot_id,
-            )
-            .where(EntityCatalogSnapshotRecord.active.is_(True))
-            .order_by(EntityCatalogSnapshotRecord.source_key)
         )
         return ReferenceDataVersions(
             ontologies=tuple(
                 OntologySnapshotUse(
                     ontology_key=key,
-                    version_id=version_id,
+                    version_id=snapshot_id,
                     document_version=document_version,
                     source_revision=source_revision,
                 )
-                for key, version_id, document_version, source_revision in ontology_rows
+                for key, snapshot_id, document_version, source_revision in (
+                    ontology_rows
+                )
             ),
             go_site_revision=go_site_revision,
             entity_catalogs=tuple(
                 EntityCatalogUse(source_key=source_key, snapshot_id=snapshot_id)
-                for source_key, snapshot_id in catalogs
+                for source_key, snapshot_id in sorted(snapshots.entity_catalogs.items())
             ),
         )
 
@@ -344,11 +307,11 @@ class ValidationFactsRepository:
         `unknown`.
 
         Args:
-            wanted: The identifiers to look up, keyed by the version ID of the
-                snapshot to read them from.
+            wanted: The identifiers to look up, keyed by the ID of the snapshot
+                to read them from.
         """
         facts: dict[str, TermFact] = {}
-        for version_id, identifiers in wanted.items():
+        for snapshot_id, identifiers in wanted.items():
             ordered = sorted(identifiers)
             for batch in batched(ordered, _QUERY_BATCH_SIZE, strict=False):
                 rows = self.session.execute(
@@ -359,7 +322,7 @@ class ValidationFactsRepository:
                         OntologyTermRecord.consider,
                         OntologyTermRecord.subsets,
                     ).where(
-                        OntologyTermRecord.version_id == version_id,
+                        OntologyTermRecord.snapshot_id == snapshot_id,
                         OntologyTermRecord.term_id.in_(batch),
                     )
                 )
@@ -378,7 +341,7 @@ class ValidationFactsRepository:
                     select(
                         OntologyAltIdRecord.alt_id, OntologyAltIdRecord.term_id
                     ).where(
-                        OntologyAltIdRecord.version_id == version_id,
+                        OntologyAltIdRecord.snapshot_id == snapshot_id,
                         OntologyAltIdRecord.alt_id.in_(batch),
                     )
                 )
@@ -388,33 +351,36 @@ class ValidationFactsRepository:
                 facts.setdefault(identifier, TermFact(TermStatus.UNKNOWN))
         return facts
 
-    def _entity_facts(self, identifiers: set[str]) -> dict[str, EntityFact]:
-        """Return the taxon and type of each identifier an entity catalog lists.
+    def _entity_facts(
+        self, identifiers: set[str], snapshot_ids: Collection[UUID]
+    ) -> dict[str, EntityFact]:
+        """Return the taxon and type of each identifier the given catalogs list.
 
-        A source record exists only while its identifier is active. A catalog
-        published before repeated identifiers were rejected may list one
-        identifier on several lines; its first line is used.
+        An identifier is active in at most one catalog, so each has at most one
+        fact.
         """
+        catalogs = sorted(snapshot_ids)
         facts: dict[str, EntityFact] = {}
+        if not catalogs:
+            return facts
         for batch in batched(sorted(identifiers), _QUERY_BATCH_SIZE, strict=False):
             rows = self.session.execute(
                 select(
-                    EntitySourceRecord.db_object_id,
-                    EntitySourceRecord.db_object_taxon_id,
-                    EntitySourceRecord.db_object_type,
-                )
-                .where(EntitySourceRecord.db_object_id.in_(batch))
-                .order_by(
-                    EntitySourceRecord.db_object_id, EntitySourceRecord.line_number
+                    StoredEntityRecord.db_object_id,
+                    StoredEntityRecord.db_object_taxon_id,
+                    StoredEntityRecord.db_object_type,
+                ).where(
+                    StoredEntityRecord.snapshot_id.in_(catalogs),
+                    StoredEntityRecord.db_object_id.in_(batch),
                 )
             )
             for db_object_id, taxon, entity_type in rows:
-                facts.setdefault(db_object_id, EntityFact(taxon, entity_type))
+                facts[db_object_id] = EntityFact(taxon, entity_type)
         return facts
 
     def _checked_ancestors(
         self,
-        version_id: UUID,
+        snapshot_id: UUID,
         term_ids: Collection[str],
         checked_ancestors: frozenset[str],
     ) -> dict[str, frozenset[str]]:
@@ -425,7 +391,7 @@ class ValidationFactsRepository:
         term that is itself a checked ancestor lists itself.
 
         Args:
-            version_id: The GO snapshot to read.
+            snapshot_id: The GO snapshot to read.
             term_ids: The terms to look up.
             checked_ancestors: The GO terms to test each term against.
         """
@@ -436,7 +402,7 @@ class ValidationFactsRepository:
                     OntologyClosureRecord.subject_term_id,
                     OntologyClosureRecord.object_term_id,
                 ).where(
-                    OntologyClosureRecord.version_id == version_id,
+                    OntologyClosureRecord.snapshot_id == snapshot_id,
                     OntologyClosureRecord.predicate_id == SUBCLASS_PREDICATE,
                     OntologyClosureRecord.subject_term_id.in_(batch),
                     OntologyClosureRecord.object_term_id.in_(sorted(checked_ancestors)),

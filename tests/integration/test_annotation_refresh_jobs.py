@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 from annotation_refresh_helpers import gpad_bytes, gpad_row, seed_group_import
-from refresh_helpers import TEST_SOURCES, FakeFetchers, build_runner, ignore_progress
+from refresh_helpers import FakeFetchers, build_runner
 from seeding import create_job
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,25 +15,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationManagementMode,
 )
-from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.domain.refresh import RefreshKindName
-from standard_annotation_backend.persistence.locks import (
-    LockNamespace,
-    bind_try_lock,
-    try_advisory_lock,
-)
 from standard_annotation_backend.persistence.models import (
+    AnnotationImportRecord,
     AnnotationRecord,
     AnnotationStagingRecord,
-    AuditEventRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh.runner import RefreshRunner
-from standard_annotation_backend.services.annotation_refresh_service import (
-    AnnotationRefreshBusyError,
-    AnnotationRefreshService,
-)
 from standard_annotation_backend.services.job_service import JobService
 
 SOURCE = "mgi-gpad"
@@ -189,7 +178,8 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
 ) -> None:
     """A failed job records its failure code and details and keeps the group's data.
 
-    The group stays `gpad_imported`, and no staged annotations are left behind.
+    The group stays `gpad_imported`, and the failed job stores no staged
+    annotations and no import.
     """
     existing = gpad_bytes(gpad_row("UniProtKB:P12345", reference="PMID:7"))
     runner_for(FakeFetchers({SOURCE: existing})).run(_job(unit_of_work_factory))
@@ -208,14 +198,18 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
     with unit_of_work_factory() as uow:
         mode = uow.annotation_imports.group_mode("MGI")
     assert mode is AnnotationManagementMode.GPAD_IMPORTED
-    # Leftover staging has no effect any client can see; it only occupies
-    # storage. Counting staging rows is the only way to check that the failure
-    # removed it.
+    # Staging rows have no effect any client can see; counting them is the only
+    # way to check that the failed job left none behind.
     with session_factory() as session:
         assert (
-            session.scalar(select(func.count()).select_from(AnnotationStagingRecord))
+            session.scalar(
+                select(func.count())
+                .select_from(AnnotationStagingRecord)
+                .where(AnnotationStagingRecord.job_id == job_id)
+            )
             == 0
         )
+        assert session.get(AnnotationImportRecord, job_id) is None
 
 
 def test_job_for_a_sabe_managed_group_fails_with_group_sabe_managed(
@@ -236,89 +230,3 @@ def test_job_for_a_sabe_managed_group_fails_with_group_sabe_managed(
     runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)
 
     assert jobs.find(job_id).progress["failure_code"] == "group_sabe_managed"
-
-
-def test_redelivery_after_publication_recovers_without_fetching(
-    jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """A job that published before its worker stopped succeeds without refetching.
-
-    It reports the published result, and delivering the finished job again
-    changes nothing. The publication is audited once.
-    """
-    job_id = _job(unit_of_work_factory)
-    job = jobs.start(job_id)
-    service = AnnotationRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
-    )
-    service.apply(
-        job,
-        FakeFetchers({SOURCE: GOOD}).fetch(
-            SOURCE, TEST_SOURCES.source(RefreshKindName.ANNOTATION, SOURCE)
-        ),
-        ignore_progress,
-    )
-    fetchers = FakeFetchers({})
-
-    runner_for(fetchers).run(job_id)
-    recovered = jobs.find(job_id)
-    runner_for(fetchers).run(job_id)
-
-    assert recovered.status is JobStatus.SUCCEEDED
-    assert recovered.result is not None
-    assert (recovered.result["annotations_published"], recovered.result["mode"]) == (
-        1,
-        "gpad_imported",
-    )
-    assert jobs.find(job_id) == recovered
-    assert fetchers.calls == []
-    assert _group_annotations(session_factory) == 1
-    with session_factory() as session:
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AuditEventRecord)
-                .where(
-                    AuditEventRecord.action == AuditAction.ANNOTATION_REFRESH_PUBLISHED
-                )
-            )
-            == 1
-        )
-
-
-def test_busy_group_lock_leaves_the_job_running_for_a_retry(
-    unit_of_work_factory: UnitOfWorkFactory,
-    jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
-    database_engine: Engine,
-) -> None:
-    """While another worker holds a group's lock, that group's job waits for a retry.
-
-    The run raises a retryable error and leaves the job running, while a job for
-    another group runs to completion. A later run of the waiting job succeeds.
-    """
-    job_id = _job(unit_of_work_factory)
-    other_group = create_job(
-        unit_of_work_factory,
-        job_type=JobType.ANNOTATION_REFRESH,
-        requested_by="curator",
-        parameters={"source_key": "rgd-gpad"},
-    ).job_id
-
-    with try_advisory_lock(
-        database_engine, LockNamespace.ANNOTATION_GROUP, "MGI"
-    ) as acquired:
-        assert acquired
-        with pytest.raises(AnnotationRefreshBusyError):
-            runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)
-        runner_for(FakeFetchers({"rgd-gpad": GOOD})).run(other_group)
-
-        assert jobs.find(job_id).status is JobStatus.RUNNING
-        assert jobs.find(other_group).status is JobStatus.SUCCEEDED
-
-    runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)
-    assert jobs.find(job_id).status is JobStatus.SUCCEEDED

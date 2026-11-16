@@ -19,6 +19,7 @@ from standard_annotation_backend.persistence.repositories import (
     OntologyRepository,
     QcReportRepository,
     RulesRepository,
+    SnapshotRepository,
     ValidationFactsRepository,
 )
 from standard_annotation_backend.persistence.repositories.auth import (
@@ -53,6 +54,7 @@ class SqlAlchemyUnitOfWork:
         self.ontologies: OntologyRepository
         self.entities: EntityRepository
         self.rules: RulesRepository
+        self.snapshots: SnapshotRepository
         self.qc_reports: QcReportRepository
         self.validation_facts: ValidationFactsRepository
 
@@ -69,6 +71,7 @@ class SqlAlchemyUnitOfWork:
         self.ontologies = OntologyRepository(self._session)
         self.entities = EntityRepository(self._session)
         self.rules = RulesRepository(self._session)
+        self.snapshots = SnapshotRepository(self._session)
         self.qc_reports = QcReportRepository(self._session)
         self.validation_facts = ValidationFactsRepository(self._session)
         return self

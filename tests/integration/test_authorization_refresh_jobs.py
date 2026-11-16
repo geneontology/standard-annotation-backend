@@ -15,7 +15,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.config import get_settings
-from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
@@ -24,7 +23,6 @@ from standard_annotation_backend.persistence.models import (
 )
 from standard_annotation_backend.persistence.repositories.auth import AuthRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.job_service import JobService
 from standard_annotation_backend.workers import tasks
 
 VALID_SOURCE = """
@@ -217,86 +215,7 @@ def test_redelivery_after_success_does_not_repeat_audit_work(
     assert after == before
 
 
-def test_redelivery_after_committed_refresh_fetches_again_and_applies_nothing(
-    worker_environment: None,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A crash after the refresh commits resumes the job without replacing grants."""
-    job_id = _create_job(unit_of_work_factory)
-    requests = _install_github(
-        monkeypatch,
-        [(SHA, VALID_SOURCE.encode()), (SHA, VALID_SOURCE.encode())],
-    )
-    original_succeed = JobService.succeed
-
-    class WorkerCrash(BaseException):
-        pass
-
-    def crash_after_refresh(self: JobService, *args: object, **kwargs: object):
-        raise WorkerCrash
-
-    monkeypatch.setattr(JobService, "succeed", crash_after_refresh)
-    with pytest.raises(WorkerCrash):
-        tasks.run_refresh.run(str(job_id))
-    crashed = _load_job(unit_of_work_factory, job_id)
-    assert crashed.status == JobStatus.RUNNING.value
-    monkeypatch.setattr(JobService, "succeed", original_succeed)
-
-    tasks.run_refresh.run(str(job_id))
-
-    job = _load_job(unit_of_work_factory, job_id)
-    assert job.status == JobStatus.SUCCEEDED.value
-    assert job.result is not None and job.result["unchanged"] is True
-    assert job.parameters == {"source_key": "go-site"}
-    # Each attempt resolves the commit and downloads the file again.
-    assert len(requests) == 4
-    with session_factory() as session:
-        assert (
-            session.scalar(select(func.count()).select_from(AuthorizationRefreshRecord))
-            == 1
-        )
-        refreshed_audits = session.scalar(
-            select(func.count())
-            .select_from(AuditEventRecord)
-            .where(AuditEventRecord.action == AuditAction.AUTHORIZATION_REFRESHED.value)
-        )
-        assert refreshed_audits == 1
-
-
-def test_two_jobs_for_same_sha_share_one_applied_refresh(
-    worker_environment: None,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Distinct jobs may resolve one revision while only one replaces authorizations."""
-    first_id = _create_job(unit_of_work_factory)
-    second_id = _create_job(unit_of_work_factory)
-    _install_github(
-        monkeypatch,
-        [(SHA, VALID_SOURCE.encode()), (SHA, VALID_SOURCE.encode())],
-    )
-
-    tasks.run_refresh.run(str(first_id))
-    tasks.run_refresh.run(str(second_id))
-
-    first = _load_job(unit_of_work_factory, first_id)
-    second = _load_job(unit_of_work_factory, second_id)
-    assert first.status == second.status == JobStatus.SUCCEEDED.value
-    assert first.result is not None and second.result is not None
-    assert first.result["refresh_id"] == second.result["refresh_id"]
-    assert first.result["unchanged"] is False
-    assert second.result["unchanged"] is True
-    with session_factory() as session:
-        assert (
-            session.scalar(select(func.count()).select_from(AuthorizationRefreshRecord))
-            == 1
-        )
-
-
-def test_scheduler_creates_job_before_dispatch_and_records_publication_failure(
+def test_scheduler_creates_job_before_dispatch_and_records_dispatch_failure(
     worker_environment: None,
     unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,

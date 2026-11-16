@@ -9,25 +9,18 @@ from time import monotonic
 from typing import Any
 from uuid import UUID
 
-import pytest
-from annotation_refresh_helpers import gpad_bytes, gpad_row, gpad_text
+from annotation_refresh_helpers import gpad_bytes, gpad_row
 from psycopg import Cursor
-from refresh_helpers import TEST_SOURCES, ignore_progress, source_document
+from refresh_helpers import TEST_SOURCES, apply_in_transaction, source_document
 from seeding import unvalidated_create
 from sqlalchemy import Engine, event, select, text
 from sqlalchemy.orm import Session, sessionmaker
-from test_annotation_refresh_service import GROUP, SOURCE, create_job, stage
+from test_annotation_refresh_service import GROUP, SOURCE, create_job
 from test_entity_refresh_concurrency import TIMEOUT, wait_for_lock
 
-from standard_annotation_backend.domain.annotation_management import (
-    AnnotationManagementMode,
-    GroupSabeManagedError,
-)
 from standard_annotation_backend.domain.annotations import Annotation
-from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.persistence.locks import (
     GLOBAL_ANNOTATION_WRITE_LOCK_KEY,
-    bind_try_lock,
 )
 from standard_annotation_backend.persistence.models import (
     AnnotationMultivaluedFieldValueRecord,
@@ -133,23 +126,6 @@ def wait_until_blocked_by(engine: Engine, waiter_pid: int, holder_pid: int) -> N
     raise AssertionError("connection did not wait on the paused publication")
 
 
-def publish(
-    unit_of_work_factory: UnitOfWorkFactory, job_id: UUID, actor_id: str
-) -> None:
-    """Publish a job's committed staging in its own transaction, without an audit."""
-    with unit_of_work_factory() as uow:
-        uow.annotation_imports.publish(job_id, actor_id=actor_id)
-        uow.commit()
-
-
-def group_mode(
-    unit_of_work_factory: UnitOfWorkFactory, group_key: str = GROUP
-) -> AnnotationManagementMode:
-    """Return whether GPAD or SABE currently manages `group_key`."""
-    with unit_of_work_factory() as uow:
-        return uow.annotation_imports.group_mode(group_key)
-
-
 def group_rows(
     session_factory: sessionmaker[Session], group_key: str = GROUP
 ) -> list[tuple[str, list[str]]]:
@@ -179,9 +155,7 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
     seed_annotation("UniProtKB:Q99999")
     old_rows = group_rows(session_factory)
     assert [origin for origin, _ in old_rows] == ["direct"]
-    service = AnnotationRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
-    )
+    service = AnnotationRefreshService(TEST_SOURCES)
     job = create_job(unit_of_work_factory)
     document = source_document(
         SOURCE,
@@ -214,7 +188,9 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
         pause_first_publication(database_engine) as pause,
         ThreadPoolExecutor(max_workers=2) as pool,
     ):
-        published = pool.submit(service.apply, job, document, ignore_progress)
+        published = pool.submit(
+            apply_in_transaction, unit_of_work_factory, service, job, document
+        )
         assert pause.reached.wait(TIMEOUT)
         assert pause.publisher_pid is not None
         assert group_rows(session_factory) == old_rows
@@ -237,46 +213,3 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
         ("import", ["PMID:2"]),
     ]
     assert group_rows(session_factory, "RGD") == [("direct", ["PMID:42"])]
-
-
-def test_refresh_waiting_on_a_cutover_cannot_overwrite_the_sabe_managed_group(
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    seed_active_subjects: Callable[..., None],
-) -> None:
-    """An ordinary refresh staged before a cutover fails once the cutover commits.
-
-    The refresh publication waits while the cutover publishes. After the cutover
-    commits, the refresh rejects the now SABE-managed group with
-    `GroupSabeManagedError`, and the group keeps the cutover's annotations.
-    """
-    seed_active_subjects("UniProtKB:P12345")
-    service = AnnotationRefreshService(
-        unit_of_work_factory, TEST_SOURCES, bind_try_lock(database_engine)
-    )
-    refresh = create_job(unit_of_work_factory)
-    cutover = create_job(unit_of_work_factory, JobType.ANNOTATION_CUTOVER)
-    stage(service, refresh, gpad_text(gpad_row("UniProtKB:P12345", reference="PMID:1")))
-    stage(service, cutover, gpad_text(gpad_row("UniProtKB:P12345", reference="PMID:2")))
-    with (
-        pause_first_publication(database_engine) as pause,
-        ThreadPoolExecutor(max_workers=2) as pool,
-    ):
-        first = pool.submit(publish, unit_of_work_factory, cutover.job_id, "admin")
-        assert pause.reached.wait(TIMEOUT)
-        assert pause.publisher_pid is not None
-        second = pool.submit(publish, unit_of_work_factory, refresh.job_id, "scheduler")
-        assert pause.waiter_started.wait(TIMEOUT)
-        assert pause.waiter_pid is not None
-        wait_until_blocked_by(database_engine, pause.waiter_pid, pause.publisher_pid)
-        assert not second.done()
-        pause.release.set()
-        first.result(timeout=TIMEOUT)
-        with pytest.raises(GroupSabeManagedError):
-            second.result(timeout=TIMEOUT)
-
-    assert group_mode(unit_of_work_factory) is AnnotationManagementMode.SABE_MANAGED
-    with unit_of_work_factory() as uow:
-        assert uow.annotation_imports.published_import(refresh.job_id) is None
-    assert group_rows(session_factory) == [("import", ["PMID:2"])]

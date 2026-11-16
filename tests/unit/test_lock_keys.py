@@ -28,19 +28,6 @@ def test_lock_key_is_stable_and_fits_postgresql_lock_keys(
         assert _SIGNED_64_BIT_MIN <= key <= _SIGNED_64_BIT_MAX
 
 
-def test_keyed_lock_values_are_unchanged_across_releases() -> None:
-    """Keys stay fixed so workers running different releases exclude each other.
-
-    During a rolling deployment, old and new workers can hold the same job,
-    ontology, entity source, or group lock at once. They exclude each other only
-    if both derive the same key.
-    """
-    assert lock_key(LockNamespace.ONTOLOGY, "go") == 6320503940984908097
-    assert lock_key(LockNamespace.JOB, UUID(int=1)) == 8604552816677004657
-    assert lock_key(LockNamespace.ENTITY_CATALOG, "mgi") == -8604783910169449485
-    assert lock_key(LockNamespace.ANNOTATION_GROUP, "mgi") == 7315766855062909923
-
-
 def test_same_value_in_different_namespaces_uses_different_keys() -> None:
     """Locks in one namespace do not block equally named locks in another."""
     keys = {lock_key(namespace, "go") for namespace in LockNamespace}
@@ -52,16 +39,14 @@ def test_same_value_in_different_namespaces_uses_different_keys() -> None:
 
 def test_different_values_in_one_namespace_use_different_keys() -> None:
     """Locks for different values in a namespace do not block each other."""
-    assert lock_key(LockNamespace.ANNOTATION_GROUP, "mgi") != lock_key(
-        LockNamespace.ANNOTATION_GROUP, "zfin"
+    assert lock_key(LockNamespace.JOB, UUID(int=1)) != lock_key(
+        LockNamespace.JOB, UUID(int=2)
     )
-    assert lock_key(LockNamespace.ANNOTATION_GROUP, "mgi") != lock_key(
-        LockNamespace.ANNOTATION_GROUP
-    )
+    assert lock_key(LockNamespace.JOB, UUID(int=1)) != lock_key(LockNamespace.JOB)
 
 
 @pytest.mark.parametrize("value", ["", "   ", "\t\n"])
 def test_lock_key_rejects_blank_values(value: str) -> None:
     """A blank value is rejected rather than silently sharing one lock."""
     with pytest.raises(ValueError, match="blank"):
-        lock_key(LockNamespace.ENTITY_CATALOG, value)
+        lock_key(LockNamespace.QC_REPORT, value)

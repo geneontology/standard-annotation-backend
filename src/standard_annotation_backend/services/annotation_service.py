@@ -27,6 +27,7 @@ from standard_annotation_backend.domain.ontology import (
     GO_ONTOLOGY_KEY,
     OntologyCatalog,
 )
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
@@ -324,17 +325,27 @@ class AnnotationService:
         authorize_role(context, PermissionAction.ANNOTATION_READ)
         scope = ownership_scope(context)
         with self._unit_of_work_factory() as unit_of_work:
+            closure_snapshot_id: UUID | None = None
             if criteria.ontology_class_id_closure is not None:
-                active = unit_of_work.ontologies.get_active(GO_ONTOLOGY_KEY)
-                if active is None:
+                go = unit_of_work.snapshots.lock_active(
+                    SnapshotKind.ONTOLOGY, GO_ONTOLOGY_KEY
+                )
+                if go is None:
                     raise OntologyUnavailableError
-                if criteria.ontology_class_id_closure not in active.loaded_predicates:
+                detail = unit_of_work.ontologies.detail(go.snapshot_id)
+                if (
+                    detail is None
+                    or criteria.ontology_class_id_closure
+                    not in detail.loaded_predicates
+                ):
                     raise UnsupportedClosurePredicateError("ontology_class_id_closure")
+                closure_snapshot_id = go.snapshot_id
             page = unit_of_work.annotations.list_active(
                 criteria,
                 scope,
                 limit=limit,
                 offset=offset,
+                closure_snapshot_id=closure_snapshot_id,
             )
             result = ResultPage.from_page(
                 page, _current_annotation, limit=limit, offset=offset

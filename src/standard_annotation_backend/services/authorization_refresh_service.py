@@ -1,9 +1,8 @@
 """Run authorization refresh jobs for `RefreshRunner` from the go-site `users.yaml`.
 
-The complete document is validated before anything changes, and the replacement
-of users and grants commits in one transaction with its record and audit event.
-There is no staging to recover. A redelivered job fetches again, and `apply`
-recognizes the committed refresh as the current state.
+The complete document is validated before anything changes. The replacement of
+users and grants, its record, and its audit event commit in the job's
+transaction.
 """
 
 from dataclasses import dataclass
@@ -24,7 +23,6 @@ from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     RefreshOutcome,
     SourceDocument,
-    SourceProvenance,
     TerminalRefreshError,
     validation_failure_details,
 )
@@ -37,7 +35,6 @@ from standard_annotation_backend.persistence.repositories.auth import (
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
-    UnitOfWorkFactory,
 )
 from standard_annotation_backend.refresh.fetchers import SourceError
 from standard_annotation_backend.services.audit_service import AuditService
@@ -96,14 +93,7 @@ STORED_AUTHORIZATION_REFRESH_RESULT = StoredJson(
 
 
 class AuthorizationRefreshService:
-    """Validate the complete source before replacing the local authorization state.
-
-    Args:
-        unit_of_work_factory: Factory for the transaction shared by auth and audit.
-    """
-
-    def __init__(self, unit_of_work_factory: UnitOfWorkFactory) -> None:
-        self._unit_of_work_factory = unit_of_work_factory
+    """Validate the complete source before replacing the local authorization state."""
 
     @property
     def name(self) -> RefreshKindName:
@@ -115,141 +105,86 @@ class AuthorizationRefreshService:
         """Return `authorization_refresh`."""
         return frozenset({JobType.AUTHORIZATION_REFRESH})
 
-    def recover(self, job: Job) -> RefreshOutcome | None:
-        """Return `None`; `apply` recognizes a committed refresh as unchanged."""
-        return None
-
     def apply(
-        self, job: Job, document: SourceDocument, report: ProgressReporter
+        self,
+        unit_of_work: SqlAlchemyUnitOfWork,
+        job: Job,
+        document: SourceDocument,
+        report: ProgressReporter,
     ) -> RefreshOutcome:
         """Validate the complete document, then replace users and grants.
 
-        A document identical to the one behind the most recent refresh is not
-        applied again.
+        A document whose content the most recent refresh already holds, read
+        with the same reader version, is not applied again. Raw YAML and
+        unrelated fields are never stored.
 
         Raises:
             SourceError: With `invalid_utf8` if the bytes are not UTF-8.
             TerminalRefreshError: With `invalid_document` if validation fails.
+            StoredDataError: If a stored summary has invalid counts.
         """
-        current = self._current(document.provenance)
-        if current is not None:
-            return _outcome(current, unchanged=True)
+        latest = unit_of_work.auth.latest_refresh()
+        if latest is not None and same_refresh_source(latest, document.provenance):
+            summary = STORED_AUTHORIZATION_SUMMARY.load(latest.summary)
+            return _outcome(_result(latest, summary), unchanged=True)
         try:
             yaml_text = document.content.decode("utf-8")
         except UnicodeDecodeError:
             raise SourceError(RefreshFailureCode.INVALID_UTF8) from None
         try:
-            result, applied = self._replace(
-                yaml_text,
-                document.provenance,
-                actor_id=job.requested_by,
-                job_id=job.job_id,
-            )
+            users, summary = _users(yaml_text)
         except InvalidUsersDocumentError as error:
             raise TerminalRefreshError(
                 failure_code=RefreshFailureCode.INVALID_DOCUMENT,
                 failure_details=validation_failure_details(error.errors),
             ) from None
-        # Another job may have applied this same document first.
-        return _outcome(result, unchanged=not applied)
-
-    def discard_staging(self, uow: SqlAlchemyUnitOfWork, job_id: UUID) -> None:
-        """Do nothing; authorization refreshes have no staging."""
-
-    def after_terminal(self, source_key: str) -> None:
-        """Do nothing; authorization refreshes have no follow-up work."""
-
-    def _replace(
-        self,
-        yaml_text: str,
-        provenance: SourceProvenance,
-        *,
-        actor_id: str,
-        job_id: UUID,
-    ) -> tuple[AuthorizationRefreshResult, bool]:
-        """Replace users and grants, saving source details and audit in one commit.
-
-        Any persistence or audit failure rolls back the entire operation. Raw
-        YAML and unrelated fields are never written to storage or audit records.
-        A document identical to the one behind the most recent refresh is not
-        applied again.
-
-        Args:
-            yaml_text: Complete go-site users.yaml contents.
-            provenance: Identifies the exact document that `yaml_text` came from.
-            actor_id: Identity recorded on the audit event.
-            job_id: Job that requested the refresh.
-
-        Returns:
-            Source details with active user, group, and assignment counts, and
-            whether this call applied the document. `False` means the most
-            recent refresh already came from the same document.
-
-        Raises:
-            InvalidUsersDocumentError: If any source entry or YAML is invalid.
-            StoredDataError: If a stored summary has invalid counts.
-        """
-        document = parse_users_yaml(yaml_text)
-        users = tuple(
-            SyncUser(
-                github_login=user.accounts.github,
-                display_name=user.nickname,
-                authorizations=tuple(
-                    SyncAuthorization(
-                        role=grant.role, scope=grant.scope, group_id=grant.group
-                    )
-                    for grant in user.authorizations.sabe
-                ),
-            )
-            for user in document.root
-            if user.accounts.github is not None
-        )
-        groups = {
-            grant.group_id
-            for user in users
-            for grant in user.authorizations
-            if grant.group_id is not None
-        }
-        assignment_count = sum(len(user.authorizations) for user in users)
-        summary = AuthorizationRefreshSummary(
-            users=len(users), groups=len(groups), assignments=assignment_count
-        )
         stored_summary = STORED_AUTHORIZATION_SUMMARY.dump(summary)
-        with self._unit_of_work_factory() as unit_of_work:
-            replacement = unit_of_work.auth.replace_authorizations(
-                users=users,
-                provenance=provenance,
-                summary=stored_summary,
-            )
-            record = replacement.record
-            if not replacement.applied:
-                summary = STORED_AUTHORIZATION_SUMMARY.load(record.summary)
-            result = _result(record, summary)
-            if replacement.applied:
-                AuditService(unit_of_work.audit).record_authorization_refreshed(
-                    actor_id=actor_id,
-                    job_id=job_id,
-                    details={**result.to_job_result(), **stored_summary},
+        record = unit_of_work.auth.replace_authorizations(
+            users=users, provenance=document.provenance, summary=stored_summary
+        )
+        result = _result(record, summary)
+        AuditService(unit_of_work.audit).record_authorization_refreshed(
+            actor_id=job.requested_by,
+            job_id=job.job_id,
+            details={**result.to_job_result(), **stored_summary},
+        )
+        return _outcome(result, unchanged=False)
+
+
+def _users(
+    yaml_text: str,
+) -> tuple[tuple[SyncUser, ...], AuthorizationRefreshSummary]:
+    """Validate `users.yaml` and return its GitHub-linked users and their counts.
+
+    Raises:
+        InvalidUsersDocumentError: If any entry or the YAML is invalid.
+    """
+    document = parse_users_yaml(yaml_text)
+    users = tuple(
+        SyncUser(
+            github_login=user.accounts.github,
+            display_name=user.nickname,
+            authorizations=tuple(
+                SyncAuthorization(
+                    role=grant.role, scope=grant.scope, group_id=grant.group
                 )
-            unit_of_work.commit()
-        return result, replacement.applied
-
-    def _current(
-        self, provenance: SourceProvenance
-    ) -> AuthorizationRefreshResult | None:
-        """Return the stored result when the current state came from this document.
-
-        The comparison uses the most recent refresh only, so returning to an older
-        document applies it again.
-
-        Raises:
-            StoredDataError: If the stored counts are invalid.
-        """
-        with self._unit_of_work_factory() as unit_of_work:
-            latest = unit_of_work.auth.latest_refresh()
-            if latest is None or not same_refresh_source(latest, provenance):
-                return None
-            return _result(latest, STORED_AUTHORIZATION_SUMMARY.load(latest.summary))
+                for grant in user.authorizations.sabe
+            ),
+        )
+        for user in document.root
+        if user.accounts.github is not None
+    )
+    groups = {
+        grant.group_id
+        for user in users
+        for grant in user.authorizations
+        if grant.group_id is not None
+    }
+    return users, AuthorizationRefreshSummary(
+        users=len(users),
+        groups=len(groups),
+        assignments=sum(len(user.authorizations) for user in users),
+    )
 
 
 def _result(

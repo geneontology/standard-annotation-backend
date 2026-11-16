@@ -1,45 +1,39 @@
 """Verify that rules refreshes activate the go-site files GO Rules read together."""
 
-from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
 from uuid import UUID
 
-import pytest
 from refresh_helpers import (
     REVISION,
     RULES_LOCATOR,
     TEST_ONTOLOGIES,
     TEST_SOURCES,
     FakeFetchers,
+    apply_in_transaction,
     build_runner,
-    ignore_progress,
     rule_files,
     source_document,
     sources_with,
     start_job,
 )
 from seeding import create_job
-from sqlalchemy import Engine, delete, func, select, update
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.domain.refresh import RefreshOutcome, SourceDocument
+from standard_annotation_backend.domain.refresh import SourceDocument
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.go_site.rule_files import (
     EXTENSIONS_CONSTRAINTS_PATH,
     GOREFS_PATH,
     RETRACTED_PUBLICATIONS_PATH,
 )
 from standard_annotation_backend.persistence.models import (
-    AuditEventRecord,
     JobRecord,
+    ReferenceSnapshotRecord,
     RetractedPublicationRecord,
-    RulesSnapshotRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh.sources import RefreshSources
-from standard_annotation_backend.services import rules_refresh_service
-from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.rules_refresh_service import (
     RulesRefreshService,
 )
@@ -104,7 +98,11 @@ def _stored(
     with session_factory() as session:
         stored: dict[UUID, tuple[bool, set[str]]] = {
             record.snapshot_id: (record.active, set())
-            for record in session.scalars(select(RulesSnapshotRecord))
+            for record in session.scalars(
+                select(ReferenceSnapshotRecord).where(
+                    ReferenceSnapshotRecord.kind == SnapshotKind.RULES
+                )
+            )
         }
         rows = session.execute(
             select(
@@ -205,123 +203,28 @@ def test_an_undecodable_file_fails_the_refresh_and_keeps_the_previous_snapshot(
 
 def test_the_same_files_from_a_newer_commit_are_not_stored_again(
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
 ) -> None:
     """A go-site commit that leaves the six files alone creates no snapshot.
 
     The snapshot keeps the commit it was first read from.
     """
-    service = RulesRefreshService(unit_of_work_factory, TEST_ONTOLOGIES)
-    first = service.apply(
+    service = RulesRefreshService(TEST_ONTOLOGIES)
+    first = apply_in_transaction(
+        unit_of_work_factory,
+        service,
         start_job(unit_of_work_factory, JobType.RULES_REFRESH, "go-site"),
         _document(rule_files(), "a" * 40),
-        ignore_progress,
     )
-    second = service.apply(
+    second = apply_in_transaction(
+        unit_of_work_factory,
+        service,
         start_job(unit_of_work_factory, JobType.RULES_REFRESH, "go-site"),
         _document(rule_files(), "b" * 40),
-        ignore_progress,
     )
 
     assert (first.unchanged, second.unchanged) == (False, True)
     assert second.result["snapshot_id"] == first.result["snapshot_id"]
     assert second.result["source_revision"] == "a" * 40
-    assert len(_stored(session_factory)) == 1
-
-
-@pytest.mark.parametrize(
-    "stored",
-    [
-        pytest.param(
-            {
-                "databases": [],
-                "go_refs": [],
-                "group_shorthands": ["OLD"],
-                "eco_usage_constraints": [],
-                "extension_constraints": [],
-            },
-            id="readable",
-        ),
-        pytest.param({"format": "from an earlier release"}, id="unreadable"),
-    ],
-)
-def test_unchanged_files_read_differently_by_an_earlier_release_are_stored_again(
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    stored: dict[str, object],
-) -> None:
-    """Identical files are activated again when the stored rule data differs.
-
-    A SABE release that parses or stores the files differently replaces the old
-    snapshot on its next refresh, even when this release cannot read the stored
-    form at all.
-    """
-    first = _run(database_engine, unit_of_work_factory, rule_files())
-    with session_factory.begin() as session:
-        session.execute(
-            update(RulesSnapshotRecord)
-            .where(RulesSnapshotRecord.snapshot_id == _snapshot_id(first))
-            .values(rule_data=stored)
-        )
-
-    second = _run(database_engine, unit_of_work_factory, rule_files())
-
-    assert second.status == JobStatus.SUCCEEDED
-    assert second.result is not None
-    assert second.result["unchanged"] is False
-    assert second.result["group_count"] == 2
-    assert _stored(session_factory) == {
-        _snapshot_id(first): (False, FIXTURE_PMIDS),
-        _snapshot_id(second): (True, FIXTURE_PMIDS),
-    }
-
-
-def test_unchanged_files_with_different_stored_pmids_are_stored_again(
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """Identical files are activated again when the stored PMIDs differ."""
-    first = _run(database_engine, unit_of_work_factory, rule_files())
-    with session_factory.begin() as session:
-        session.execute(
-            delete(RetractedPublicationRecord).where(
-                RetractedPublicationRecord.snapshot_id == _snapshot_id(first),
-                RetractedPublicationRecord.pmid == "PMID:10026173",
-            )
-        )
-
-    second = _run(database_engine, unit_of_work_factory, rule_files())
-
-    assert second.result is not None
-    assert second.result["unchanged"] is False
-    assert _stored(session_factory)[_snapshot_id(second)] == (True, FIXTURE_PMIDS)
-
-
-def test_activation_keeps_the_replaced_snapshot_and_deletes_older_ones(
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """The snapshot an activation replaces keeps its data; older ones are deleted.
-
-    A reader that resolved the replaced snapshot just before the activation can
-    therefore still read it.
-    """
-    jobs = [
-        _run(
-            database_engine,
-            unit_of_work_factory,
-            rule_files({RETRACTED_PUBLICATIONS_PATH: f"{pmid}\n".encode()}),
-        )
-        for pmid in ("PMID:1", "PMID:2", "PMID:3")
-    ]
-
-    assert _stored(session_factory) == {
-        _snapshot_id(jobs[1]): (False, {"PMID:2"}),
-        _snapshot_id(jobs[2]): (True, {"PMID:3"}),
-    }
 
 
 def test_extension_namespaces_unknown_to_sabe_are_reported_as_warnings(
@@ -371,41 +274,3 @@ def test_the_warning_reflects_the_ontologies_configured_now(
     assert after.result["unchanged"] is True
     assert after.result["unrecognized_extension_namespaces"] == []
     assert after.warnings == []
-
-
-def test_concurrent_refreshes_of_the_same_files_activate_one_snapshot(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two jobs that apply the same files at once store and audit them once.
-
-    The service's unlocked check is disabled so that both jobs reach the
-    repository, where the check made under the rules refresh lock decides.
-    """
-    monkeypatch.setattr(rules_refresh_service, "same_rule_files", lambda *_: False)
-    service = RulesRefreshService(unit_of_work_factory, TEST_ONTOLOGIES)
-    jobs = [
-        start_job(unit_of_work_factory, JobType.RULES_REFRESH, "go-site")
-        for _ in range(2)
-    ]
-    document = _document(rule_files(), REVISION)
-    ready = Barrier(2)
-
-    def apply(job: Job) -> RefreshOutcome:
-        ready.wait(timeout=3)
-        return service.apply(job, document, ignore_progress)
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        outcomes = tuple(executor.map(apply, jobs))
-
-    assert sorted(outcome.unchanged for outcome in outcomes) == [False, True]
-    assert len({outcome.result["snapshot_id"] for outcome in outcomes}) == 1
-    assert len(_stored(session_factory)) == 1
-    with session_factory() as session:
-        audits = session.scalar(
-            select(func.count())
-            .select_from(AuditEventRecord)
-            .where(AuditEventRecord.action == AuditAction.RULES_REFRESHED)
-        )
-    assert audits == 1

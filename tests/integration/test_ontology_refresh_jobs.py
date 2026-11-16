@@ -1,4 +1,4 @@
-"""Verify stored ontology refresh worker state and recovery."""
+"""Verify ontology refresh jobs run by the Celery worker tasks."""
 
 import os
 from collections.abc import Iterator
@@ -9,25 +9,12 @@ from uuid import UUID
 import httpx2
 import pytest
 from seeding import create_job
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.config import get_settings
-from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.persistence.models import (
-    AuditEventRecord,
-    JobRecord,
-    OntologyMetadataRecord,
-)
-from standard_annotation_backend.persistence.repositories import OntologyRepository
+from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.job_service import JobService
 from standard_annotation_backend.workers import tasks
-from standard_annotation_backend.workers.tasks import (
-    WorkerTaskUnavailableError,
-    prune_ontology_snapshots,
-)
 
 SHA = "a" * 40
 WORKER_SOURCES = """\
@@ -79,12 +66,6 @@ def ontology_worker_environment(
         get_settings.cache_clear()
 
 
-@pytest.fixture(autouse=True)
-def suppress_pruning_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep ontology worker tests independent of a live Celery broker."""
-    monkeypatch.setattr(prune_ontology_snapshots, "delay", lambda _key: None)
-
-
 def _create_job(factory: UnitOfWorkFactory) -> UUID:
     return create_job(
         factory,
@@ -133,132 +114,6 @@ def _source_responses(
         httpx2.Response(200, json={"sha": revision}),
         httpx2.Response(200, content=content),
     ]
-
-
-def test_worker_loads_ontology_then_skips_unchanged_source(
-    ontology_worker_environment: None,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A changed source activates once; the same source does not create a new version."""
-    first_id = _create_job(unit_of_work_factory)
-    second_id = _create_job(unit_of_work_factory)
-    requests = _install_source(monkeypatch, _source_responses() + _source_responses())
-
-    tasks.run_refresh.run(str(first_id))
-    tasks.run_refresh.run(str(second_id))
-
-    first = _load_job(unit_of_work_factory, first_id)
-    second = _load_job(unit_of_work_factory, second_id)
-    assert first.status == second.status == JobStatus.SUCCEEDED.value
-    assert first.result is not None and first.result["unchanged"] is False
-    assert second.result is not None and second.result["unchanged"] is True
-    assert len(requests) == 4
-    with session_factory() as session:
-        assert (
-            session.scalar(select(func.count()).select_from(OntologyMetadataRecord))
-            == 1
-        )
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AuditEventRecord)
-                .where(AuditEventRecord.action == AuditAction.ONTOLOGY_REFRESHED.value)
-            )
-            == 1
-        )
-
-
-@pytest.mark.parametrize(
-    ("responses", "expected_status"),
-    [
-        (_source_responses(), JobStatus.SUCCEEDED),
-        (_source_responses(b"[not obo"), JobStatus.FAILED),
-    ],
-)
-def test_terminal_ontology_job_dispatches_pruning_after_status_commit(
-    ontology_worker_environment: None,
-    unit_of_work_factory: UnitOfWorkFactory,
-    monkeypatch: pytest.MonkeyPatch,
-    responses: list[httpx2.Response],
-    expected_status: JobStatus,
-) -> None:
-    """Successful and failed refreshes dispatch pruning after storing terminal status."""
-    job_id = _create_job(unit_of_work_factory)
-    _install_source(monkeypatch, responses.copy())
-    observed: list[tuple[str, str]] = []
-
-    def observe_dispatch(key: str) -> None:
-        observed.append((key, _load_job(unit_of_work_factory, job_id).status))
-
-    monkeypatch.setattr(prune_ontology_snapshots, "delay", observe_dispatch)
-
-    tasks.run_refresh.run(str(job_id))
-
-    assert observed == [("go", expected_status.value)]
-
-
-def test_terminal_redelivery_retries_pruning_dispatch_without_changing_result(
-    ontology_worker_environment: None,
-    unit_of_work_factory: UnitOfWorkFactory,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A dispatch failure preserves job success, and redelivery dispatches pruning."""
-    job_id = _create_job(unit_of_work_factory)
-    _install_source(monkeypatch, _source_responses())
-
-    def fail_dispatch(_key: str) -> None:
-        raise RuntimeError("redis detail")
-
-    monkeypatch.setattr(prune_ontology_snapshots, "delay", fail_dispatch)
-    with pytest.raises(WorkerTaskUnavailableError):
-        tasks.run_refresh.run(str(job_id))
-    terminal = _load_job(unit_of_work_factory, job_id)
-    assert terminal.status == JobStatus.SUCCEEDED.value
-    assert terminal.result is not None
-    original_result = dict(terminal.result)
-
-    dispatched: list[str] = []
-    monkeypatch.setattr(prune_ontology_snapshots, "delay", dispatched.append)
-    tasks.run_refresh.run(str(job_id))
-
-    recovered = _load_job(unit_of_work_factory, job_id)
-    assert dispatched == ["go"]
-    assert recovered.status == JobStatus.SUCCEEDED.value
-    assert recovered.result == original_result
-
-
-def test_pruning_task_retries_infrastructure_failure(
-    ontology_worker_environment: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A pruning infrastructure failure requests a task retry."""
-    monkeypatch.setattr(
-        OntologyRepository,
-        "prune_candidates",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database")),
-    )
-
-    with pytest.raises(WorkerTaskUnavailableError):
-        prune_ontology_snapshots.run("go")
-
-
-def test_pruning_task_ignores_an_unknown_ontology_key(
-    ontology_worker_environment: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A key that is not a supported ontology is neither pruned nor retried."""
-    pruned: list[object] = []
-    monkeypatch.setattr(
-        OntologyRepository,
-        "prune_candidates",
-        lambda *_args, **_kwargs: pruned.append(object()),
-    )
-
-    prune_ontology_snapshots.run("chebi")
-
-    assert pruned == []
 
 
 def test_worker_reports_an_undefined_consider_target_as_a_warning(
@@ -335,137 +190,6 @@ def test_source_and_parse_failures_store_only_public_error(
         assert message.strip()
     else:
         assert "failure_details" not in job.progress
-
-
-@pytest.mark.parametrize("method_name", ["stage", "activate"])
-def test_staging_and_activation_infrastructure_failures_request_retry(
-    ontology_worker_environment: None,
-    unit_of_work_factory: UnitOfWorkFactory,
-    monkeypatch: pytest.MonkeyPatch,
-    method_name: str,
-) -> None:
-    """Unexpected persistence failures remain retryable rather than terminal."""
-    job_id = _create_job(unit_of_work_factory)
-    _install_source(monkeypatch, _source_responses())
-    monkeypatch.setattr(
-        OntologyRepository,
-        method_name,
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("detail")),
-    )
-
-    with pytest.raises(WorkerTaskUnavailableError):
-        tasks.run_refresh.run(str(job_id))
-
-    job = _load_job(unit_of_work_factory, job_id)
-    assert job.status == JobStatus.RUNNING.value
-    assert job.error is None
-
-
-@pytest.mark.parametrize("finalization_method", ["update_progress", "succeed"])
-def test_redelivery_after_activation_recovers_exact_result_without_reapplying(
-    ontology_worker_environment: None,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
-    finalization_method: str,
-) -> None:
-    """A finalization retry reports the first attempt's result without reapplying.
-
-    The retry does not fetch the source again. The job succeeds with the snapshot
-    the first attempt activated, and only that snapshot and one
-    `ontology.refreshed` audit event exist.
-    """
-    job_id = _create_job(unit_of_work_factory)
-    requests = _install_source(monkeypatch, _source_responses())
-    original_finalization = getattr(JobService, finalization_method)
-
-    monkeypatch.setattr(
-        JobService,
-        finalization_method,
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database")),
-    )
-    with pytest.raises(WorkerTaskUnavailableError):
-        tasks.run_refresh.run(str(job_id))
-    monkeypatch.setattr(JobService, finalization_method, original_finalization)
-
-    tasks.run_refresh.run(str(job_id))
-
-    recovered = _load_job(unit_of_work_factory, job_id)
-    assert recovered.status == JobStatus.SUCCEEDED.value
-    assert recovered.result is not None
-    assert len(requests) == 2
-    with session_factory() as session:
-        (snapshot,) = session.scalars(select(OntologyMetadataRecord)).all()
-        assert snapshot.active is True
-        assert recovered.result["ontology_version_id"] == str(snapshot.version_id)
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AuditEventRecord)
-                .where(AuditEventRecord.action == AuditAction.ONTOLOGY_REFRESHED.value)
-            )
-            == 1
-        )
-
-
-def test_redelivery_recovers_result_after_a_later_load_becomes_active(
-    ontology_worker_environment: None,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A superseded refresh still recovers its stored result on redelivery."""
-    first_id = _create_job(unit_of_work_factory)
-    second_id = _create_job(unit_of_work_factory)
-    requests = _install_source(
-        monkeypatch,
-        _source_responses() + _source_responses(revision="b" * 40),
-    )
-    original_succeed = JobService.succeed
-    monkeypatch.setattr(
-        JobService,
-        "succeed",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database")),
-    )
-
-    with pytest.raises(WorkerTaskUnavailableError):
-        tasks.run_refresh.run(str(first_id))
-    monkeypatch.setattr(JobService, "succeed", original_succeed)
-
-    with session_factory() as session:
-        first_version = session.scalar(
-            select(OntologyMetadataRecord).where(
-                OntologyMetadataRecord.job_id == first_id
-            )
-        )
-        assert first_version is not None
-        assert first_version.active is True
-        assert first_version.refresh_result is not None
-        stored_result = dict(first_version.refresh_result)
-
-    tasks.run_refresh.run(str(second_id))
-
-    with session_factory() as session:
-        first_version = session.scalar(
-            select(OntologyMetadataRecord).where(
-                OntologyMetadataRecord.job_id == first_id
-            )
-        )
-        active_version = session.scalar(
-            select(OntologyMetadataRecord).where(
-                OntologyMetadataRecord.active.is_(True)
-            )
-        )
-        assert first_version is not None and first_version.active is False
-        assert active_version is not None and active_version.job_id == second_id
-
-    tasks.run_refresh.run(str(first_id))
-
-    recovered = _load_job(unit_of_work_factory, first_id)
-    assert recovered.status == JobStatus.SUCCEEDED.value
-    # The recovered job reports the result its snapshot stored when activated.
-    assert recovered.result == {**stored_result, "unchanged": False}
-    assert len(requests) == 4
 
 
 def test_scheduler_persists_only_key_and_records_dispatch_failure(

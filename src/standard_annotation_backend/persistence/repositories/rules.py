@@ -1,59 +1,35 @@
-"""Store and activate snapshots of the go-site metadata that GO Rules read.
+"""Store and read the detail and data rows of go-site rule data snapshots.
 
-A snapshot is the parsed content of the go-site files from one `rules` refresh.
-GO Rule checks read the one active snapshot.
+`SnapshotRepository` creates, activates, prunes, and retires snapshots. This
+repository stores what a rules snapshot holds: five go-site files as validated
+`RuleData` JSON, and the PMIDs that `retracted-publications.txt` lists.
 """
 
 from collections.abc import Collection
-from dataclasses import dataclass
 from itertools import batched
 from uuid import UUID
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
-from standard_annotation_backend.domain.refresh import SourceProvenance
-from standard_annotation_backend.persistence.locks import (
-    LockNamespace,
-    acquire_transaction_lock,
+from standard_annotation_backend.domain.semantic_validation.rule_data import (
+    STORED_RULE_DATA,
+    RuleData,
 )
 from standard_annotation_backend.persistence.models import (
     RetractedPublicationRecord,
-    RulesSnapshotRecord,
+    RuleDataRecord,
+    RulesSnapshotDetailRecord,
+)
+from standard_annotation_backend.persistence.repositories.snapshots import (
+    SnapshotPrunedError,
 )
 
 _INSERT_BATCH_SIZE = 5_000
 
 
-def same_rule_files(record: RulesSnapshotRecord, provenance: SourceProvenance) -> bool:
-    """Return whether a snapshot was built from the same files as `provenance`.
-
-    The commit is not compared. Most go-site commits change none of these files,
-    and comparing the commit would store an identical snapshot after each one.
-    """
-    return (record.source_type, record.source_locator, record.source_checksum) == (
-        provenance.source_type,
-        provenance.source_locator,
-        provenance.source_checksum,
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class RulesActivation:
-    """Describe the active snapshot after `RulesRepository.activate`.
-
-    Attributes:
-        record: The active snapshot.
-        applied: Whether this call stored it. `False` means the active snapshot
-            already came from the same files.
-    """
-
-    record: RulesSnapshotRecord
-    applied: bool
-
-
 class RulesRepository:
-    """Read and activate GO Rule data snapshots in the caller's transaction.
+    """Store and read rules snapshot rows in the caller's transaction.
 
     Args:
         session: Session owned by the calling unit of work.
@@ -62,121 +38,60 @@ class RulesRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def get_active(self) -> RulesSnapshotRecord | None:
-        """Return the active snapshot, if there is one."""
-        return self.session.scalar(
-            select(RulesSnapshotRecord).where(RulesSnapshotRecord.active.is_(True))
-        )
-
-    def get_by_job(self, job_id: UUID) -> RulesSnapshotRecord | None:
-        """Return the snapshot a job stored, unless a later activation deleted it."""
-        return self.session.scalar(
-            select(RulesSnapshotRecord).where(RulesSnapshotRecord.job_id == job_id)
-        )
-
-    def stores(
+    def insert(
         self,
-        record: RulesSnapshotRecord,
+        snapshot_id: UUID,
         rule_data: dict[str, object],
         retracted_pmids: Collection[str],
-    ) -> bool:
-        """Return whether a snapshot holds exactly this rule data and these PMIDs.
-
-        A SABE release that parses or stores the files differently gets different
-        values from the same files. Comparing the values, not only the files, lets
-        that release store the files again instead of keeping the values an earlier
-        release stored.
+    ) -> None:
+        """Store a rules snapshot's rule data and retracted PMIDs.
 
         Args:
-            record: The snapshot to compare.
+            snapshot_id: A snapshot that `SnapshotRepository.create` inserted.
             rule_data: The parsed files in the JSON form that `STORED_RULE_DATA`
                 produces.
             retracted_pmids: Every PMID that `retracted-publications.txt` lists.
         """
-        if record.rule_data != rule_data or record.retracted_publication_count != len(
-            retracted_pmids
-        ):
-            return False
-        stored = self.session.scalars(
-            select(RetractedPublicationRecord.pmid).where(
-                RetractedPublicationRecord.snapshot_id == record.snapshot_id
-            )
+        self.session.add_all(
+            [
+                RulesSnapshotDetailRecord(
+                    snapshot_id=snapshot_id,
+                    retracted_publication_count=len(retracted_pmids),
+                ),
+                RuleDataRecord(snapshot_id=snapshot_id, data=rule_data),
+            ]
         )
-        return set(stored) == set(retracted_pmids)
-
-    def activate(
-        self,
-        *,
-        job_id: UUID,
-        provenance: SourceProvenance,
-        rule_data: dict[str, object],
-        retracted_pmids: Collection[str],
-    ) -> RulesActivation:
-        """Store a snapshot and make it the active one.
-
-        Activations run one at a time. Each takes a PostgreSQL advisory lock (a
-        lock on an application-chosen key rather than on a row) that is held until
-        its transaction commits or rolls back, and a second activation waits for
-        it. Under that lock, if the active snapshot came from the same files and
-        already `stores` this rule data and these PMIDs, nothing changes and that
-        snapshot is returned with `applied=False`. Otherwise the new snapshot and its
-        retracted publications are inserted and activated. The snapshot it replaces
-        is kept, so a validation that looked up that snapshot just before can still
-        read it. Every older snapshot is deleted, with its retracted publications.
-
-        The caller commits, and records any audit event.
-
-        Args:
-            job_id: Job that fetched the files.
-            provenance: Where the files came from, at which commit, and the
-                checksum of their combined content.
-            rule_data: The parsed files in the JSON form that `STORED_RULE_DATA`
-                produces.
-            retracted_pmids: Every PMID that `retracted-publications.txt` lists.
-
-        Returns:
-            The active snapshot, and whether this call stored it.
-        """
-        # Hold the lock from the duplicate check through activation, so a
-        # concurrent activation of the same files waits and then finds this one.
-        acquire_transaction_lock(self.session, LockNamespace.RULES_REFRESH)
-        previous = self.get_active()
-        if (
-            previous is not None
-            and same_rule_files(previous, provenance)
-            and self.stores(previous, rule_data, retracted_pmids)
-        ):
-            return RulesActivation(previous, applied=False)
-        record = RulesSnapshotRecord(
-            job_id=job_id,
-            source_type=provenance.source_type,
-            source_locator=provenance.source_locator,
-            source_revision=provenance.source_revision,
-            source_checksum=provenance.source_checksum,
-            fetched_at=provenance.fetched_at,
-            active=False,
-            rule_data=rule_data,
-            retracted_publication_count=len(retracted_pmids),
-        )
-        self.session.add(record)
-        self.session.flush([record])
+        self.session.flush()
         rows = (
-            {"snapshot_id": record.snapshot_id, "pmid": pmid}
+            {"snapshot_id": snapshot_id, "pmid": pmid}
             for pmid in sorted(retracted_pmids)
         )
         for batch in batched(rows, _INSERT_BATCH_SIZE, strict=False):
             self.session.execute(insert(RetractedPublicationRecord), batch)
-        kept = [record.snapshot_id]
-        # Deactivate first: the partial unique index allows one active snapshot.
-        if previous is not None:
-            previous.active = False
-            self.session.flush([previous])
-            kept.append(previous.snapshot_id)
-        record.active = True
-        self.session.flush([record])
-        self.session.execute(
-            delete(RulesSnapshotRecord).where(
-                RulesSnapshotRecord.snapshot_id.not_in(kept)
-            )
-        )
-        return RulesActivation(record, applied=True)
+
+    def rule_data(self, snapshot_id: UUID) -> RuleData:
+        """Return a rules snapshot's decoded rule data.
+
+        Raises:
+            SnapshotPrunedError: If the snapshot's rule data was pruned.
+            StoredDataError: If the stored rule data cannot be decoded.
+        """
+        stored = self.session.get(RuleDataRecord, snapshot_id)
+        if stored is None:
+            raise SnapshotPrunedError((snapshot_id,))
+        return STORED_RULE_DATA.load(stored.data)
+
+    def retracted_publication_count(self, snapshot_id: UUID) -> int:
+        """Return how many PMIDs a rules snapshot lists as retracted.
+
+        Detail rows are never pruned, so the count stays available after the
+        snapshot's data is deleted.
+
+        Raises:
+            SnapshotPrunedError: If no rules snapshot has the ID, so it has no
+                detail row.
+        """
+        detail = self.session.get(RulesSnapshotDetailRecord, snapshot_id)
+        if detail is None:
+            raise SnapshotPrunedError((snapshot_id,))
+        return detail.retracted_publication_count

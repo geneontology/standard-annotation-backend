@@ -1,6 +1,6 @@
 """Check annotations against the write-blocking GO Rules.
 
-GO Rules are GO's published checks on annotation quality, each documented on a
+GO Rules are GO's official checks on annotation quality, each documented on a
 go-site page. The write-blocking rules are the ones SABE can check using only one
 annotation and the reference data, so SABE rejects any write that breaks one.
 

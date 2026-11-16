@@ -17,7 +17,12 @@
 #     extensions-constraints.yaml under `metadata/` at one commit.
 #
 # ontologies
-#     keyed by ontology; `go` is required. Each entry also sets:
+#     keyed by ontology; `go` is required. Removing an ontology retires its stored
+#     snapshot on the next refresh of every ontology. Each process reads this file
+#     once, when it starts, and a process that still lists a retired ontology
+#     rejects annotation writes until it restarts. After removing an ontology,
+#     restart the web and worker processes with the new file before refreshing
+#     every ontology. Each entry also sets:
 #       document_ontology_id  the `ontology:` header value the file must declare
 #       prefixes              identifier prefixes the ontology owns; each prefix
 #                             may belong to only one ontology
@@ -29,9 +34,9 @@
 #
 # entities
 #    keyed by a stable source key: lowercase letters, digits, `_`, or `-`, starting
-#    with a letter or digit. Keys are stored with published catalogs, so
-#    renaming a key retires the old catalog and publishes a new one. Removing an
-#    entity source retires its catalog on the next refresh of all entity sources.
+#    with a letter or digit. Keys are stored with each catalog, so renaming a key
+#    retires the old catalog and loads a new one. Removing an entity source retires
+#    its catalog on the next refresh of every entity source.
 #    Entity entries may set `format: gpi`; GPI 2.0 is currently the only format.
 #
 # annotations

@@ -241,7 +241,7 @@ xref: BFO:0000050
     )
 
 
-def test_parse_obo_keeps_replacement_suggestions_as_published() -> None:
+def test_parse_obo_keeps_replacement_suggestions_as_given() -> None:
     """A replacement may be obsolete or belong to another ontology."""
     content = b"""\
 format-version: 1.4

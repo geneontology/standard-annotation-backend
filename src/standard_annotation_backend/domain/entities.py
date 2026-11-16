@@ -1,4 +1,4 @@
-"""Define the values used to refresh, publish, and validate entity catalogs.
+"""Define the values used to refresh, store, and validate entity catalogs.
 
 An entity is the subject an annotation describes, identified by `db_object_id`.
 Each configured entity source supplies a complete catalog of the entities it
@@ -46,7 +46,7 @@ class EntityCatalog:
             that was parsed, such as `gpi-2.0`.
         source_metadata: JSON-compatible, format-specific metadata stored with
             the catalog for reference, such as the GPI header. Entity
-            validation and publication never read it.
+            validation and activation never read it.
         records: Validated entity records in source order.
         warnings: Messages about problems that did not stop parsing.
     """
@@ -56,22 +56,6 @@ class EntityCatalog:
     source_metadata: dict[str, object]
     records: tuple[EntityRecord, ...]
     warnings: tuple[str, ...]
-
-
-class EntityCandidateConflictError(TerminalRefreshError):
-    """Report staged catalog data that cannot be used for a job.
-
-    Raised when a job's staged catalog differs from a new parse of its source, is
-    incomplete or altered, is older than the active catalog, or belongs to a job
-    that has already finished.
-    """
-
-    failure_code = RefreshFailureCode.CANDIDATE_CONFLICT
-
-    def __init__(self) -> None:
-        super().__init__(
-            "Entity catalog candidate conflicts with its job or publication state"
-        )
 
 
 class EntityCatalogCollisionError(TerminalRefreshError):
@@ -129,39 +113,9 @@ class EntityRefreshUnchangedResult:
         return STORED_ENTITY_UNCHANGED_RESULT.dump(self)
 
 
-@dataclass(frozen=True, slots=True)
-class EntityCatalogRetirementResult:
-    """Describe the outcome of retiring one source's active catalog.
-
-    Attributes:
-        source_key: The retired source.
-        retired: Whether an active catalog was retired.
-        snapshot_id: The retired snapshot. `None` when nothing was retired.
-        removed_count: How many identifiers the retirement removed.
-    """
-
-    source_key: str
-    retired: bool
-    snapshot_id: UUID | None = None
-    removed_count: Annotated[int, Field(ge=0)] = 0
-
-    def to_job_result(self) -> dict[str, object]:
-        """Return the result as a JSON-compatible dict for the job record.
-
-        A source with nothing to retire is recorded with only `source_key` and
-        `retired`.
-        """
-        if not self.retired:
-            return {"source_key": self.source_key, "retired": False}
-        return STORED_ENTITY_RETIREMENT_RESULT.dump(self)
-
-
 STORED_ENTITY_REFRESH_RESULT = StoredJson(
     EntityRefreshResult, label="entity refresh result"
 )
 STORED_ENTITY_UNCHANGED_RESULT = StoredJson(
     EntityRefreshUnchangedResult, label="unchanged entity refresh result"
-)
-STORED_ENTITY_RETIREMENT_RESULT = StoredJson(
-    EntityCatalogRetirementResult, label="entity retirement result"
 )

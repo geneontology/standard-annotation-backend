@@ -23,13 +23,16 @@ from standard_annotation_backend.persistence.repositories.jobs import (
 )
 from standard_annotation_backend.persistence.repositories.ontologies import (
     OntologyRepository,
-    OntologySnapshotPrunedError,
 )
 from standard_annotation_backend.persistence.repositories.pagination import Page
 from standard_annotation_backend.persistence.repositories.qc_reports import (
     QcReportRepository,
 )
 from standard_annotation_backend.persistence.repositories.rules import RulesRepository
+from standard_annotation_backend.persistence.repositories.snapshots import (
+    SnapshotPrunedError,
+    SnapshotRepository,
+)
 from standard_annotation_backend.persistence.repositories.validation_facts import (
     ValidationFactsRepository,
 )
@@ -45,9 +48,10 @@ __all__ = [
     "InvalidJobTransitionError",
     "JobRepository",
     "OntologyRepository",
-    "OntologySnapshotPrunedError",
     "Page",
     "QcReportRepository",
     "RulesRepository",
+    "SnapshotPrunedError",
+    "SnapshotRepository",
     "ValidationFactsRepository",
 ]

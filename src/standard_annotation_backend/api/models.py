@@ -310,11 +310,10 @@ class JobResource(BaseModel):
             "a failure_code, and, when available, failure_details describing the "
             "problem: a message for an invalid header, or issue_count and up to "
             "100 issues (line number, category, and invalid fields) for invalid "
-            "rows. Completed refresh jobs, except entity retirement, include "
-            "unchanged, which is true when the source document was already "
-            "active so nothing was applied. Term replacement and QC report jobs "
-            "include a phase and running counts; when they fail, they include "
-            "phase='failed' and a failure_code."
+            "rows. Completed refresh jobs include unchanged, which is true when "
+            "the source document was already active so nothing was applied. Term "
+            "replacement and QC report jobs include a phase and running counts; "
+            "when they fail, they include phase='failed' and a failure_code."
         ),
         examples=[
             {
@@ -347,9 +346,8 @@ class JobResource(BaseModel):
     result: dict[str, object] | None = Field(
         description=(
             "Type-specific durable result. Successful results of every refresh "
-            "job, except entity retirement, include unchanged, true when "
-            "nothing was applied. Entity refresh results also include "
-            "warning_count and warnings."
+            "job include unchanged, true when nothing was applied. Entity "
+            "refresh results also include warning_count and warnings."
         ),
         examples=[{"unchanged": False, "warning_count": 0, "warnings": []}],
     )

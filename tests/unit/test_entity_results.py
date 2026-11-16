@@ -1,4 +1,4 @@
-"""Tests for the stored forms of entity refresh and retirement results."""
+"""Tests for the stored form of entity refresh results."""
 
 from uuid import UUID
 
@@ -6,8 +6,6 @@ import pytest
 
 from standard_annotation_backend.domain.entities import (
     STORED_ENTITY_REFRESH_RESULT,
-    STORED_ENTITY_RETIREMENT_RESULT,
-    EntityCatalogRetirementResult,
     EntityRefreshResult,
 )
 from standard_annotation_backend.domain.stored_json import StoredDataError
@@ -62,24 +60,3 @@ def test_corrupt_stored_refresh_result_is_rejected(change: dict[str, object]) ->
     """Malformed stored results raise `StoredDataError` instead of being trusted."""
     with pytest.raises(StoredDataError):
         STORED_ENTITY_REFRESH_RESULT.load({**_JOB_RESULT, **change})
-
-
-def test_corrupt_stored_retirement_result_is_rejected() -> None:
-    """A retirement result with a non-boolean `retired` raises `StoredDataError`."""
-    with pytest.raises(StoredDataError):
-        STORED_ENTITY_RETIREMENT_RESULT.load({"source_key": "uniprot", "retired": 1})
-
-
-def test_retirement_job_result_counts_the_removed_identifiers() -> None:
-    """A retirement result records how many identifiers it removed and loads back."""
-    result = EntityCatalogRetirementResult("mgi", True, _SNAPSHOT, removed_count=2)
-
-    stored = result.to_job_result()
-
-    assert stored == {
-        "source_key": "mgi",
-        "retired": True,
-        "snapshot_id": str(_SNAPSHOT),
-        "removed_count": 2,
-    }
-    assert STORED_ENTITY_RETIREMENT_RESULT.load(stored) == result

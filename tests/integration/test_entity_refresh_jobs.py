@@ -1,8 +1,7 @@
 """Verify entity refresh jobs run through the shared refresh runner.
 
-Covers job outcomes, failures, and running a job again when its message is
-delivered a second time. Lifecycle rules shared by every kind are covered in
-`test_refresh_runner.py`; Celery retry behavior is covered in
+Covers job outcomes and failures. Lifecycle rules shared by every kind are
+covered in `test_refresh_runner.py`; Celery retry behavior is covered in
 `tests/unit/test_worker_task_safety.py`.
 """
 
@@ -19,14 +18,13 @@ from fastapi.testclient import TestClient
 from refresh_helpers import (
     TEST_SOURCES,
     FakeFetchers,
+    apply_in_transaction,
     build_runner,
-    ignore_progress,
     sources_with_entities,
-    stage_without_publishing,
     start_job,
 )
 from seeding import create_job
-from sqlalchemy import Engine, delete, func, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction
@@ -35,15 +33,11 @@ from standard_annotation_backend.domain.refresh import (
     RefreshFailureCode,
     RefreshKindName,
 )
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
-    EntityCatalogSnapshotRecord,
-    EntityMembershipRecord,
-    EntityStagingRecord,
-    JobRecord,
-)
-from standard_annotation_backend.persistence.repositories.entities import (
-    EntityRepository,
+    ReferenceSnapshotRecord,
+    StoredEntityRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh import runner as refresh_runner
@@ -118,13 +112,13 @@ def _read_job(jobs: JobService, job_id: UUID) -> StoredJob:
     )
 
 
-def _staging_count(session_factory: sessionmaker[Session], job_id: UUID) -> int:
-    """Return how many staged rows a job has."""
+def _snapshot_count(session_factory: sessionmaker[Session], job_id: UUID) -> int:
+    """Return how many catalog snapshots a job stored."""
     with session_factory() as session:
         count = session.scalar(
             select(func.count())
-            .select_from(EntityStagingRecord)
-            .where(EntityStagingRecord.job_id == job_id)
+            .select_from(ReferenceSnapshotRecord)
+            .where(ReferenceSnapshotRecord.job_id == job_id)
         )
         return int(count or 0)
 
@@ -149,9 +143,19 @@ def _memberships(session_factory: sessionmaker[Session]) -> list[tuple[str, str]
             (row.db_object_id, row.source_key)
             for row in session.execute(
                 select(
-                    EntityMembershipRecord.db_object_id,
-                    EntityMembershipRecord.source_key,
-                ).order_by(EntityMembershipRecord.db_object_id)
+                    StoredEntityRecord.db_object_id,
+                    ReferenceSnapshotRecord.source_key,
+                )
+                .join(
+                    ReferenceSnapshotRecord,
+                    ReferenceSnapshotRecord.snapshot_id
+                    == StoredEntityRecord.snapshot_id,
+                )
+                .where(
+                    ReferenceSnapshotRecord.kind == SnapshotKind.ENTITY,
+                    ReferenceSnapshotRecord.active.is_(True),
+                )
+                .order_by(StoredEntityRecord.db_object_id)
             )
         ]
 
@@ -177,7 +181,7 @@ def jobs(unit_of_work_factory: UnitOfWorkFactory) -> JobService:
 @pytest.fixture
 def entity_service(unit_of_work_factory: UnitOfWorkFactory) -> EntityRefreshService:
     """Provide the real entity refresh service."""
-    return EntityRefreshService(unit_of_work_factory, TEST_SOURCES)
+    return EntityRefreshService(TEST_SOURCES)
 
 
 @pytest.fixture
@@ -198,7 +202,7 @@ def test_entity_refresh_job_records_progress_and_result(
     runner_for: Callable[..., RefreshRunner],
     integration_api_client: TestClient,
 ) -> None:
-    """A successful refresh records its final progress and publication result.
+    """A successful refresh records its final progress and result.
 
     The job status endpoint returns the same result.
     """
@@ -235,12 +239,12 @@ def test_entity_refresh_job_records_progress_and_result(
     assert fetchers.calls == ["mgi"]
 
 
-def test_gzip_compressed_source_publishes_the_same_catalog(
+def test_gzip_compressed_source_stores_the_same_catalog(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
 ) -> None:
-    """A gzip-compressed GPI file is expanded and published like a plain one."""
+    """A gzip-compressed GPI file is expanded and stored like a plain one."""
     job_id = _create_job(unit_of_work_factory)
 
     runner_for(_fetchers(gzip.compress(SOURCE_BYTES))).run(job_id)
@@ -255,7 +259,7 @@ def test_gzip_compressed_source_publishes_the_same_catalog(
 @pytest.mark.parametrize(
     "failure_code", ["timeout", "header", "row_validation", "catalog_collision"]
 )
-def test_entity_refresh_domain_failure_is_terminal_and_cleans_staging(
+def test_entity_refresh_domain_failure_is_terminal_and_stores_nothing(
     unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
     jobs: JobService,
@@ -268,9 +272,9 @@ def test_entity_refresh_domain_failure_is_terminal_and_cleans_staging(
     """Expected refresh failures fail the job with a generic message and a code.
 
     The failures are an unreachable source, an empty download, a row containing a
-    NUL character, and an identifier that another source already supplies. Staged
-    data is removed, the active catalogs are kept, and the logs omit source details
-    such as identifiers, row content, and checksums.
+    NUL character, and an identifier that another source already supplies. The job
+    stores no snapshot, the active catalogs are kept, and the logs omit source
+    details such as identifiers, row content, and checksums.
     """
     log_records = _record_error_logs(monkeypatch)
     if failure_code == "catalog_collision":
@@ -303,7 +307,7 @@ def test_entity_refresh_domain_failure_is_terminal_and_cleans_staging(
     audits = _audit_events(session_factory, AuditAction.JOB_FAILED, job_id)
     assert len(audits) == 1
     assert audits[0].details["failure_code"] == failure_code
-    assert _staging_count(session_factory, job_id) == 0
+    assert _snapshot_count(session_factory, job_id) == 0
     assert _memberships(session_factory) == memberships_before
     logs = "\n".join(log_records)
     assert str(job_id) in logs
@@ -387,7 +391,7 @@ def test_undecodable_download_fails_with_its_code(
     content: bytes,
     code: str,
 ) -> None:
-    """Broken gzip or invalid UTF-8 fails the job without staging anything."""
+    """Broken gzip or invalid UTF-8 fails the job without storing anything."""
     job_id = _create_job(unit_of_work_factory)
 
     runner_for(_fetchers(content)).run(job_id)
@@ -396,181 +400,6 @@ def test_undecodable_download_fails_with_its_code(
     assert stored.status == JobStatus.FAILED
     assert stored.error == FAILED
     assert stored.progress == {"phase": "failed", "failure_code": code}
-
-
-def test_entity_refresh_cleanup_failure_rolls_back_terminal_state_until_redelivery(
-    unit_of_work_factory: UnitOfWorkFactory,
-    monkeypatch: pytest.MonkeyPatch,
-    jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
-    session_factory: sessionmaker[Session],
-    seed_active_subjects: Callable[..., None],
-) -> None:
-    """A failed cleanup of staging data also rolls back the job's failure record.
-
-    The job stays running and the error propagates so the task retries. When it
-    runs again, the job is marked failed and its staging data is removed
-    together. Running the finished job once more changes nothing and does not
-    contact the source.
-    """
-    seed_active_subjects("MGI:1")
-    job_id = _create_job(unit_of_work_factory)
-    fetchers = _fetchers()
-    runner = runner_for(fetchers)
-    original_cleanup = EntityRepository.cleanup_terminal_staging
-    cleanup_failures = 1
-
-    def fail_cleanup_once(repository: EntityRepository, received_job_id: UUID) -> None:
-        nonlocal cleanup_failures
-        if cleanup_failures:
-            cleanup_failures -= 1
-            raise RuntimeError("cleanup storage unavailable")
-        original_cleanup(repository, received_job_id)
-
-    monkeypatch.setattr(EntityRepository, "cleanup_terminal_staging", fail_cleanup_once)
-
-    with pytest.raises(RuntimeError, match="cleanup storage unavailable"):
-        runner.run(job_id)
-
-    after_rollback = _read_job(jobs, job_id)
-    assert after_rollback.status == JobStatus.RUNNING
-    assert "failure_code" not in after_rollback.progress
-    assert _staging_count(session_factory, job_id) == 1
-    assert _audit_events(session_factory, AuditAction.JOB_FAILED, job_id) == []
-
-    runner.run(job_id)
-
-    terminal = _read_job(jobs, job_id)
-    assert terminal.status == JobStatus.FAILED
-    assert terminal.error == FAILED
-    assert terminal.progress["failure_code"] == "catalog_collision"
-    assert _staging_count(session_factory, job_id) == 0
-    assert len(_audit_events(session_factory, AuditAction.JOB_FAILED, job_id)) == 1
-    assert fetchers.calls == ["mgi"]
-
-    runner.run(job_id)
-
-    assert _read_job(jobs, job_id) == terminal
-    assert len(_audit_events(session_factory, AuditAction.JOB_FAILED, job_id)) == 1
-    assert fetchers.calls == ["mgi"]
-
-
-def test_entity_refresh_redelivery_publishes_committed_staging_without_source_access(
-    unit_of_work_factory: UnitOfWorkFactory,
-    monkeypatch: pytest.MonkeyPatch,
-    jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
-    session_factory: sessionmaker[Session],
-) -> None:
-    """After a publication failure, rerunning the job publishes the staged catalog.
-
-    The interrupted job stays running with its staged data, and the rerun does not
-    contact the source again.
-    """
-    job_id = _create_job(unit_of_work_factory)
-    fetchers = _fetchers()
-    runner = runner_for(fetchers)
-
-    def outage(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("publication unavailable")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(EntityRepository, "publish", outage)
-        with pytest.raises(RuntimeError, match="publication unavailable"):
-            runner.run(job_id)
-    interrupted = _read_job(jobs, job_id)
-    assert interrupted.status == JobStatus.RUNNING
-    assert interrupted.progress["phase"] == "publishing"
-    with session_factory() as session:
-        snapshot_id = session.scalar(select(EntityCatalogSnapshotRecord.snapshot_id))
-        assert snapshot_id is not None
-        assert (
-            session.scalar(select(func.count()).select_from(EntityStagingRecord)) == 1
-        )
-    fetchers.contents["mgi"] = SourceError(RefreshFailureCode.HTTP_STATUS)
-
-    runner.run(job_id)
-
-    stored = _read_job(jobs, job_id)
-    assert stored.status == JobStatus.SUCCEEDED
-    assert stored.result is not None
-    assert stored.result["snapshot_id"] == str(snapshot_id)
-    assert fetchers.calls == ["mgi"]
-    with session_factory() as session:
-        assert (
-            session.scalar(select(func.count()).select_from(EntityStagingRecord)) == 0
-        )
-        assert list(session.scalars(select(EntityMembershipRecord.db_object_id))) == [
-            "MGI:1"
-        ]
-
-
-@pytest.mark.parametrize("changed", ["source_key", "missing_row", "entity"])
-def test_entity_refresh_redelivery_rejects_incompatible_or_incomplete_staging_before_fetch(
-    unit_of_work_factory: UnitOfWorkFactory,
-    jobs: JobService,
-    entity_service: EntityRefreshService,
-    runner_for: Callable[..., RefreshRunner],
-    session_factory: sessionmaker[Session],
-    changed: str,
-) -> None:
-    """Rerunning a job whose staged data no longer matches the job fails the job.
-
-    The job fails with `candidate_conflict` without fetching the source, and the
-    previous catalog stays active. Mismatches include staging for another source,
-    a missing row, and an altered row.
-    """
-    fetchers = _fetchers()
-    previous = _create_job(unit_of_work_factory)
-    runner_for(fetchers).run(previous)
-    job_id = _create_job(unit_of_work_factory)
-    # Different content, so the refresh is not recognized as unchanged.
-    document = _fetchers(SOURCE_TEXT.replace("Gene1", "Gene2").encode()).fetch(
-        "mgi", TEST_SOURCES.source(RefreshKindName.ENTITY, "mgi")
-    )
-    stage_without_publishing(
-        entity_service,
-        jobs.find(job_id),
-        document,
-        (EntityRepository, "publish"),
-    )
-    with session_factory() as session:
-        job = session.get(JobRecord, job_id)
-        row = session.scalar(
-            select(EntityStagingRecord).where(EntityStagingRecord.job_id == job_id)
-        )
-        assert job is not None and row is not None
-        if changed == "source_key":
-            parameters: dict[str, object] = {"source_key": "rgd"}
-            job.parameters = parameters
-        elif changed == "missing_row":
-            session.execute(
-                delete(EntityStagingRecord).where(EntityStagingRecord.job_id == job_id)
-            )
-        else:
-            row.entity = {**row.entity, "db_object_name": "changed"}
-        session.commit()
-    fetchers = _fetchers(SourceError(RefreshFailureCode.HTTP_STATUS))
-
-    runner_for(fetchers).run(job_id)
-
-    stored = _read_job(jobs, job_id)
-    assert stored.status == JobStatus.FAILED
-    assert stored.progress["failure_code"] == "candidate_conflict"
-    assert fetchers.calls == []
-    with session_factory() as session:
-        active = session.scalar(
-            select(EntityCatalogSnapshotRecord).where(
-                EntityCatalogSnapshotRecord.active.is_(True)
-            )
-        )
-        assert active is not None and active.job_id == previous
-        assert list(session.scalars(select(EntityMembershipRecord.db_object_id))) == [
-            "MGI:1"
-        ]
-        assert (
-            session.scalar(select(func.count()).select_from(EntityStagingRecord)) == 0
-        )
 
 
 def test_unchanged_source_reports_the_active_snapshot(
@@ -603,17 +432,17 @@ def test_unchanged_source_reports_the_active_snapshot(
 
 
 @pytest.mark.parametrize("changed", ["url", "content"])
-def test_changed_url_or_content_publishes_new_snapshot(
+def test_changed_url_or_content_stores_new_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., RefreshRunner],
     session_factory: sessionmaker[Session],
     changed: str,
 ) -> None:
-    """A refresh with a changed URL or changed content publishes a new snapshot.
+    """A refresh with a changed URL or changed content stores a new snapshot.
 
-    Moving a source to a new URL publishes even when the content is identical, and
-    new content at the same URL is never reported as unchanged.
+    Moving a source to a new URL stores a snapshot even when the content is
+    identical, and new content at the same URL is never reported as unchanged.
     """
     runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
     if changed == "url":
@@ -631,12 +460,14 @@ def test_changed_url_or_content_publishes_new_snapshot(
     assert stored.result["source_locator"] == expected_url
     assert stored.result["source_checksum"] == sha256(text.encode()).hexdigest()
     assert stored.result["retained_count"] == 1
-    published = _audit_events(session_factory, AuditAction.ENTITY_REFRESHED)
-    assert len(published) == 2
+    refreshed = _audit_events(session_factory, AuditAction.ENTITY_REFRESHED)
+    assert len(refreshed) == 2
     with session_factory() as session:
         active = session.scalar(
-            select(EntityCatalogSnapshotRecord).where(
-                EntityCatalogSnapshotRecord.active.is_(True)
+            select(ReferenceSnapshotRecord).where(
+                ReferenceSnapshotRecord.kind == SnapshotKind.ENTITY,
+                ReferenceSnapshotRecord.source_key == "mgi",
+                ReferenceSnapshotRecord.active.is_(True),
             )
         )
         assert active is not None and active.job_id == job_id
@@ -652,21 +483,22 @@ def test_matching_catalog_of_another_source_does_not_make_refresh_unchanged(
     """Only the same source's active catalog can make a refresh unchanged.
 
     Another source's active catalog with the same locator and checksum is
-    ignored, and the refresh publishes this source's catalog.
+    ignored, and the refresh stores this source's catalog.
     """
     other_job = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "rgd")
     mgi_document = _fetchers().fetch(
         "mgi", TEST_SOURCES.source(RefreshKindName.ENTITY, "mgi")
     )
     # The `rgd` catalog claims the `mgi` locator and checksum.
-    entity_service.apply(
+    apply_in_transaction(
+        unit_of_work_factory,
+        entity_service,
         other_job,
         replace(
             mgi_document,
             source_key="rgd",
             content=SOURCE_TEXT.replace("MGI:1", "RGD:1").encode(),
         ),
-        ignore_progress,
     )
     job_id = _create_job(unit_of_work_factory)
 

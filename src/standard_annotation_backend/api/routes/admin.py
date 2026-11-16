@@ -28,6 +28,7 @@ from standard_annotation_backend.api.models import (
 )
 from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.annotation_management import (
+    AnnotationJobInProgressError,
     GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.auth import (
@@ -39,7 +40,7 @@ from standard_annotation_backend.domain.refresh import (
     UnknownSourceError,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.services.job_service import Job, JobService
+from standard_annotation_backend.services.job_service import JobService
 from standard_annotation_backend.services.refresh_start_service import (
     RefreshStartService,
 )
@@ -55,6 +56,11 @@ router = APIRouter(
 _SHARED_DESCRIPTION = (
     "Queued or running jobs for the same source are returned instead of "
     "duplicated. Requires the admin role with global scope."
+)
+_RETIREMENT_DESCRIPTION = (
+    "Refreshing every source also retires sources removed from the sources "
+    "file; their data stops being used at once. The response lists only "
+    "refresh jobs."
 )
 _RESPONSE_DESCRIPTION = "The created or reused refresh jobs"
 
@@ -79,8 +85,10 @@ def _start(
     source_key: str | None,
 ) -> RefreshJobsResource:
     """Start the refresh and build the response."""
-    jobs: tuple[Job, ...] = service.start(kind, context=context, source_key=source_key)
-    return RefreshJobsResource(jobs=[JobResource.from_service(job) for job in jobs])
+    started = service.start(kind, context=context, source_key=source_key)
+    return RefreshJobsResource(
+        jobs=[JobResource.from_service(job) for job in started.jobs]
+    )
 
 
 @router.post(
@@ -137,7 +145,7 @@ def refresh_rules(
         "replacement job that replaces obsolete terms and alternative IDs in "
         "annotations. Send {} to refresh every configured ontology or "
         '{"source_key": "<key>"} for one. '
-        f"{_SHARED_DESCRIPTION}"
+        f"{_RETIREMENT_DESCRIPTION} {_SHARED_DESCRIPTION}"
     ),
     response_description=_RESPONSE_DESCRIPTION,
 )
@@ -160,9 +168,8 @@ def refresh_ontologies(
     summary="Refresh entity catalogs",
     description=(
         "Refresh configured entity catalogs from their GPI sources. Send {} to "
-        "refresh every configured source and retire catalogs of sources removed "
-        'from the configuration, or {"source_key": "<key>"} for one. '
-        f"{_SHARED_DESCRIPTION}"
+        'refresh every configured source, or {"source_key": "<key>"} for one. '
+        f"{_RETIREMENT_DESCRIPTION} {_SHARED_DESCRIPTION}"
     ),
     response_description=_RESPONSE_DESCRIPTION,
 )
@@ -180,7 +187,10 @@ def refresh_entities(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,
     responses=error_responses(
-        RequestValidationFailedError, UnknownSourceError, GroupSabeManagedError
+        RequestValidationFailedError,
+        UnknownSourceError,
+        GroupSabeManagedError,
+        AnnotationJobInProgressError,
     ),
     summary="Replace groups' annotations from GPAD",
     description=(
@@ -191,7 +201,11 @@ def refresh_entities(
         "unchanged since the group's last import and the group has had no edits, "
         "comments, or change sets since then. Each published import queues a "
         "term replacement job for the group. Send {} to refresh "
-        'every group that GPAD still manages, or {"source_key": "<key>"} for one. '
+        "every group that GPAD still manages, skipping any group with an "
+        'unfinished cutover, or {"source_key": "<key>"} for one. '
+        "A group has one unfinished GPAD job at a time; a request naming a source "
+        "whose group has an unfinished cutover returns 409 "
+        "`annotation_job_in_progress`. "
         f"{_SHARED_DESCRIPTION}"
     ),
     response_description=_RESPONSE_DESCRIPTION,
@@ -212,7 +226,10 @@ def refresh_annotations(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RefreshJobsResource,
     responses=error_responses(
-        RequestValidationFailedError, UnknownSourceError, GroupSabeManagedError
+        RequestValidationFailedError,
+        UnknownSourceError,
+        GroupSabeManagedError,
+        AnnotationJobInProgressError,
     ),
     summary="Move a group to SABE management",
     description=(
@@ -220,7 +237,9 @@ def refresh_annotations(
         "every record is imported, and then moves the source's group to SABE "
         "management permanently: GPAD can never replace that group's annotations "
         "again. A queued or running cutover for the same source is returned "
-        "instead of duplicated. Requires the admin role with global scope."
+        "instead of duplicated. A group has one unfinished GPAD job at a time; a "
+        "request while a job of the other type is unfinished returns 409 "
+        "`annotation_job_in_progress`. Requires the admin role with global scope."
     ),
     response_description="The created or reused cutover job",
 )

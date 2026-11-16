@@ -219,7 +219,7 @@ class QcReportRunner:
         # Resolved before the first batch, so a scope with no annotations still
         # fails when reference data is missing, and records what it checked against.
         with self._unit_of_work_factory() as unit_of_work:
-            snapshots = unit_of_work.validation_facts.active_snapshots(self._ontologies)
+            snapshots = unit_of_work.snapshots.resolve(self._ontologies)
             reference_data: list[ReferenceDataVersions] = [
                 unit_of_work.validation_facts.reference_versions(snapshots)
             ]
@@ -232,9 +232,7 @@ class QcReportRunner:
                 if not records:
                     break
                 after = records[-1].annotation_id
-                snapshots = unit_of_work.validation_facts.active_snapshots(
-                    self._ontologies
-                )
+                snapshots = unit_of_work.snapshots.resolve(self._ontologies)
                 versions = unit_of_work.validation_facts.reference_versions(snapshots)
                 if versions not in reference_data:
                     reference_data.append(versions)

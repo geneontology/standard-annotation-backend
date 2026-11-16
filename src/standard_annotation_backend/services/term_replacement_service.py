@@ -184,7 +184,7 @@ class TermReplacementService:
         # Resolved before the first batch, so a scope with no annotations still
         # fails when reference data is missing.
         with self._unit_of_work_factory() as unit_of_work:
-            unit_of_work.validation_facts.active_snapshots(self._ontologies)
+            unit_of_work.snapshots.resolve(self._ontologies)
         while True:
             with self._unit_of_work_factory() as unit_of_work:
                 records = unit_of_work.annotations.list_active_after(

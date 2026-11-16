@@ -1,9 +1,10 @@
-"""Stage, check, publish, and clean up GPAD annotation imports.
+"""Stage and publish GPAD annotation imports in the caller's transaction.
 
-Every method works in the caller's transaction; the caller commits.
+The caller commits.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import batched
 from uuid import UUID
@@ -26,7 +27,6 @@ from standard_annotation_backend.domain.annotations import (
     ChangeSource,
     new_annotation_id,
 )
-from standard_annotation_backend.domain.jobs import TERMINAL_JOB_STATUSES, JobType
 from standard_annotation_backend.domain.refresh import SourceProvenance
 from standard_annotation_backend.gpad.parser import ParsedAnnotation
 from standard_annotation_backend.persistence.annotation_data import (
@@ -48,14 +48,43 @@ from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     ChangeSetRecord,
     GroupAnnotationManagementRecord,
-    JobRecord,
 )
-from standard_annotation_backend.persistence.repositories.jobs import lock_job_record
 
-_GPAD_JOB_TYPES = frozenset({JobType.ANNOTATION_REFRESH, JobType.ANNOTATION_CUTOVER})
 _SYSTEM_CHANGE_SOURCES = (ChangeSource.TERM_REPLACEMENT,)
 """Version sources that are system maintenance rather than local edits."""
 _INSERT_BATCH_SIZE = 5_000
+
+
+@dataclass(frozen=True, slots=True)
+class StagedImport:
+    """Describe a GPAD file whose valid annotations a job has staged.
+
+    Attributes:
+        job_id: The GPAD job.
+        source_key: The configured GPAD source.
+        group_key: The group whose annotations the file replaces.
+        is_cutover: Whether the job is a cutover.
+        provenance: Where the file came from.
+        source_metadata: The file's header values.
+        data_rows: Data rows in the file.
+        annotations_staged: Annotations staged for publication.
+        report: The records that were rejected.
+        schema_version: The `go-standard-annotation-schema` version the rows
+            were checked with.
+        staged_at: When staging finished.
+    """
+
+    job_id: UUID
+    source_key: str
+    group_key: str
+    is_cutover: bool
+    provenance: SourceProvenance
+    source_metadata: dict[str, object]
+    data_rows: int
+    annotations_staged: int
+    report: RejectionReport
+    schema_version: str
+    staged_at: datetime
 
 
 class AnnotationImportRepository:
@@ -63,20 +92,6 @@ class AnnotationImportRepository:
 
     def __init__(self, session: Session) -> None:
         self.session = session
-
-    def lock_job(self, job_id: UUID) -> JobRecord:
-        """Lock a GPAD job's row until the transaction ends and return it.
-
-        Staging, publication, and cleanup for one job therefore run one at a time.
-
-        Raises:
-            AnnotationImportConflictError: If the job does not exist or is not a
-                GPAD job.
-        """
-        job = lock_job_record(self.session, job_id)
-        if job is None or job.job_type not in _GPAD_JOB_TYPES:
-            raise AnnotationImportConflictError
-        return job
 
     def group_mode(self, group_key: str) -> AnnotationManagementMode:
         """Return a group's mode; a group without a stored mode is `gpad_imported`."""
@@ -95,23 +110,6 @@ class AnnotationImportRepository:
                     GroupAnnotationManagementRecord.mode
                     == AnnotationManagementMode.SABE_MANAGED.value
                 )
-            )
-        )
-
-    def discard_unpublished(self, job_id: UUID) -> None:
-        """Delete a job's staging and its import row unless the import was published.
-
-        A job that runs again after an interruption stages its document afresh.
-        """
-        self.session.execute(
-            delete(AnnotationStagingRecord).where(
-                AnnotationStagingRecord.job_id == job_id
-            )
-        )
-        self.session.execute(
-            delete(AnnotationImportRecord).where(
-                AnnotationImportRecord.job_id == job_id,
-                AnnotationImportRecord.published_at.is_(None),
             )
         )
 
@@ -144,54 +142,6 @@ class AnnotationImportRepository:
         ):
             for batch in batched(rows, _INSERT_BATCH_SIZE, strict=False):
                 self.session.execute(insert(model), batch)
-
-    def record_staged(
-        self,
-        *,
-        job_id: UUID,
-        source_key: str,
-        group_key: str,
-        is_cutover: bool,
-        provenance: SourceProvenance,
-        source_metadata: dict[str, object],
-        data_rows: int,
-        annotations_staged: int,
-        report: RejectionReport,
-        schema_version: str,
-    ) -> AnnotationImportRecord:
-        """Record a job's staged, not yet published, import and return the row.
-
-        `schema_version` is the `go-standard-annotation-schema` version the staged
-        rows were checked with.
-        """
-        record = AnnotationImportRecord(
-            job_id=job_id,
-            source_key=source_key,
-            group_key=group_key,
-            is_cutover=is_cutover,
-            source_type=provenance.source_type,
-            source_locator=provenance.source_locator,
-            source_revision=provenance.source_revision,
-            source_checksum=provenance.source_checksum,
-            fetched_at=provenance.fetched_at,
-            source_metadata=source_metadata,
-            data_rows=data_rows,
-            annotations_staged=annotations_staged,
-            records_rejected=report.issue_count,
-            rejection_report=STORED_REJECTION_REPORT.dump(report),
-            schema_version=schema_version,
-            staged_at=datetime.now(UTC),
-        )
-        self.session.add(record)
-        self.session.flush([record])
-        return record
-
-    def published_import(self, job_id: UUID) -> AnnotationImportRecord | None:
-        """Return a job's import record, or `None` if it has not published."""
-        record = self.session.get(AnnotationImportRecord, job_id)
-        if record is None or record.published_at is None:
-            return None
-        return record
 
     def last_import(self, group_key: str) -> AnnotationImportRecord | None:
         """Return the group's most recently published import, if any."""
@@ -253,27 +203,14 @@ class AnnotationImportRepository:
             for query in local_change_queries
         )
 
-    def cleanup_terminal_staging(self, job_id: UUID) -> None:
-        """Delete a finished job's staging and its unpublished import row.
-
-        Staging for a queued or running job is kept. Published import rows are
-        kept as provenance.
-
-        Raises:
-            AnnotationImportConflictError: If the job does not exist or is not a
-                GPAD job.
-        """
-        job = self.lock_job(job_id)
-        if job.status in TERMINAL_JOB_STATUSES:
-            self.discard_unpublished(job_id)
-
-    def publish(self, job_id: UUID, *, actor_id: str) -> AnnotationImportRecord:
-        """Replace the job's group's annotations with its staged annotations.
+    def publish(self, staged: StagedImport, *, actor_id: str) -> AnnotationImportRecord:
+        """Replace the group's annotations with the job's staged annotations.
 
         For this group only, deletes the annotations with their versions,
         comments, and lookup rows, the change sets, and the audit events of both.
-        Then inserts the staged annotations as version 1 and marks the import
-        published. A cutover also moves the group to `sabe_managed`.
+        Then inserts the staged annotations as version 1, records the import, and
+        deletes the staging rows. A cutover also moves the group to
+        `sabe_managed`.
 
         Takes the global annotation-write lock in exclusive mode, so every
         annotation write in SABE waits until the caller's transaction ends.
@@ -281,44 +218,53 @@ class AnnotationImportRepository:
         the group's old annotations or the new ones, never a mix.
 
         Returns:
-            The published import record. If the job already published, its
-            record is returned and nothing changes.
+            The import record.
 
         Raises:
-            AnnotationImportConflictError: If the job does not exist, is not a
-                GPAD job, or has no staged import.
             GroupSabeManagedError: If the group is already SABE-managed.
         """
-        self.lock_job(job_id)
-        record = self.session.get(
-            AnnotationImportRecord, job_id, populate_existing=True
-        )
-        if record is None:
-            raise AnnotationImportConflictError
-        if record.published_at is not None:
-            return record
         acquire_global_annotation_write_lock(self.session, exclusive=True)
-        state = self._lock_group(record.group_key)
+        state = self._lock_group(staged.group_key)
         if state.mode == AnnotationManagementMode.SABE_MANAGED.value:
-            raise GroupSabeManagedError(record.group_key)
-        deleted = self._delete_group_data(record.group_key)
+            raise GroupSabeManagedError(staged.group_key)
+        deleted = self._delete_group_data(staged.group_key)
         change_source = (
             ChangeSource.ANNOTATION_CUTOVER
-            if record.is_cutover
+            if staged.is_cutover
             else ChangeSource.ANNOTATION_REFRESH
         )
-        self._copy_staging(job_id, record.group_key, actor_id, change_source)
+        self._copy_staging(staged.job_id, staged.group_key, actor_id, change_source)
         now = datetime.now(UTC)
-        record.published_at = now
-        record.annotations_deleted = deleted
-        state.last_import_job_id = job_id
-        if record.is_cutover:
+        record = AnnotationImportRecord(
+            job_id=staged.job_id,
+            source_key=staged.source_key,
+            group_key=staged.group_key,
+            is_cutover=staged.is_cutover,
+            source_type=staged.provenance.source_type,
+            source_locator=staged.provenance.source_locator,
+            source_revision=staged.provenance.source_revision,
+            source_checksum=staged.provenance.source_checksum,
+            fetched_at=staged.provenance.fetched_at,
+            source_metadata=staged.source_metadata,
+            data_rows=staged.data_rows,
+            annotations_staged=staged.annotations_staged,
+            records_rejected=staged.report.issue_count,
+            rejection_report=STORED_REJECTION_REPORT.dump(staged.report),
+            schema_version=staged.schema_version,
+            staged_at=staged.staged_at,
+            published_at=now,
+            annotations_deleted=deleted,
+        )
+        self.session.add(record)
+        self.session.flush([record])
+        state.last_import_job_id = staged.job_id
+        if staged.is_cutover:
             state.mode = AnnotationManagementMode.SABE_MANAGED.value
             state.transitioned_at = now
-            state.transition_job_id = job_id
+            state.transition_job_id = staged.job_id
         self.session.execute(
             delete(AnnotationStagingRecord).where(
-                AnnotationStagingRecord.job_id == job_id
+                AnnotationStagingRecord.job_id == staged.job_id
             )
         )
         self.session.flush()

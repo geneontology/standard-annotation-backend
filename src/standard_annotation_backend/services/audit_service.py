@@ -1,5 +1,6 @@
 """Record application audit events through the current transaction."""
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import TypedDict
 from uuid import UUID
@@ -7,8 +8,14 @@ from uuid import UUID
 from standard_annotation_backend.domain.annotations import ChangeSource
 from standard_annotation_backend.domain.audit import AuditAction, AuditResult
 from standard_annotation_backend.domain.auth import RequestContext
+from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import AuditEventRecord, JobRecord
 from standard_annotation_backend.persistence.repositories import AuditRepository
+
+_RETIREMENT_ACTIONS: Mapping[SnapshotKind, AuditAction] = {
+    SnapshotKind.ONTOLOGY: AuditAction.ONTOLOGY_RETIRED,
+    SnapshotKind.ENTITY: AuditAction.ENTITY_RETIRED,
+}
 
 
 class _RequestIdentity(TypedDict):
@@ -182,17 +189,27 @@ class AuditService:
     def record_entity_refreshed(
         self, *, actor_id: str, job_id: UUID, details: dict[str, object]
     ) -> AuditEventRecord:
-        """Record a summary of a catalog publication in the publishing transaction."""
+        """Record a summary of a catalog activation in the activation's transaction."""
         return self._record_job_summary(
             AuditAction.ENTITY_REFRESHED, actor_id, job_id, details
         )
 
-    def record_entity_retired(
-        self, *, actor_id: str, job_id: UUID, details: dict[str, object]
+    def record_snapshot_retired(
+        self, *, kind: SnapshotKind, actor_id: str, details: dict[str, object]
     ) -> AuditEventRecord:
-        """Record a summary of a catalog retirement in the retiring transaction."""
-        return self._record_job_summary(
-            AuditAction.ENTITY_RETIRED, actor_id, job_id, details
+        """Record that "refresh all" retired a removed source's snapshot.
+
+        Args:
+            kind: `ontology` or `entity`; other kinds have one fixed source and
+                are never retired.
+            actor_id: The person or process that started the refresh.
+            details: The source key and the retired snapshot's ID.
+        """
+        return self._repository.record(
+            action=_RETIREMENT_ACTIONS[kind],
+            actor_id=actor_id,
+            result=AuditResult.SUCCESS,
+            details=details,
         )
 
     def record_authorization_refreshed(

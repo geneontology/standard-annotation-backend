@@ -83,8 +83,8 @@ ontology, and the entity catalogs, so load them before writing annotations:
 
 ```bash
 just refresh rules
-just refresh ontology
 just refresh entity
+just refresh ontology
 ```
 
 `just refresh KIND [SOURCE]` refreshes `authorization`, `rules`, `ontology`, `entity`,
@@ -222,3 +222,6 @@ When deciding where new code belongs:
 Some rules cross a layer boundary. Duplicate prevention, for example, is part of the
 application's behavior, but its database check and write must occur together under a
 repository lock to prevent two concurrent requests from creating the same annotation.
+
+[`ARCHITECTURE.md`](ARCHITECTURE.md) describes the design in more detail, and the
+[glossary](docs/glossary.md) defines the terms SABE uses.
