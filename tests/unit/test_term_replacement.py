@@ -1,5 +1,6 @@
 """Verify how obsolete terms and alternative IDs are replaced."""
 
+from collections.abc import Collection, Mapping
 from uuid import UUID
 
 import pytest
@@ -14,6 +15,7 @@ from standard_annotation_backend.domain.term_replacement import (
     STORED_TERM_REPLACEMENT_RESULT,
     TermReplacementResult,
     replaced_annotation,
+    replacement_chain_terms,
     replacement_for,
 )
 
@@ -88,6 +90,87 @@ def test_an_identifier_no_configured_ontology_owns_is_not_replaced() -> None:
     terms = {"GO_REF:1": _alternate("GO_REF:2"), "GO_REF:2": CURRENT}
 
     assert replacement_for("GO_REF:1", terms, ONTOLOGIES) is None
+
+
+class _Lookup:
+    """Answer term lookups from fixed facts and record each call's identifiers."""
+
+    def __init__(self, facts: Mapping[str, TermFact]) -> None:
+        self.facts = facts
+        self.calls: list[set[str]] = []
+
+    def __call__(self, identifiers: Collection[str]) -> dict[str, TermFact]:
+        self.calls.append(set(identifiers))
+        return {
+            identifier: self.facts[identifier]
+            for identifier in identifiers
+            if identifier in self.facts
+        }
+
+
+def test_a_replacement_chain_is_read_to_its_end() -> None:
+    """Every term on a chain is read, so the chain's current term can be found."""
+    lookup = _Lookup(
+        {
+            "GO:1": _alternate("GO:2"),
+            "GO:2": _obsolete("GO:3"),
+            "GO:3": CURRENT,
+            "GO:9": CURRENT,
+        }
+    )
+
+    terms = replacement_chain_terms({"GO:1"}, lookup)
+
+    assert terms == {
+        "GO:1": _alternate("GO:2"),
+        "GO:2": _obsolete("GO:3"),
+        "GO:3": CURRENT,
+    }
+    assert replacement_for("GO:1", terms, ONTOLOGIES) == "GO:3"
+
+
+def test_an_identifier_the_lookup_leaves_out_ends_its_chain() -> None:
+    """A step to an identifier with no fact ends the chain without an error."""
+    lookup = _Lookup({"GO:1": _obsolete("XX:2")})
+
+    terms = replacement_chain_terms({"GO:1"}, lookup)
+
+    assert terms == {"GO:1": _obsolete("XX:2")}
+    assert lookup.calls == [{"GO:1"}, {"XX:2"}]
+
+
+def test_a_cycle_of_replacements_ends() -> None:
+    """Terms that replace each other are each read once, and reading stops."""
+    lookup = _Lookup({"GO:1": _obsolete("GO:2"), "GO:2": _alternate("GO:1")})
+
+    terms = replacement_chain_terms({"GO:1"}, lookup)
+
+    assert set(terms) == {"GO:1", "GO:2"}
+    assert lookup.calls == [{"GO:1"}, {"GO:2"}]
+
+
+def test_each_identifier_is_read_at_most_once() -> None:
+    """Chains that meet, including at an identifier with no fact, share one read."""
+    lookup = _Lookup(
+        {
+            "GO:1": _obsolete("XX:9"),
+            "GO:2": _obsolete("GO:5"),
+            "GO:3": _alternate("GO:5"),
+            "GO:5": _obsolete("XX:9"),
+        }
+    )
+
+    replacement_chain_terms({"GO:1", "GO:2", "GO:3"}, lookup)
+
+    assert lookup.calls == [{"GO:1", "GO:2", "GO:3"}, {"GO:5", "XX:9"}]
+
+
+def test_no_identifiers_need_no_lookup() -> None:
+    """An empty batch reads nothing."""
+    lookup = _Lookup({})
+
+    assert replacement_chain_terms(set(), lookup) == {}
+    assert lookup.calls == []
 
 
 def _annotation(**changes: object) -> Annotation:

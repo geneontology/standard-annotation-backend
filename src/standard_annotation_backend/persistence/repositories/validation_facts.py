@@ -1,4 +1,4 @@
-"""Read the facts that semantic validation needs from the active reference data.
+"""Read facts for semantic validation and term replacement from reference data.
 
 A fact is a value a check reads about an annotation, such as whether a term is
 obsolete, the entity's type, or whether a cited publication is retracted. This
@@ -18,20 +18,13 @@ from standard_annotation_backend.domain.ontology import (
     SUBCLASS_PREDICATE,
     OntologyCatalog,
 )
-from standard_annotation_backend.domain.qc_reports import (
-    EntityCatalogUse,
-    OntologySnapshotUse,
-    ReferenceDataVersions,
-)
 from standard_annotation_backend.domain.semantic_validation.checked_ancestors import (
     checked_ancestor_terms,
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
-    RULES_REFERENCE_DATA,
     ActiveSnapshots,
     AnnotationFacts,
     EntityFact,
-    ReplacementFacts,
     TermFact,
     TermStatus,
 )
@@ -39,13 +32,10 @@ from standard_annotation_backend.domain.semantic_validation.identifiers import (
     split_identifier,
     term_identifiers,
 )
-from standard_annotation_backend.domain.term_replacement import replacement_step
 from standard_annotation_backend.persistence.models import (
     OntologyAltIdRecord,
     OntologyClosureRecord,
-    OntologySnapshotDetailRecord,
     OntologyTermRecord,
-    ReferenceSnapshotRecord,
     RetractedPublicationRecord,
     StoredEntityRecord,
 )
@@ -122,13 +112,15 @@ class ValidationFactsRepository:
             snapshots = self._snapshots.resolve(ontologies)
         else:
             self._snapshots.require_readable(snapshots.snapshot_ids)
-        wanted: dict[UUID, set[str]] = {}
-        for annotation in annotations:
-            for occurrence in term_identifiers(annotation):
-                snapshot_id = _snapshot_for(occurrence.prefix, ontologies, snapshots)
-                if snapshot_id is not None:
-                    wanted.setdefault(snapshot_id, set()).add(occurrence.identifier)
-        terms = self._term_facts(wanted)
+        terms = self.terms(
+            {
+                occurrence.identifier
+                for annotation in annotations
+                for occurrence in term_identifiers(annotation)
+            },
+            ontologies,
+            snapshots,
+        )
         entities = self._entity_facts(
             {annotation.db_object_id for annotation in annotations},
             snapshots.entity_catalogs.values(),
@@ -197,107 +189,34 @@ class ValidationFactsRepository:
             for annotation, annotation_peers in zip(annotations, peers, strict=True)
         )
 
-    def replacement_facts(
+    def terms(
         self,
-        annotations: Sequence[Annotation],
+        identifiers: Collection[str],
         ontologies: OntologyCatalog,
-    ) -> ReplacementFacts:
-        """Return facts about the annotations' terms and the terms that replace them.
+        snapshots: ActiveSnapshots,
+    ) -> dict[str, TermFact]:
+        """Return a fact for each identifier whose prefix a configured ontology owns.
 
-        A replacement chain starts at an identifier an annotation uses and steps
-        from an alternative ID to its primary term, or from an obsolete term to its
-        only `replaced_by` term. The active snapshots are looked up once, and each
-        identifier is read from the snapshot of the ontology that owns its prefix.
-        Reading continues along every chain until it reaches a term already read,
-        a term with no further step, or an identifier no configured ontology owns.
+        Each identifier is read from the snapshot, in `snapshots`, of the ontology
+        that owns its prefix. Its status is `current` or `obsolete` if it names a
+        term, `alternate` if it is an alternative ID, and `unknown` otherwise.
+        Identifiers that no configured ontology owns are left out.
 
         Args:
-            annotations: Structurally valid annotations to describe.
+            identifiers: The identifiers to look up.
             ontologies: The configured ontologies and the identifier prefixes each
                 owns.
-
-        Raises:
-            ReferenceDataUnavailableError: If a configured ontology or the go-site
-                rule data has no active snapshot, or the active rule data was
-                stored by an earlier reader version and can no longer be decoded.
-            StoredDataError: If rule data stored by this release's reader
-                version cannot be decoded.
+            snapshots: Snapshots resolved with `SnapshotRepository.resolve` in this
+                transaction, so they are still locked against pruning.
         """
-        snapshots = self._snapshots.resolve(ontologies)
-        terms: dict[str, TermFact] = {}
-        pending = {
-            occurrence.identifier
-            for annotation in annotations
-            for occurrence in term_identifiers(annotation)
-        }
-        while pending:
-            wanted: dict[UUID, set[str]] = {}
-            for identifier in pending:
-                snapshot_id = _snapshot_for(
-                    split_identifier(identifier)[0], ontologies, snapshots
+        wanted: dict[UUID, set[str]] = {}
+        for identifier in identifiers:
+            key = ontologies.key_of(split_identifier(identifier)[0])
+            if key is not None:
+                wanted.setdefault(snapshots.ontology_versions[key], set()).add(
+                    identifier
                 )
-                if snapshot_id is not None:
-                    wanted.setdefault(snapshot_id, set()).add(identifier)
-            found = self._term_facts(wanted)
-            terms.update(found)
-            pending = {
-                following
-                for fact in found.values()
-                if (following := replacement_step(fact)) is not None
-                and following not in terms
-            }
-        return ReplacementFacts(
-            terms=terms,
-            snapshot_ids={
-                **snapshots.ontology_versions,
-                RULES_REFERENCE_DATA: snapshots.rules_snapshot_id,
-            },
-        )
-
-    def reference_versions(self, snapshots: ActiveSnapshots) -> ReferenceDataVersions:
-        """Return version details of `snapshots`, as QC reports record them."""
-        ontology_rows = self.session.execute(
-            select(
-                ReferenceSnapshotRecord.source_key,
-                ReferenceSnapshotRecord.snapshot_id,
-                OntologySnapshotDetailRecord.document_version,
-                ReferenceSnapshotRecord.source_revision,
-            )
-            .join(
-                OntologySnapshotDetailRecord,
-                OntologySnapshotDetailRecord.snapshot_id
-                == ReferenceSnapshotRecord.snapshot_id,
-            )
-            .where(
-                ReferenceSnapshotRecord.snapshot_id.in_(
-                    sorted(snapshots.ontology_versions.values())
-                )
-            )
-            .order_by(ReferenceSnapshotRecord.source_key)
-        )
-        go_site_revision = self.session.scalar(
-            select(ReferenceSnapshotRecord.source_revision).where(
-                ReferenceSnapshotRecord.snapshot_id == snapshots.rules_snapshot_id
-            )
-        )
-        return ReferenceDataVersions(
-            ontologies=tuple(
-                OntologySnapshotUse(
-                    ontology_key=key,
-                    version_id=snapshot_id,
-                    document_version=document_version,
-                    source_revision=source_revision,
-                )
-                for key, snapshot_id, document_version, source_revision in (
-                    ontology_rows
-                )
-            ),
-            go_site_revision=go_site_revision,
-            entity_catalogs=tuple(
-                EntityCatalogUse(source_key=source_key, snapshot_id=snapshot_id)
-                for source_key, snapshot_id in sorted(snapshots.entity_catalogs.items())
-            ),
-        )
+        return self._term_facts(wanted)
 
     def _term_facts(self, wanted: dict[UUID, set[str]]) -> dict[str, TermFact]:
         """Return a fact for each wanted identifier from its ontology's snapshot.
@@ -431,11 +350,3 @@ class ValidationFactsRepository:
                 )
             )
         return retracted
-
-
-def _snapshot_for(
-    prefix: str, ontologies: OntologyCatalog, snapshots: ActiveSnapshots
-) -> UUID | None:
-    """Return the snapshot of the ontology that owns `prefix`, or `None`."""
-    key = ontologies.key_of(prefix)
-    return None if key is None else snapshots.ontology_versions[key]

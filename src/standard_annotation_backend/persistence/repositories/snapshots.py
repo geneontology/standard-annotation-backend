@@ -35,6 +35,9 @@ the one place that defines how snapshots behave:
 - Retirement: `retire` deactivates the active snapshots of sources that are
   no longer configured and records `retired_at`. The kind's next refresh job
   prunes their data.
+- Provenance: snapshot rows and detail rows are kept when data is pruned, so
+  `reference_versions` can report where any resolved snapshot came from, such
+  as for a QC report.
 """
 
 import threading
@@ -47,6 +50,11 @@ from sqlalchemy import Select, and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.ontology import OntologyCatalog
+from standard_annotation_backend.domain.qc_reports import (
+    EntityCatalogUse,
+    OntologySnapshotUse,
+    ReferenceDataVersions,
+)
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     SourceProvenance,
@@ -331,6 +339,55 @@ class SnapshotRepository:
         )
         if found != wanted:
             raise SnapshotPrunedError(wanted - found)
+
+    def reference_versions(self, snapshots: ActiveSnapshots) -> ReferenceDataVersions:
+        """Return where each of `snapshots` came from, as QC reports record it.
+
+        Snapshot and detail rows are kept when a snapshot's data is pruned, so this
+        works for any resolved snapshots.
+        """
+        ontology_rows = self.session.execute(
+            select(
+                ReferenceSnapshotRecord.source_key,
+                ReferenceSnapshotRecord.snapshot_id,
+                OntologySnapshotDetailRecord.document_version,
+                ReferenceSnapshotRecord.source_revision,
+            )
+            .join(
+                OntologySnapshotDetailRecord,
+                OntologySnapshotDetailRecord.snapshot_id
+                == ReferenceSnapshotRecord.snapshot_id,
+            )
+            .where(
+                ReferenceSnapshotRecord.snapshot_id.in_(
+                    sorted(snapshots.ontology_versions.values())
+                )
+            )
+            .order_by(ReferenceSnapshotRecord.source_key)
+        )
+        go_site_revision = self.session.scalar(
+            select(ReferenceSnapshotRecord.source_revision).where(
+                ReferenceSnapshotRecord.snapshot_id == snapshots.rules_snapshot_id
+            )
+        )
+        return ReferenceDataVersions(
+            ontologies=tuple(
+                OntologySnapshotUse(
+                    ontology_key=key,
+                    version_id=snapshot_id,
+                    document_version=document_version,
+                    source_revision=source_revision,
+                )
+                for key, snapshot_id, document_version, source_revision in (
+                    ontology_rows
+                )
+            ),
+            go_site_revision=go_site_revision,
+            entity_catalogs=tuple(
+                EntityCatalogUse(source_key=source_key, snapshot_id=snapshot_id)
+                for source_key, snapshot_id in sorted(snapshots.entity_catalogs.items())
+            ),
+        )
 
     def prune(self, kind: SnapshotKind) -> tuple[UUID, ...]:
         """Delete the data of the kind's snapshots that are no longer kept.

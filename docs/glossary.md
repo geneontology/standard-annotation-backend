@@ -164,6 +164,11 @@ annotations with their current terms, wherever the result passes validation. Eve
 ontology activation and every GPAD publication queues one. See
 [Automatic term replacement](annotation-validation.md#automatic-term-replacement).
 
+**Replacement chain.** The sequence of replacements that term replacement follows from
+an obsolete term or alternative ID: from an alternative ID to its primary term, or from
+an obsolete term to its only `replaced_by` term, until it reaches a current term. See
+[Automatic term replacement](annotation-validation.md#automatic-term-replacement).
+
 **Follow-up job.** A job that a refresh queues in its own transaction, such as a term
 replacement job. The runner sends it to a worker after the refresh commits.
 

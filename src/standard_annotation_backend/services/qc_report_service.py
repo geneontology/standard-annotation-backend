@@ -219,7 +219,7 @@ class QcReportRunner:
         with self._unit_of_work_factory() as unit_of_work:
             snapshots = unit_of_work.snapshots.resolve(self._ontologies)
             reference_data: list[ReferenceDataVersions] = [
-                unit_of_work.validation_facts.reference_versions(snapshots)
+                unit_of_work.snapshots.reference_versions(snapshots)
             ]
         after: UUID | None = None
         while True:
@@ -231,7 +231,7 @@ class QcReportRunner:
                     break
                 after = records[-1].annotation_id
                 snapshots = unit_of_work.snapshots.resolve(self._ontologies)
-                versions = unit_of_work.validation_facts.reference_versions(snapshots)
+                versions = unit_of_work.snapshots.reference_versions(snapshots)
                 if versions not in reference_data:
                     reference_data.append(versions)
                 creators = unit_of_work.annotations.creators(

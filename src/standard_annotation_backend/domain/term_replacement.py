@@ -12,7 +12,7 @@ another ontology, or returns to an identifier it already visited.
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any
 from uuid import UUID
@@ -47,6 +47,44 @@ def replacement_step(fact: TermFact) -> str | None:
     return None
 
 
+def replacement_chain_terms(
+    identifiers: Collection[str],
+    read: Callable[[Collection[str]], Mapping[str, TermFact]],
+) -> dict[str, TermFact]:
+    """Return facts about identifiers and every term their replacement chains reach.
+
+    `read` is called first with `identifiers`, then once per step with the
+    identifiers that the facts just read are directly replaced by (see
+    `replacement_step`), until no new identifiers remain. Each identifier is
+    passed to `read` at most once, so chains that meet or loop are read once and
+    reading always ends. An identifier that `read` leaves out ends its chain.
+
+    Args:
+        identifiers: The identifiers the annotations use.
+        read: Returns a fact for each given identifier it can describe, such as
+            every identifier whose prefix a configured ontology owns, read from one
+            set of snapshots.
+
+    Returns:
+        Every fact `read` returned, keyed by identifier. This is the `terms`
+        mapping that `replacement_for` and `replaced_annotation` expect.
+    """
+    terms: dict[str, TermFact] = {}
+    asked: set[str] = set()
+    pending = set(identifiers)
+    while pending:
+        asked |= pending
+        found = read(pending)
+        terms.update(found)
+        pending = {
+            following
+            for fact in found.values()
+            if (following := replacement_step(fact)) is not None
+            and following not in asked
+        }
+    return terms
+
+
 def replacement_for(
     identifier: str,
     terms: Mapping[str, TermFact],
@@ -58,7 +96,7 @@ def replacement_for(
         identifier: An identifier an annotation uses.
         terms: Facts about the identifier and every term its replacement chain
             reaches, each from the active snapshot of the ontology that owns its
-            prefix.
+            prefix, as `replacement_chain_terms` returns them.
         ontologies: The configured ontologies and the identifier prefixes each
             owns. A replacement must belong to the same ontology as the
             identifier it replaces.
