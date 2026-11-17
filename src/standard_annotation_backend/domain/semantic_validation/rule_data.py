@@ -11,10 +11,11 @@ Only the values the rules use are kept, and they were validated when the files
 were read, so the rules can rely on them without checking again.
 """
 
-from collections.abc import Collection
+import re
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Self
 
 from standard_annotation_backend.domain.stored_json import StoredJson
 
@@ -168,6 +169,87 @@ class RuleData:
     group_shorthands: tuple[str, ...]
     eco_usage_constraints: tuple[EcoUsageConstraint, ...]
     extension_constraints: tuple[ExtensionConstraint, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RuleDataIndex:
+    """Hold rule data with the lookups and compiled patterns that GO Rules use.
+
+    GO Rules check every annotation against the same rule data, so the lookups are
+    built and the patterns compiled once, when a snapshot's rule data is first
+    read, instead of for each annotation. Build one with `RuleDataIndex.of`.
+
+    Attributes:
+        data: The rule data the index was built from.
+        databases: Each database entry, by its `database` prefix.
+        group_shorthands: Every group shorthand.
+        go_refs: Each GO_REF entry, by its identifier.
+        primary_go_ref_ids: The primary identifier of each GO_REF alternative ID.
+        eco_usage_constraints: Each evidence usage constraint, by its `eco_id`.
+        extension_constraints: The extension constraints for each `relation_id`, in
+            file order.
+        patterns: Every `id_syntax`, `allowed_reference`, and `reference matches`
+            pattern in the data, compiled, by its text.
+    """
+
+    data: RuleData
+    databases: Mapping[str, DatabaseEntry]
+    group_shorthands: frozenset[str]
+    go_refs: Mapping[str, GoRefEntry]
+    primary_go_ref_ids: Mapping[str, str]
+    eco_usage_constraints: Mapping[str, EcoUsageConstraint]
+    extension_constraints: Mapping[str, tuple[ExtensionConstraint, ...]]
+    patterns: Mapping[str, re.Pattern[str]]
+
+    @classmethod
+    def of(cls, data: RuleData) -> Self:
+        """Return the index of `data`.
+
+        Raises:
+            re.error: If a pattern does not compile. A rules refresh rejects such
+                files, so stored rule data never has one.
+        """
+        extension_constraints: dict[str, list[ExtensionConstraint]] = {}
+        for constraint in data.extension_constraints:
+            extension_constraints.setdefault(constraint.relation_id, []).append(
+                constraint
+            )
+        return cls(
+            data=data,
+            databases={entry.database: entry for entry in data.databases},
+            group_shorthands=frozenset(data.group_shorthands),
+            go_refs={entry.go_ref_id: entry for entry in data.go_refs},
+            primary_go_ref_ids={
+                alt_id: entry.go_ref_id
+                for entry in data.go_refs
+                for alt_id in entry.alt_ids
+            },
+            eco_usage_constraints={
+                entry.eco_id: entry for entry in data.eco_usage_constraints
+            },
+            extension_constraints={
+                relation_id: tuple(constraints)
+                for relation_id, constraints in extension_constraints.items()
+            },
+            patterns={pattern: re.compile(pattern) for pattern in _patterns(data)},
+        )
+
+    def fullmatch(self, pattern: str, value: str) -> bool:
+        """Return whether all of `value` matches `pattern`, a pattern in the data."""
+        return self.patterns[pattern].fullmatch(value) is not None
+
+
+def _patterns(data: RuleData) -> Iterator[str]:
+    """Yield every pattern in `data`, possibly more than once."""
+    for entry in data.databases:
+        yield from entry.id_syntaxes
+    for constraint in data.eco_usage_constraints:
+        if constraint.allowed_reference is not None:
+            yield constraint.allowed_reference
+        if constraint.condition is not None and isinstance(
+            constraint.condition.test, ReferenceMatches
+        ):
+            yield constraint.condition.test.pattern
 
 
 STORED_RULE_DATA = StoredJson(RuleData, label="rule data")

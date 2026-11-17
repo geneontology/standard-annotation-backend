@@ -12,7 +12,9 @@ from enum import StrEnum
 from uuid import UUID
 
 from standard_annotation_backend.domain.errors import UnavailableError
-from standard_annotation_backend.domain.semantic_validation.rule_data import RuleData
+from standard_annotation_backend.domain.semantic_validation.rule_data import (
+    RuleDataIndex,
+)
 
 RULES_REFERENCE_DATA = "rules"
 """The name `ReferenceDataUnavailableError` uses for the go-site rule data."""
@@ -75,18 +77,16 @@ class AnnotationFacts:
         terms: A fact for each identifier whose prefix a configured ontology owns.
             Identifiers with other prefixes have no fact and are not checked.
         entity: The subject's entity, or `None` if no entity catalog lists it.
+        rule_data: The active go-site rule data, indexed for the GO Rules.
         duplicate_peer_ids: Other active annotations that duplicate this one.
-        rule_data: The active go-site rule data. `None` only when facts are built
-            directly without it, as some unit tests do; rules that need rule data
-            then report nothing.
         retracted_pmids: The annotation's references that the active go-site
             rule data lists in `retracted-publications.txt`.
     """
 
     terms: Mapping[str, TermFact]
     entity: EntityFact | None
+    rule_data: RuleDataIndex
     duplicate_peer_ids: tuple[UUID, ...] = ()
-    rule_data: RuleData | None = None
     retracted_pmids: frozenset[str] = frozenset()
 
 
@@ -104,14 +104,14 @@ class ActiveSnapshots:
         ontology_versions: Each configured ontology's active snapshot, keyed by
             ontology key.
         rules_snapshot_id: The active go-site rule data snapshot.
-        rule_data: That snapshot's rule data.
+        rule_data: That snapshot's rule data, indexed for the GO Rules.
         entity_catalogs: Each active entity catalog's snapshot, keyed by source
             key.
     """
 
     ontology_versions: Mapping[str, UUID]
     rules_snapshot_id: UUID
-    rule_data: RuleData
+    rule_data: RuleDataIndex
     entity_catalogs: Mapping[str, UUID] = field(default_factory=dict)
 
     @property

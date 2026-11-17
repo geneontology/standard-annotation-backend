@@ -167,7 +167,7 @@ class QcReportResult:
     """Summarize a completed QC report, as stored on its job.
 
     Attributes:
-        group_key: The group the report covered, or `None` for all groups.
+        owning_group_id: The group the report covered, or `None` for all groups.
         annotations_checked: Active annotations validated.
         annotations_with_issues: Annotations given a finding.
         reference_data: Every distinct set of reference data used, in the order
@@ -180,7 +180,7 @@ class QcReportResult:
             the report validated with.
     """
 
-    group_key: str | None
+    owning_group_id: str | None
     annotations_checked: Count
     annotations_with_issues: Count
     reference_data: tuple[ReferenceDataVersions, ...]
@@ -194,6 +194,9 @@ class QcReportResult:
 
 STORED_QC_REPORT_RESULT = StoredJson(QcReportResult, label="QC report result")
 """The stored form of a QC report's result."""
+
+STORED_VALIDATION_ISSUE = StoredJson(ValidationIssue, label="QC finding issue")
+"""The stored form of one issue in a QC report finding."""
 
 
 @dataclass(frozen=True, slots=True)

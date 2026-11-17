@@ -24,6 +24,11 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
     EntityFact,
 )
+from standard_annotation_backend.domain.semantic_validation.rule_data import (
+    DatabaseEntry,
+    RuleData,
+    RuleDataIndex,
+)
 from standard_annotation_backend.persistence.repositories.annotations import (
     ValidatedCreate,
     ValidatedUpdate,
@@ -251,6 +256,18 @@ class FakeAuditRepository:
         )
 
 
+_RULE_DATA = RuleDataIndex.of(
+    RuleData(
+        databases=(DatabaseEntry("CL"), DatabaseEntry("UniProtKB")),
+        go_refs=(),
+        group_shorthands=("GO_Central",),
+        eco_usage_constraints=(),
+        extension_constraints=(),
+    )
+)
+"""Rule data that the test payloads satisfy."""
+
+
 class FakeValidationFacts:
     """Describe every annotation as having an active entity and no peers.
 
@@ -267,7 +284,12 @@ class FakeValidationFacts:
         ontologies: Mapping[str, tuple[str, ...]],
     ) -> tuple[AnnotationFacts, ...]:
         return tuple(
-            AnnotationFacts(terms={}, entity=self.entity, duplicate_peer_ids=ids)
+            AnnotationFacts(
+                terms={},
+                entity=self.entity,
+                rule_data=_RULE_DATA,
+                duplicate_peer_ids=ids,
+            )
             for ids in peers
         )
 

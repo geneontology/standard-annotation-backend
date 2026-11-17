@@ -43,9 +43,7 @@ def test_unlisted_obsolete_and_alternative_references_are_issues(
 
 
 def test_a_current_listed_reference_passes() -> None:
-    """A listed, current GO_REF passes, and nothing fires without rule data."""
+    """A listed, current GO_REF passes."""
     subject = annotation(references=["GO_REF:0000033"])
-    unlisted = annotation(references=["GO_REF:0000555"])
 
     assert list(rule(subject, facts(rule_data=DATA))) == []
-    assert list(rule(unlisted, facts(rule_data=None))) == []

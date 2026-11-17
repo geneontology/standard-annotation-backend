@@ -26,10 +26,10 @@ from standard_annotation_backend.domain.jobs import (
 )
 from standard_annotation_backend.domain.qc_reports import (
     ISSUE_TYPES,
+    STORED_VALIDATION_ISSUE,
     QcFinding,
     QcGroupCounts,
 )
-from standard_annotation_backend.domain.validation import ValidationIssue
 from standard_annotation_backend.persistence.models import (
     JobRecord,
     QcReportFindingRecord,
@@ -86,7 +86,10 @@ class QcReportRepository:
                         "owning_group_id": finding.owning_group_id,
                         "created_by": finding.created_by,
                         "issue_types": list(finding.issue_types),
-                        "issues": [_json_issue(issue) for issue in finding.issues],
+                        "issues": [
+                            STORED_VALIDATION_ISSUE.dump(issue)
+                            for issue in finding.issues
+                        ],
                     }
                     for finding in findings
                 ],
@@ -367,15 +370,3 @@ class QcReportRepository:
             limit=limit,
             offset=offset,
         )
-
-
-def _json_issue(issue: ValidationIssue) -> dict[str, object]:
-    """Return an issue in JSON form, with its location as a list."""
-    stored: dict[str, object] = {
-        "location": list(issue["location"]),
-        "message": issue["message"],
-        "type": issue["type"],
-    }
-    if "details" in issue:
-        stored["details"] = issue["details"]
-    return stored

@@ -1,6 +1,7 @@
 """Verify that every create and update must pass semantic validation."""
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 import httpx2
 import pytest
@@ -150,6 +151,27 @@ def test_an_imported_duplicate_cannot_be_updated_until_the_pair_is_resolved(
         first, changes={"assigned_by": "MGI"}, expected_version=1, context=context
     )
     assert updated.version == 2
+
+
+def test_writes_are_checked_against_rule_data_activated_after_earlier_writes(
+    integration_api_client: TestClient,
+    active_annotation_subjects: None,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A write uses the rule data active when it runs, not rule data read earlier."""
+    accepted = _create(integration_api_client, PAYLOAD)
+    set_rule_data(
+        session_factory, replace(DEFAULT_RULE_DATA, group_shorthands=("MGI",))
+    )
+
+    rejected = _create(integration_api_client, {**PAYLOAD, "references": ["PMID:2"]})
+
+    assert accepted.status_code == status.HTTP_201_CREATED
+    assert rejected.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert [
+        (issue["location"], issue["type"])
+        for issue in rejected.json()["error"]["details"]
+    ] == [(["annotation", "assigned_by"], "gorule_0000027")]
 
 
 @pytest.mark.parametrize("missing", ["ontology", "rules"])

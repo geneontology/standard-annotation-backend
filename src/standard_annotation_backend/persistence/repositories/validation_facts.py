@@ -148,7 +148,7 @@ class ValidationFactsRepository:
         checked_ancestors = self._checked_ancestors(
             snapshots.ontology_versions[ontologies.go_key],
             current_go_terms | go_types,
-            checked_ancestor_terms(snapshots.rule_data),
+            checked_ancestor_terms(snapshots.rule_data.data),
         )
         terms = {
             identifier: (

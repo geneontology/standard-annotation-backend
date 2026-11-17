@@ -173,7 +173,7 @@ def test_a_group_report_checks_only_that_group(
     job = _run(unit_of_work_factory, database_engine, group_key="MGI")
 
     assert job.result is not None
-    assert job.result["group_key"] == "MGI"
+    assert job.result["owning_group_id"] == "MGI"
     assert job.result["annotations_checked"] == 1
     assert list(_findings(unit_of_work_factory, job.job_id)) == [mgi]
 

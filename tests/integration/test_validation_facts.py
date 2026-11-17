@@ -126,5 +126,5 @@ def test_go_facts_include_subsets_checked_ancestors_rule_data_and_retracted_pmid
         "GO:0032991",
         type_checked_ancestors=frozenset({"GO:0005575", "GO:0032991"}),
     )
-    assert facts.rule_data == rule_data
+    assert facts.rule_data.data == rule_data
     assert facts.retracted_pmids == frozenset({"PMID:9"})

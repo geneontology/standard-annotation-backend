@@ -21,6 +21,10 @@ the one place that defines how snapshots behave:
   does, so a transaction never loses data it is reading. A reader given snapshot
   IDs from another transaction calls `require_readable`, which takes the same
   lock and raises `SnapshotPrunedError` instead of reading nothing.
+- Decoded rule data: `resolve` indexes a rules snapshot's rule data once per
+  process and caches it by snapshot ID. Stored snapshot data never changes and
+  snapshot IDs are never reused, so a cached entry is always current for its
+  snapshot.
 - Retention: For each source with an active snapshot, the active snapshot and
   the one it replaced keep their data. Every refresh job of a kind prunes the
   kind's other snapshots: their data rows are deleted and `pruned_at` is set,
@@ -33,6 +37,8 @@ the one place that defines how snapshots behave:
   prunes their data.
 """
 
+import threading
+from collections import OrderedDict
 from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
@@ -52,7 +58,7 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
 )
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     STORED_RULE_DATA,
-    RuleData,
+    RuleDataIndex,
 )
 from standard_annotation_backend.domain.snapshots import (
     SnapshotKind,
@@ -88,6 +94,42 @@ class SnapshotPrunedError(RuntimeError):
     def __init__(self, snapshot_ids: Collection[UUID]) -> None:
         self.snapshot_ids = tuple(sorted(snapshot_ids))
         super().__init__("snapshot data was pruned or never stored")
+
+
+class _RuleDataCache:
+    """Keep the indexed rule data of the rules snapshots read most recently.
+
+    Stored rule data never changes and snapshot IDs are never reused, so an
+    entry never goes stale and needs no invalidation. One cache serves every
+    repository in the process; a lock guards it because web requests run on
+    several threads.
+    """
+
+    def __init__(self, max_entries: int) -> None:
+        self._entries: OrderedDict[UUID, RuleDataIndex] = OrderedDict()
+        self._max_entries = max_entries
+        self._lock = threading.Lock()
+
+    def get(self, snapshot_id: UUID) -> RuleDataIndex | None:
+        """Return the snapshot's indexed rule data, if it is cached."""
+        with self._lock:
+            index = self._entries.get(snapshot_id)
+            if index is not None:
+                self._entries.move_to_end(snapshot_id)
+            return index
+
+    def put(self, snapshot_id: UUID, index: RuleDataIndex) -> None:
+        """Cache the snapshot's indexed rule data, dropping the oldest entry."""
+        with self._lock:
+            self._entries[snapshot_id] = index
+            self._entries.move_to_end(snapshot_id)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+
+
+_RULE_DATA_CACHE = _RuleDataCache(max_entries=3)
+"""Indexed rule data by snapshot ID: room for the active snapshot, its
+predecessor, and one more, so an activation never forces the active one out."""
 
 
 class SnapshotRepository:
@@ -213,7 +255,9 @@ class SnapshotRepository:
         go-site rule data, and of every entity catalog. One query finds them and
         locks each with `FOR KEY SHARE` until the transaction ends, so pruning
         cannot delete their data while the caller reads it. Refreshes can still
-        activate newer snapshots meanwhile; the caller keeps reading these.
+        activate newer snapshots meanwhile; the caller keeps reading these. The
+        rule data's index is cached by snapshot ID, so later calls that find the
+        same active rules snapshot skip decoding it.
 
         Raises:
             ReferenceDataUnavailableError: If a configured ontology or the rule
@@ -381,8 +425,14 @@ class SnapshotRepository:
         self.session.flush(records)
         return tuple(records)
 
-    def _rule_data(self, snapshot_id: UUID, reader_version: int) -> RuleData:
-        """Return a rules snapshot's decoded rule data.
+    def _rule_data(self, snapshot_id: UUID, reader_version: int) -> RuleDataIndex:
+        """Return a rules snapshot's rule data, indexed for the GO Rules.
+
+        The index is cached by snapshot ID, so each snapshot's data is normally
+        decoded once per process; concurrent first reads may each decode it.
+        Failures are not cached. A cached snapshot's data is
+        not read again; `resolve` has locked the active snapshot, and an active
+        snapshot's data is never pruned.
 
         Raises:
             SnapshotPrunedError: If the snapshot has no rule data.
@@ -391,17 +441,23 @@ class SnapshotRepository:
             StoredDataError: If this release's reader stored it and it cannot be
                 decoded.
         """
+        cached = _RULE_DATA_CACHE.get(snapshot_id)
+        if cached is not None:
+            return cached
         stored = self.session.scalar(
             select(RuleDataRecord.data).where(RuleDataRecord.snapshot_id == snapshot_id)
         )
         if stored is None:
             raise SnapshotPrunedError((snapshot_id,))
         try:
-            return STORED_RULE_DATA.load(stored)
+            data = STORED_RULE_DATA.load(stored)
         except StoredDataError:
             if reader_version < current_reader_version(RefreshKindName.RULES):
                 raise ReferenceDataUnavailableError((RULES_REFERENCE_DATA,)) from None
             raise
+        index = RuleDataIndex.of(data)
+        _RULE_DATA_CACHE.put(snapshot_id, index)
+        return index
 
 
 def _active(

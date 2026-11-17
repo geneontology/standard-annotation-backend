@@ -58,10 +58,9 @@ def test_a_local_identifier_must_match_one_of_the_databases_syntaxes() -> None:
 
 
 def test_assigned_by_must_be_a_group_shorthand() -> None:
-    """An unknown group is reported at `assigned_by`; nothing fires without rule data."""
+    """An unknown group is reported at `assigned_by`."""
     subject = annotation(assigned_by="Unknown_Group")
 
     assert found(rule(subject, facts(rule_data=DATA))) == [
         ("gorule_0000027", ("annotation", "assigned_by"))
     ]
-    assert found(rule(subject, facts(rule_data=None))) == []
