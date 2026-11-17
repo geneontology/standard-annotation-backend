@@ -7,6 +7,7 @@ publication queues one for the imported group.
 
 from collections import Counter
 from datetime import UTC, datetime
+from functools import partial
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -30,11 +31,16 @@ from standard_annotation_backend.domain.jobs import (
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.domain.semantic_validation.facts import (
+    RULES_REFERENCE_DATA,
     ReferenceDataUnavailableError,
+)
+from standard_annotation_backend.domain.semantic_validation.identifiers import (
+    term_identifiers,
 )
 from standard_annotation_backend.domain.term_replacement import (
     TermReplacementResult,
     replaced_annotation,
+    replacement_chain_terms,
 )
 from standard_annotation_backend.persistence.locks import AdvisoryTryLock, LockNamespace
 from standard_annotation_backend.persistence.unit_of_work import (
@@ -210,16 +216,27 @@ class TermReplacementService:
                         )
                     except ValidationError:
                         counts["issues"] += 1
-                facts = unit_of_work.validation_facts.replacement_facts(
-                    [annotation for _, _, annotation in readable], self._ontologies
+                snapshots = unit_of_work.snapshots.resolve(self._ontologies)
+                terms = replacement_chain_terms(
+                    {
+                        occurrence.identifier
+                        for _, _, annotation in readable
+                        for occurrence in term_identifiers(annotation)
+                    },
+                    partial(
+                        unit_of_work.validation_facts.terms,
+                        ontologies=self._ontologies,
+                        snapshots=snapshots,
+                    ),
                 )
-            for key, snapshot_id in facts.snapshot_ids.items():
+            for key, snapshot_id in {
+                **snapshots.ontology_versions,
+                RULES_REFERENCE_DATA: snapshots.rules_snapshot_id,
+            }.items():
                 snapshot_ids.setdefault(key, set()).add(snapshot_id)
             for annotation_id, version, annotation in readable:
                 try:
-                    replaced = replaced_annotation(
-                        annotation, facts.terms, self._ontologies
-                    )
+                    replaced = replaced_annotation(annotation, terms, self._ontologies)
                 except ValidationError:
                     # A replacement target the schema rejects, such as a
                     # malformed `replaced_by`, cannot be written.

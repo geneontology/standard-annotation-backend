@@ -126,22 +126,6 @@ class ActiveSnapshots:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class ReplacementFacts:
-    """Hold what term replacement knows about a batch of annotations.
-
-    Attributes:
-        terms: A fact for each identifier the annotations use whose prefix a
-            configured ontology owns, and for each term their replacement chains
-            (see the `term_replacement` module) reach.
-        snapshot_ids: The ID of the snapshot read for each ontology key, plus
-            `rules` for the go-site rule data.
-    """
-
-    terms: Mapping[str, TermFact]
-    snapshot_ids: Mapping[str, UUID]
-
-
 class ReferenceDataUnavailableError(UnavailableError):
     """Report reference data that validation needs but cannot read.
 

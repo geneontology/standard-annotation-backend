@@ -1,6 +1,6 @@
 """Verify that term replacement jobs replace only what passes validation."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection
 from uuid import UUID
 
 import pytest
@@ -13,7 +13,8 @@ from standard_annotation_backend.domain.annotations import Annotation, ChangeSou
 from standard_annotation_backend.domain.jobs import JobStatus
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.semantic_validation.facts import (
-    ReplacementFacts,
+    ActiveSnapshots,
+    TermFact,
 )
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.locks import (
@@ -214,24 +215,23 @@ def test_an_annotation_changed_after_it_was_read_is_skipped_as_stale(
 ) -> None:
     """A concurrent edit on another connection wins, and the job counts it stale."""
     annotation_id = _insert(session_factory, _annotation(OBSOLETE))
-    original = ValidationFactsRepository.replacement_facts
+    original = ValidationFactsRepository.terms
 
-    def edit_then_gather(
+    def edit_then_read(
         self: ValidationFactsRepository,
-        annotations: Sequence[Annotation],
+        identifiers: Collection[str],
         ontologies: OntologyCatalog,
-    ) -> ReplacementFacts:
+        snapshots: ActiveSnapshots,
+    ) -> dict[str, TermFact]:
         with session_factory.begin() as other:
             other.execute(
                 update(AnnotationRecord)
                 .where(AnnotationRecord.annotation_id == annotation_id)
                 .values(current_version=AnnotationRecord.current_version + 1)
             )
-        return original(self, annotations, ontologies)
+        return original(self, identifiers, ontologies, snapshots)
 
-    monkeypatch.setattr(
-        ValidationFactsRepository, "replacement_facts", edit_then_gather
-    )
+    monkeypatch.setattr(ValidationFactsRepository, "terms", edit_then_read)
     job = _run(unit_of_work_factory, database_engine)
 
     assert job.result is not None
