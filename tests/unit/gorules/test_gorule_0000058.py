@@ -96,9 +96,8 @@ def test_cardinality_counts_extensions_with_the_same_relation_and_prefix() -> No
     ]
 
 
-def test_an_unknown_term_or_missing_rule_data_is_not_checked() -> None:
-    """The rule needs the annotated term's checked ancestors and the constraints."""
+def test_an_unknown_term_is_not_checked() -> None:
+    """The rule needs the annotated term's checked ancestors."""
     subject = annotation(annotation_extensions=_extensions((OCCURS_IN, "CHEBI:1")))
 
     assert _issues(subject, {}) == []
-    assert found(rule(subject, facts(rule_data=None))) == []

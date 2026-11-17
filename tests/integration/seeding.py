@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import (
@@ -485,9 +485,11 @@ def set_rule_data(
     *,
     retracted_pmids: Iterable[str] = (),
 ) -> None:
-    """Replace the active go-site rule data and its retracted PMIDs.
+    """Activate a new rules snapshot with this rule data and retracted PMIDs.
 
-    Call it after `seed_reference_data`, which creates the active rules snapshot.
+    Call it after `seed_reference_data`, which creates the first active rules
+    snapshot. Like a rules refresh, it stores a new snapshot rather than changing
+    the active one: SABE treats stored snapshot data as never changing.
 
     Args:
         session_factory: Factory for sessions on the test database.
@@ -496,21 +498,34 @@ def set_rule_data(
     """
     pmids = sorted(set(retracted_pmids))
     with session_factory.begin() as session:
-        snapshot = session.scalars(
+        previous = session.scalars(
             select(ReferenceSnapshotRecord).where(
                 ReferenceSnapshotRecord.kind == SnapshotKind.RULES,
                 ReferenceSnapshotRecord.active.is_(True),
             )
         ).one()
-        stored = session.get_one(RuleDataRecord, snapshot.snapshot_id)
-        stored.data = STORED_RULE_DATA.dump(rule_data)
-        detail = session.get_one(RulesSnapshotDetailRecord, snapshot.snapshot_id)
-        detail.retracted_publication_count = len(pmids)
-        session.execute(
-            delete(RetractedPublicationRecord).where(
-                RetractedPublicationRecord.snapshot_id == snapshot.snapshot_id
-            )
+        previous.active = False
+        # Flushed first: the partial unique index allows one active snapshot.
+        session.flush([previous])
+        snapshot = _seeded_snapshot(
+            session, SnapshotKind.RULES, RULES_SOURCE_KEY, "rules_refresh"
         )
+        snapshot.source_type = previous.source_type
+        snapshot.source_locator = previous.source_locator
+        snapshot.source_revision = previous.source_revision
+        session.add_all(
+            [
+                RulesSnapshotDetailRecord(
+                    snapshot_id=snapshot.snapshot_id,
+                    retracted_publication_count=len(pmids),
+                ),
+                RuleDataRecord(
+                    snapshot_id=snapshot.snapshot_id,
+                    data=STORED_RULE_DATA.dump(rule_data),
+                ),
+            ]
+        )
+        session.flush()
         session.add_all(
             RetractedPublicationRecord(snapshot_id=snapshot.snapshot_id, pmid=pmid)
             for pmid in pmids

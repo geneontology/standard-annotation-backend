@@ -36,6 +36,7 @@ from standard_annotation_backend.domain.jobs import (
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.qc_reports import (
     STORED_QC_REPORT_RESULT,
+    STORED_VALIDATION_ISSUE,
     QcFinding,
     QcGroupCounts,
     QcReportFindingsExpiredError,
@@ -49,9 +50,6 @@ from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
 from standard_annotation_backend.domain.semantic_validation.facts import (
     ReferenceDataUnavailableError,
-)
-from standard_annotation_backend.domain.validation import (
-    ValidationIssue,
 )
 from standard_annotation_backend.persistence.locks import AdvisoryTryLock, LockNamespace
 from standard_annotation_backend.persistence.models import (
@@ -279,7 +277,7 @@ class QcReportRunner:
                 },
             )
         return QcReportResult(
-            group_key=group_key,
+            owning_group_id=group_key,
             annotations_checked=checked,
             annotations_with_issues=with_issues,
             reference_data=tuple(reference_data),
@@ -566,22 +564,16 @@ def _listing(record: JobRecord, superseded: set[UUID]) -> QcReportListing:
 
 
 def _finding(record: QcReportFindingRecord) -> QcFinding:
-    """Build a finding from its stored row."""
-    issues: list[ValidationIssue] = []
-    for stored in record.issues:
-        issue = ValidationIssue(
-            location=tuple(stored["location"]),
-            message=stored["message"],
-            type=stored["type"],
-        )
-        if "details" in stored:
-            issue["details"] = stored["details"]
-        issues.append(issue)
+    """Build a finding from its stored row.
+
+    Raises:
+        StoredDataError: If a stored issue does not have the issue shape.
+    """
     return QcFinding(
         annotation_id=record.annotation_id,
         annotation_version=record.annotation_version,
         owning_group_id=record.owning_group_id,
         created_by=record.created_by,
-        issues=tuple(issues),
+        issues=tuple(STORED_VALIDATION_ISSUE.load(issue) for issue in record.issues),
         issue_types=tuple(record.issue_types),
     )

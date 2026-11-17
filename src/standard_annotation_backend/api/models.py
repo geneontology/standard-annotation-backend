@@ -33,9 +33,9 @@ from standard_annotation_backend.domain.change_sets import (
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.qc_reports import (
     ISSUE_TYPES,
-    STORED_QC_REPORT_RESULT,
     IssueTypeEntry,
     QcFinding,
+    ReferenceDataVersions,
 )
 from standard_annotation_backend.domain.semantic_validation.details import (
     IssueDetails,
@@ -850,6 +850,28 @@ class QcReferenceDataResource(BaseModel):
     go_site_revision: str | None
     entity_catalogs: list[QcEntityCatalogResource]
 
+    @classmethod
+    def from_versions(cls, versions: ReferenceDataVersions) -> Self:
+        """Convert one recorded set of reference data to the public resource."""
+        return cls(
+            ontologies=[
+                QcOntologySnapshotResource(
+                    ontology_key=use.ontology_key,
+                    version_id=use.version_id,
+                    document_version=use.document_version,
+                    source_revision=use.source_revision,
+                )
+                for use in versions.ontologies
+            ],
+            go_site_revision=versions.go_site_revision,
+            entity_catalogs=[
+                QcEntityCatalogResource(
+                    source_key=use.source_key, snapshot_id=use.snapshot_id
+                )
+                for use in versions.entity_catalogs
+            ],
+        )
+
 
 class QcReportResource(BaseModel):
     """Describe a QC report: status, scope, timing, versions, and counts.
@@ -891,7 +913,6 @@ class QcReportResource(BaseModel):
     def from_service(cls, summary: QcReportSummary) -> Self:
         """Convert a service summary to the public resource."""
         result = summary.result
-        stored = None if result is None else STORED_QC_REPORT_RESULT.dump(result)
         return cls.model_validate(
             {
                 "report_id": summary.job.job_id,
@@ -912,7 +933,14 @@ class QcReportResource(BaseModel):
                     }
                     for group, counts in summary.by_group.items()
                 },
-                "reference_data": [] if stored is None else stored["reference_data"],
+                "reference_data": (
+                    []
+                    if result is None
+                    else [
+                        QcReferenceDataResource.from_versions(versions)
+                        for versions in result.reference_data
+                    ]
+                ),
                 "sabe_version": None if result is None else result.sabe_version,
                 "schema_version": None if result is None else result.schema_version,
             }

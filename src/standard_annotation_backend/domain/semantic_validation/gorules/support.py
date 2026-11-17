@@ -87,30 +87,24 @@ def gorule_0000030(
     A reference is reported when it is absent, marked obsolete, or an
     alternative ID; an alternative ID's issue names its primary reference.
     """
-    if facts.rule_data is None:
-        return
-    entries = {entry.go_ref_id: entry for entry in facts.rule_data.go_refs}
-    primary_by_alt_id = {
-        alt_id: entry.go_ref_id
-        for entry in facts.rule_data.go_refs
-        for alt_id in entry.alt_ids
-    }
+    go_refs = facts.rule_data.go_refs
+    primary_ids = facts.rule_data.primary_go_ref_ids
     for index, reference in enumerate(annotation.references):
         if split_identifier(reference)[0] != "GO_REF":
             continue
         location = _reference_location(index)
-        if reference in primary_by_alt_id:
+        if reference in primary_ids:
             yield gorule_issue(
                 30,
                 "GO_REF reference is an alternative ID",
                 location,
-                PrimaryIdDetails(primary_id=primary_by_alt_id[reference]),
+                PrimaryIdDetails(primary_id=primary_ids[reference]),
             )
-        elif reference not in entries:
+        elif reference not in go_refs:
             yield gorule_issue(
                 30, "GO_REF reference is not listed in gorefs.yaml", location
             )
-        elif entries[reference].obsolete:
+        elif go_refs[reference].obsolete:
             yield gorule_issue(30, "GO_REF reference is obsolete", location)
 
 

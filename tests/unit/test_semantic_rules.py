@@ -22,6 +22,7 @@ from standard_annotation_backend.domain.semantic_validation.rule_data import (
     EcoUsageConstraint,
     EntityIsComplex,
     RuleData,
+    RuleDataIndex,
     WithPresence,
     WithPresenceCondition,
 )
@@ -37,6 +38,14 @@ ENTITY = EntityFact(db_object_taxon_id="NCBITaxon:9606", db_object_type="PR:0000
 TERM = "GO:0006915"
 CURRENT = TermFact(TermStatus.CURRENT, checked_ancestors=frozenset({BP_ROOT}))
 PEER = UUID("00000000-0000-0000-0000-000000000001")
+RULE_DATA = RuleData(
+    databases=(DatabaseEntry("CL"), DatabaseEntry("UniProtKB")),
+    go_refs=(),
+    group_shorthands=("GO_Central",),
+    eco_usage_constraints=(),
+    extension_constraints=(),
+)
+"""Rule data that the annotations in these tests satisfy."""
 
 
 def _annotation(**changes: object) -> Annotation:
@@ -60,13 +69,13 @@ def _facts(
     *,
     entity: EntityFact | None = ENTITY,
     peers: tuple[UUID, ...] = (),
-    rule_data: RuleData | None = None,
+    rule_data: RuleData = RULE_DATA,
 ) -> AnnotationFacts:
     return AnnotationFacts(
         terms={TERM: CURRENT} if terms is None else terms,
         entity=entity,
         duplicate_peer_ids=peers,
-        rule_data=rule_data,
+        rule_data=RuleDataIndex.of(rule_data),
     )
 
 

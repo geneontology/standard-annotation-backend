@@ -21,6 +21,7 @@ from standard_annotation_backend.domain.auth import (
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.main import app
 from standard_annotation_backend.persistence.locks import bind_try_lock
+from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.repositories import QcReportRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.job_service import Job
@@ -185,9 +186,11 @@ def test_only_admins_start_reports_and_group_admins_only_for_their_group(
 
 
 def test_the_summary_reports_versions_and_counts_by_type_and_group(
-    integration_api_client: TestClient, completed_report: UUID
+    integration_api_client: TestClient,
+    completed_report: UUID,
+    session_factory: sessionmaker[Session],
 ) -> None:
-    """A global reader sees every group's counts and the reference data used."""
+    """A global reader sees every group's counts and the reference data recorded."""
     response = integration_api_client.get(f"{PATH}/{completed_report}")
 
     assert response.status_code == status.HTTP_200_OK
@@ -207,6 +210,10 @@ def test_the_summary_reports_versions_and_counts_by_type_and_group(
     (versions,) = body["reference_data"]
     assert {use["ontology_key"] for use in versions["ontologies"]} >= {"go"}
     assert versions["go_site_revision"]
+    with session_factory() as session:
+        stored = session.get_one(JobRecord, completed_report).result
+    assert stored is not None
+    assert body["reference_data"] == stored["reference_data"]
 
 
 @pytest.mark.parametrize(
@@ -273,6 +280,40 @@ def test_findings_filter_by_issue_type_and_group_and_page(
     assert finding["issues"][0]["location"] == ["annotation", "db_object_id"]
     assert "created_by" not in finding
     assert none["total"] == 0
+
+
+def test_findings_include_issue_details(
+    integration_api_client: TestClient,
+    sent: list[UUID],
+    active_annotation_subjects: None,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+) -> None:
+    """A finding's issues keep their details, such as a duplicate's peer IDs."""
+    with session_factory() as session:
+        first = insert_annotation(session, _annotation()).annotation_id
+        second = insert_annotation(session, _annotation()).annotation_id
+        session.commit()
+    report_id = _start(integration_api_client, {})
+    _run(unit_of_work_factory, database_engine, report_id)
+
+    response = integration_api_client.get(
+        f"{PATH}/{report_id}/findings", params={"issue_type": "duplicate_annotation"}
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert {
+        item["annotation_id"]: [
+            issue["details"]
+            for issue in item["issues"]
+            if issue["type"] == "duplicate_annotation"
+        ]
+        for item in response.json()["items"]
+    } == {
+        str(first): [{"peer_ids": [str(second)]}],
+        str(second): [{"peer_ids": [str(first)]}],
+    }
 
 
 def test_findings_reject_unknown_query_parameters_and_issue_types(

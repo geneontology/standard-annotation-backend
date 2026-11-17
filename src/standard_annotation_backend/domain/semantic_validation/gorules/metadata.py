@@ -5,7 +5,6 @@ The patterns from go-site (`id_syntax`, `allowed_reference`, and
 `re.fullmatch`. They were checked to compile when the files were refreshed.
 """
 
-import re
 from collections import Counter
 from collections.abc import Iterator
 
@@ -47,17 +46,14 @@ def gorule_0000027(
     `shorthand` in `groups.yaml`.
     """
     data = facts.rule_data
-    if data is None:
-        return
-    databases = {entry.database: entry for entry in data.databases}
     for occurrence in database_identifiers(annotation):
-        entry = databases.get(occurrence.prefix)
+        entry = data.databases.get(occurrence.prefix)
         if entry is None:
             yield gorule_issue(
                 27, "Prefix is not a database in db-xrefs.yaml", occurrence.location
             )
         elif entry.id_syntaxes and not any(
-            re.fullmatch(syntax, occurrence.local_id) for syntax in entry.id_syntaxes
+            data.fullmatch(syntax, occurrence.local_id) for syntax in entry.id_syntaxes
         ):
             yield gorule_issue(
                 27,
@@ -85,20 +81,11 @@ def gorule_0000043(
     requirement is not checked.
     """
     data = facts.rule_data
-    if data is None:
-        return
-    constraint = next(
-        (
-            entry
-            for entry in data.eco_usage_constraints
-            if entry.eco_id == annotation.evidence_type
-        ),
-        None,
-    )
+    constraint = data.eco_usage_constraints.get(annotation.evidence_type)
     if constraint is None:
         return
     if constraint.allowed_reference is not None and not any(
-        re.fullmatch(constraint.allowed_reference, reference)
+        data.fullmatch(constraint.allowed_reference, reference)
         for reference in annotation.references
     ):
         yield gorule_issue(
@@ -126,7 +113,7 @@ def _with_requirement(
         holds = PROTEIN_CONTAINING_COMPLEX in facts.entity.type_checked_ancestors
     else:
         holds = any(
-            re.fullmatch(condition.test.pattern, reference)
+            facts.rule_data.fullmatch(condition.test.pattern, reference)
             for reference in annotation.references
         )
     return condition.when_true if holds else condition.when_false
@@ -145,10 +132,9 @@ def gorule_0000058(
     nothing unless the annotated term is current, because only a current term's
     checked ancestors are known.
     """
-    data = facts.rule_data
     extensions = annotation.annotation_extensions or []
     term = annotated_term(annotation, facts)
-    if data is None or term is None or not extensions:
+    if term is None or not extensions:
         return
     counts = Counter(
         (extension.extension_relation, split_identifier(extension.extension_term)[0])
@@ -158,11 +144,12 @@ def gorule_0000058(
         namespace = split_identifier(extension.extension_term)[0]
         count = counts[(extension.extension_relation, namespace)]
         conforms = any(
-            constraint.relation_id == extension.extension_relation
-            and namespace in constraint.namespaces
+            namespace in constraint.namespaces
             and term.checked_ancestors.intersection(constraint.primary_root_terms)
             and (constraint.cardinality is None or count <= constraint.cardinality)
-            for constraint in data.extension_constraints
+            for constraint in facts.rule_data.extension_constraints.get(
+                extension.extension_relation, ()
+            )
         )
         if not conforms:
             yield gorule_issue(

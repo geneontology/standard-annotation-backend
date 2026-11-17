@@ -140,9 +140,8 @@ def test_the_reference_condition_matches_any_whole_reference() -> None:
     assert found(rule(pmid, facts(rule_data=data))) == []
 
 
-def test_constraints_for_other_evidence_and_missing_rule_data_do_not_apply() -> None:
+def test_constraints_for_other_evidence_do_not_apply() -> None:
     """Only the entry for the annotation's own evidence term is used."""
     data = _data(EcoUsageConstraint(ECO["IDA"], None, WithPresence.MANDATORY))
 
     assert found(rule(annotation("IPI"), facts(rule_data=data))) == []
-    assert found(rule(annotation("IDA"), facts(rule_data=None))) == []

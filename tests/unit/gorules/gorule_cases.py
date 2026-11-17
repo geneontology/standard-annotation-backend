@@ -22,6 +22,7 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     DatabaseEntry,
     RuleData,
+    RuleDataIndex,
 )
 from standard_annotation_backend.domain.semantic_validation.rules import (
     RULES,
@@ -78,14 +79,14 @@ def facts(
     terms: Mapping[str, TermFact] | None = None,
     *,
     entity: EntityFact | None = ENTITY,
-    rule_data: RuleData | None = RULE_DATA,
+    rule_data: RuleData = RULE_DATA,
     retracted: Iterable[str] = (),
 ) -> AnnotationFacts:
     """Return facts in which `TERM` is a current biological process term."""
     return AnnotationFacts(
         terms={TERM: term(BP_ROOT)} if terms is None else terms,
         entity=entity,
-        rule_data=rule_data,
+        rule_data=RuleDataIndex.of(rule_data),
         retracted_pmids=frozenset(retracted),
     )
 
