@@ -31,7 +31,30 @@ database schema.
 
 Generate new revisions with Alembic. Do not hand-author revision IDs or migration
 filenames; let Alembic generate the `revision` value and apply the `file_template`
-configured in `alembic.ini`.
+configured in `alembic.ini`. Run `uv run alembic revision -m "<message>"` with a short
+message; Alembic builds the filename from it.
+
+- A new table must be added to `APPLICATION_TABLES` in `tests/integration/conftest.py`
+  so that integration tests reset it.
+- A new job type needs a `JobType` member, a migration that drops and recreates the
+  `ck_job_type_allowed` check constraint with the new value (as `03a2094d9969` does),
+  a dispatch-failure message in `domain/jobs.py`, and a runner that claims the type.
+  `JobExecutors` refuses to start when a job type has no runner.
+- To check a migration's downgrade, round-trip it on the disposable test database:
+  `docker compose run --build --rm tools sh -c "uv run --locked --no-sync alembic
+  downgrade <rev> && uv run --locked --no-sync alembic upgrade head"`. Never downgrade
+  the development database; doing so deletes local data.
+
+## Deployment status
+
+SABE is not deployed yet. The local Docker Compose environment is the only SABE
+environment, and it holds no data that must be preserved. Until that changes:
+
+- Prefer internal consistency over backward compatibility. Do not design for rolling
+  deploys or for workers from two releases sharing one database.
+- A migration may clear data when that is simpler than converting it.
+- Advisory lock key values (`LockNamespace`) and Celery task names may change between
+  releases, provided every process is restarted together.
 
 ## Application architecture
 
@@ -96,6 +119,15 @@ not make repositories depend on FastAPI, HTTP headers, or API response models.
   route changes, update its OpenAPI declaration and contract tests together.
 - Use Alembic for database schema changes. Add constraints and indexes when correctness
   or supported query behavior depends on them.
+- Convert SQLAlchemy records to service results inside the unit of work. Records are
+  detached once it closes, and reading one then raises `DetachedInstanceError`, which
+  surfaces as a `500`.
+- `Settings` and the parsed sources file are cached per process. Code or tests that
+  change configuration must call `get_settings.cache_clear()`.
+- Run `ruff check --fix` only after every new module exists; Ruff sorts an import of a
+  module it cannot find as third-party. In migrations, put `from alembic import op` in
+  its own group after the `sqlalchemy` imports, because Ruff in the tools container
+  treats the repository's `alembic/` directory as first-party.
 - Keep transaction and locking behavior explicit. Concurrency rules must remain correct
   when requests use independent database connections.
 
@@ -134,16 +166,23 @@ is explained, and update the entry when a term is added, renamed, or changes mea
 
 ## Testing and verification
 
-Add focused regression coverage for every behavior change.
+Add focused regression coverage for every behavior change. Tests should check what a
+client or caller can observe: HTTP responses and error codes, job records and results,
+and what a later read, write, or validation returns.
 
 - Test observable behavior and outcomes rather than merely introspecting implementation
   structure or checking that a class, table, column, route, or symbol exists. Schema and
   contract assertions should demonstrate a consumer-visible guarantee or an enforced
   rule; existence alone is not meaningful regression coverage.
+- Do not test migrations directly. A behavioral test that fails when a migration was
+  not applied is enough.
+- Tests of internal details, such as private helpers or a migration, may be useful
+  while developing a change. Before handing off, remove each one unless it checks
+  something a caller could observe that no other test covers.
 - Use unit tests for domain rules, service orchestration, parsing, and error translation
   that can be checked without external services.
-- Use integration tests for SQL queries, database constraints, migrations, transaction
-  behavior, locking, concurrency, and end-to-end HTTP behavior backed by PostgreSQL.
+- Use integration tests for SQL queries, database constraints, transaction behavior,
+  locking, concurrency, and end-to-end HTTP behavior backed by PostgreSQL.
 - Use independent PostgreSQL connections when a test claims to verify concurrent
   transactions.
 - Update OpenAPI contract tests when routes, parameters, response headers, models, or
@@ -155,3 +194,15 @@ database name with a `dbname` query parameter. Always use a disposable test data
 
 Run focused tests while developing. Before handing off a completed change, run
 `just check`, `just test`, and `git diff --check`.
+
+- `just test <paths>` runs the named test files and passes other pytest options
+  through. Select tests by file path; `-k` expressions have failed to collect tests.
+- Unit tests need no services: `uv run pytest tests/unit -q`.
+- Every integration test uses the same `sabe_test` database, so never run two
+  integration test processes at once.
+- An API test that gets an unexpected `500` hides the exception. Run pytest with `-l`
+  to see local variables, or call the service directly to see the error.
+- `just test` and `just check` rebuild the tools image on every run, and the old images
+  accumulate until Docker runs out of space ("No space left on device" during
+  `uv sync`). `docker image prune -f` frees the space; ask the developer before
+  running it.
