@@ -182,7 +182,7 @@ def test_scheduled_refresh_creates_scheduler_jobs_for_every_source(
         )
 
     monkeypatch.setattr(tasks, "worker_runtime", runtime)
-    monkeypatch.setattr(tasks.run_refresh, "delay", refreshed.append)
+    monkeypatch.setattr(tasks.run_job, "delay", refreshed.append)
 
     tasks.schedule_refresh.run("entity")
 

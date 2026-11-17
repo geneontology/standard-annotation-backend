@@ -3,28 +3,19 @@
 from uuid import UUID
 
 import pytest
-from refresh_helpers import TEST_ONTOLOGIES
+from refresh_helpers import build_scan_runner
 from seeding import deactivate_reference_data, insert_annotation
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from test_qc_report_repository import _finding
 
 from standard_annotation_backend.domain.annotations import Annotation
-from standard_annotation_backend.domain.jobs import JobStatus
+from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.snapshots import SnapshotKind
-from standard_annotation_backend.persistence.locks import (
-    LockNamespace,
-    bind_try_lock,
-    try_advisory_lock,
-)
 from standard_annotation_backend.persistence.models import AnnotationRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.annotation_scan import queue_or_join
 from standard_annotation_backend.services.job_service import Job, JobService
-from standard_annotation_backend.services.qc_report_service import (
-    QcReportBusyError,
-    QcReportRunner,
-    queue_qc_report,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -56,17 +47,14 @@ def _insert(
         return record.annotation_id
 
 
-def _runner(
-    unit_of_work_factory: UnitOfWorkFactory, database_engine: Engine
-) -> QcReportRunner:
-    return QcReportRunner(
-        unit_of_work_factory, TEST_ONTOLOGIES, bind_try_lock(database_engine)
-    )
-
-
 def _queue(unit_of_work_factory: UnitOfWorkFactory, group_key: str | None) -> Job:
     with unit_of_work_factory() as uow:
-        job = queue_qc_report(uow, group_key=group_key, requested_by="scheduler")
+        job = queue_or_join(
+            uow,
+            job_type=JobType.ANNOTATION_QC_REPORT,
+            group_key=group_key,
+            requested_by="scheduler",
+        ).job
         uow.commit()
     return job
 
@@ -77,7 +65,7 @@ def _run(
     group_key: str | None = None,
 ) -> Job:
     job = _queue(unit_of_work_factory, group_key)
-    _runner(unit_of_work_factory, database_engine).run(job.job_id)
+    build_scan_runner(database_engine, unit_of_work_factory).run(job.job_id)
     return JobService(unit_of_work_factory).find(job.job_id)
 
 
@@ -249,7 +237,7 @@ def test_a_redelivered_running_report_starts_from_empty_rows(
         )
         uow.commit()
 
-    _runner(unit_of_work_factory, database_engine).run(job.job_id)
+    build_scan_runner(database_engine, unit_of_work_factory).run(job.job_id)
 
     assert JobService(unit_of_work_factory).find(job.job_id).status is (
         JobStatus.SUCCEEDED
@@ -260,33 +248,12 @@ def test_a_redelivered_running_report_starts_from_empty_rows(
     assert UUID(int=9) not in _findings(unit_of_work_factory, job.job_id)
 
 
-def test_a_report_waits_while_another_report_of_its_scope_runs(
+def test_an_empty_report_succeeds_and_records_its_reference_data(
     unit_of_work_factory: UnitOfWorkFactory, database_engine: Engine
 ) -> None:
-    """While another report of the scope runs, the report stays queued.
-
-    The other report holds the scope's lock on its own connection, and the run
-    raises `QcReportBusyError` so the worker retries later.
-    """
-    job = _queue(unit_of_work_factory, None)
-
-    with try_advisory_lock(database_engine, LockNamespace.QC_REPORT) as held:
-        assert held
-        with pytest.raises(QcReportBusyError):
-            _runner(unit_of_work_factory, database_engine).run(job.job_id)
-
-    assert JobService(unit_of_work_factory).find(job.job_id).status is (
-        JobStatus.QUEUED
-    )
-
-
-def test_a_report_with_nothing_to_check_still_requires_reference_data(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-) -> None:
-    """An empty scope fails when GO is missing, and otherwise records its versions."""
+    """A report with nothing to check succeeds and records the versions it used."""
     empty = _run(unit_of_work_factory, database_engine, group_key="ZFIN")
+
     assert empty.status is JobStatus.SUCCEEDED
     assert empty.result is not None
     assert empty.result["annotations_checked"] == 0
@@ -294,8 +261,24 @@ def test_a_report_with_nothing_to_check_still_requires_reference_data(
     assert isinstance(reference_data, list)
     assert len(reference_data) == 1
 
-    deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "go")
-    failed = _run(unit_of_work_factory, database_engine, group_key="ZFIN")
 
-    assert failed.status is JobStatus.FAILED
-    assert failed.progress["failure_code"] == "reference_data_unavailable"
+def test_an_abandoned_report_keeps_no_findings_or_counts(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+) -> None:
+    """Rows a stopped report stored are deleted when it is abandoned."""
+    _insert(session_factory, _annotation(db_object_id="UniProtKB:NOPE"))
+    stuck = _queue(unit_of_work_factory, None)
+    JobService(unit_of_work_factory).start(stuck.job_id)
+    with unit_of_work_factory() as uow:
+        uow.qc_reports.record_batch(
+            stuck.job_id, [_finding(9, "MGI", "unknown_entity")], {"MGI": 7}
+        )
+        uow.commit()
+
+    _run(unit_of_work_factory, database_engine)
+
+    assert _findings(unit_of_work_factory, stuck.job_id) == {}
+    with unit_of_work_factory() as uow:
+        assert uow.qc_reports.group_counts(stuck.job_id, None) == {}

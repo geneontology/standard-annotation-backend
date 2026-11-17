@@ -3,7 +3,7 @@
 import gzip
 import zlib
 
-from standard_annotation_backend.domain.refresh import RefreshFailureCode
+from standard_annotation_backend.domain.jobs import JobFailureCode
 from standard_annotation_backend.refresh.fetchers import SourceError
 
 _GZIP_SIGNATURE = b"\x1f\x8b"
@@ -25,8 +25,8 @@ def decode_source_text(content: bytes) -> str:
         try:
             content = gzip.decompress(content)
         except (OSError, EOFError, zlib.error):
-            raise SourceError(RefreshFailureCode.INVALID_GZIP) from None
+            raise SourceError(JobFailureCode.INVALID_GZIP) from None
     try:
         return content.decode("utf-8")
     except UnicodeDecodeError:
-        raise SourceError(RefreshFailureCode.INVALID_UTF8) from None
+        raise SourceError(JobFailureCode.INVALID_UTF8) from None

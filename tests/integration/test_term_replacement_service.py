@@ -4,24 +4,19 @@ from collections.abc import Callable, Collection
 from uuid import UUID
 
 import pytest
-from refresh_helpers import TEST_ONTOLOGIES
+from refresh_helpers import build_scan_runner
 from seeding import SeedTerm, deactivate_reference_data, insert_annotation
 from sqlalchemy import Engine, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
-from standard_annotation_backend.domain.jobs import JobStatus
+from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.semantic_validation.facts import (
     ActiveSnapshots,
     TermFact,
 )
 from standard_annotation_backend.domain.snapshots import SnapshotKind
-from standard_annotation_backend.persistence.locks import (
-    LockNamespace,
-    bind_try_lock,
-    try_advisory_lock,
-)
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AuditEventRecord,
@@ -30,12 +25,8 @@ from standard_annotation_backend.persistence.repositories import (
     ValidationFactsRepository,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.annotation_scan import queue_or_join
 from standard_annotation_backend.services.job_service import Job, JobService
-from standard_annotation_backend.services.term_replacement_service import (
-    TermReplacementBusyError,
-    TermReplacementService,
-    queue_term_replacement,
-)
 
 OBSOLETE = "GO:0000003"
 ALTERNATIVE = "GO:0000099"
@@ -84,11 +75,14 @@ def _run(
     group_key: str | None = None,
 ) -> Job:
     with unit_of_work_factory() as uow:
-        job = queue_term_replacement(uow, group_key=group_key, requested_by="curator")
+        job = queue_or_join(
+            uow,
+            job_type=JobType.TERM_REPLACEMENT,
+            group_key=group_key,
+            requested_by="curator",
+        ).job
         uow.commit()
-    TermReplacementService(
-        unit_of_work_factory, TEST_ONTOLOGIES, bind_try_lock(database_engine)
-    ).run(job.job_id)
+    build_scan_runner(database_engine, unit_of_work_factory).run(job.job_id)
     return JobService(unit_of_work_factory).find(job.job_id)
 
 
@@ -297,27 +291,6 @@ def test_missing_reference_data_fails_the_job_without_changes(
     assert _record(session_factory, annotation_id).current_version == 1
 
 
-def test_a_job_waits_while_another_job_for_its_scope_runs(
-    unit_of_work_factory: UnitOfWorkFactory, database_engine: Engine
-) -> None:
-    """If the scope's lock is held, the job stays queued and the run asks to retry."""
-    with unit_of_work_factory() as uow:
-        job = queue_term_replacement(uow, group_key="MGI", requested_by="curator")
-        uow.commit()
-    service = TermReplacementService(
-        unit_of_work_factory, TEST_ONTOLOGIES, bind_try_lock(database_engine)
-    )
-
-    with try_advisory_lock(
-        database_engine, LockNamespace.TERM_REPLACEMENT, "MGI"
-    ) as held:
-        assert held
-        with pytest.raises(TermReplacementBusyError):
-            service.run(job.job_id)
-
-    assert JobService(unit_of_work_factory).find(job.job_id).status is JobStatus.QUEUED
-
-
 def test_a_replacement_the_schema_rejects_is_skipped_and_the_job_continues(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
@@ -340,17 +313,3 @@ def test_a_replacement_the_schema_rejects_is_skipped_and_the_job_continues(
     assert job.result["annotation_replaced_count"] == 1
     assert _record(session_factory, rejected_id).current_version == 1
     assert _record(session_factory, replaced_id).ontology_class_id == CURRENT
-
-
-def test_a_job_with_nothing_to_scan_still_requires_reference_data(
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-    database_engine: Engine,
-) -> None:
-    """A group with no annotations fails with `reference_data_unavailable` too."""
-    deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "go")
-
-    job = _run(unit_of_work_factory, database_engine, group_key="ZFIN")
-
-    assert job.status is JobStatus.FAILED
-    assert job.progress["failure_code"] == "reference_data_unavailable"

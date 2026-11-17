@@ -1,5 +1,6 @@
 """Manage stored job states and their audit events."""
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,11 +15,12 @@ from standard_annotation_backend.domain.auth import (
     authorize_role,
 )
 from standard_annotation_backend.domain.jobs import (
+    JobFailureCode,
     JobNotFoundError,
     JobStatus,
     JobType,
+    dispatch_failure_message,
 )
-from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.repositories import (
     InvalidJobTransitionError,
@@ -30,6 +32,8 @@ from standard_annotation_backend.persistence.unit_of_work import (
 from standard_annotation_backend.services.audit_service import AuditService
 
 __all__ = ["InvalidJobTransitionError", "Job", "JobService"]
+
+logger = logging.getLogger(__name__)
 
 MAX_AUDITED_FAILURE_ISSUES = 10
 
@@ -107,14 +111,76 @@ class JobService:
     def start(self, job_id: UUID) -> Job:
         """Start a queued job or return its unchanged later state."""
         with self._unit_of_work_factory() as unit_of_work:
-            mutation = unit_of_work.jobs.start(job_id, now=datetime.now(UTC))
-            if mutation.changed:
-                AuditService(unit_of_work.audit).record_job_lifecycle(
-                    action=AuditAction.JOB_STARTED, record=mutation.record
-                )
-            result = job_from_record(mutation.record)
+            result = self.record_start(unit_of_work, job_id)
             unit_of_work.commit()
         return result
+
+    def record_start(self, unit_of_work: SqlAlchemyUnitOfWork, job_id: UUID) -> Job:
+        """Start a queued job in the caller's transaction, or return its later state.
+
+        The running status and the `job.started` audit event commit only when the
+        caller commits. A job that is already running, or has finished, is
+        returned unchanged.
+        """
+        mutation = unit_of_work.jobs.start(job_id, now=datetime.now(UTC))
+        if mutation.changed:
+            AuditService(unit_of_work.audit).record_job_lifecycle(
+                action=AuditAction.JOB_STARTED, record=mutation.record
+            )
+        return job_from_record(mutation.record)
+
+    def send(self, job: Job, *, created: bool, dispatch: Callable[[Job], None]) -> Job:
+        """Send a committed job to a worker, failing it if it is new and sending fails.
+
+        Sending a job twice is harmless: a worker that cannot take the job's
+        execution lock returns at once. If `dispatch` raises, only the job ID and
+        exception type are logged, because broker errors can include connection
+        URLs with credentials. A job this caller created is then failed with
+        `dispatch_failed`, so the record says it will not run and the next trigger
+        creates a new job. A joined or reused job is left as it is, because an
+        earlier send may already have put it in the broker. A broker can also
+        raise after it accepted the message, so a created job that a worker has
+        already started is left running too; the check and the failure happen
+        under the job's row lock, so a worker cannot start it in between.
+
+        Args:
+            job: The committed job.
+            created: Whether the caller created the job.
+            dispatch: Sends the job to a worker.
+
+        Returns:
+            The job's state after sending.
+
+        Raises:
+            Exception: Any error from recording `dispatch_failed`.
+        """
+        try:
+            dispatch(job)
+        except Exception as error:
+            logger.error(
+                "Job dispatch failed: job_id=%s job_type=%s failure_type=%s",
+                job.job_id,
+                job.job_type.value,
+                type(error).__name__,
+            )
+            if created:
+                return self._fail_unsent(job)
+        return job
+
+    def _fail_unsent(self, job: Job) -> Job:
+        """Fail a job with `dispatch_failed` if no worker has started it."""
+        with self._unit_of_work_factory() as unit_of_work:
+            record = unit_of_work.jobs.lock(job.job_id)
+            if record.status is not JobStatus.QUEUED:
+                return job_from_record(record)
+            failed = self.record_failure(
+                unit_of_work,
+                job.job_id,
+                error=dispatch_failure_message(job.job_type),
+                failure_code=JobFailureCode.DISPATCH_FAILED,
+            )
+            unit_of_work.commit()
+        return failed
 
     def update_progress(
         self,
@@ -134,38 +200,6 @@ class JobService:
             result = job_from_record(mutation.record)
             unit_of_work.commit()
         return result
-
-    def succeed(
-        self,
-        job_id: UUID,
-        *,
-        result: dict[str, object],
-        finalize: Callable[[SqlAlchemyUnitOfWork], None] | None = None,
-    ) -> Job:
-        """Commit a running job's successful terminal result.
-
-        Args:
-            job_id: Job to mark succeeded.
-            result: JSON-compatible result to store.
-            finalize: Work specific to the job type, such as deleting older
-                findings, done in the same transaction so that it commits only
-                together with the success.
-        """
-        with self._unit_of_work_factory() as unit_of_work:
-            mutation = unit_of_work.jobs.succeed(
-                job_id,
-                result=result,
-                now=datetime.now(UTC),
-            )
-            if mutation.changed:
-                AuditService(unit_of_work.audit).record_job_lifecycle(
-                    action=AuditAction.JOB_SUCCEEDED, record=mutation.record
-                )
-            if finalize is not None:
-                finalize(unit_of_work)
-            completed = job_from_record(mutation.record)
-            unit_of_work.commit()
-        return completed
 
     def record_success(
         self,
@@ -207,22 +241,19 @@ class JobService:
             )
         return job_from_record(mutation.record)
 
-    def fail_refresh(
+    def fail(
         self,
         job_id: UUID,
         *,
         error: str,
-        failure_code: RefreshFailureCode,
+        failure_code: JobFailureCode,
         failure_details: dict[str, object] | None = None,
         cleanup: Callable[[SqlAlchemyUnitOfWork], None] | None = None,
     ) -> Job:
-        """Mark a refresh job failed and record why, in one transaction.
+        """Mark a job failed and record why, in one transaction.
 
-        The failed status, `{"phase": "failed", "failure_code": ...}` progress
-        (plus `failure_details` when given), the failure audit event, and any
-        `cleanup` commit together, so none is recorded without the others. The
-        audit event keeps at most the first 10 entries of an `issues` list; the
-        job keeps all of them.
+        The failure and any `cleanup` commit together, so neither is recorded
+        without the other. See `record_failure` for what is stored.
 
         Args:
             job_id: Job to mark failed.
@@ -231,6 +262,47 @@ class JobService:
             failure_details: JSON-compatible description of the failure.
             cleanup: Job-specific work, such as deleting a report's stored rows,
                 done in the same transaction.
+
+        Raises:
+            ValueError: If `error` is blank.
+        """
+        with self._unit_of_work_factory() as unit_of_work:
+            failed = self.record_failure(
+                unit_of_work,
+                job_id,
+                error=error,
+                failure_code=failure_code,
+                failure_details=failure_details,
+            )
+            # Cleanup shares this transaction: if it raises, the failed status
+            # and audit event roll back too, and a retry records all of them.
+            if cleanup is not None:
+                cleanup(unit_of_work)
+            unit_of_work.commit()
+        return failed
+
+    def record_failure(
+        self,
+        unit_of_work: SqlAlchemyUnitOfWork,
+        job_id: UUID,
+        *,
+        error: str,
+        failure_code: JobFailureCode,
+        failure_details: dict[str, object] | None = None,
+    ) -> Job:
+        """Mark a queued or running job failed in the caller's transaction.
+
+        The failed status, `{"phase": "failed", "failure_code": ...}` progress
+        (plus `failure_details` when given), and the `job.failed` audit event
+        commit only when the caller commits. The audit event keeps at most the
+        first 10 entries of an `issues` list; the job keeps all of them.
+
+        Args:
+            unit_of_work: The caller's open transaction.
+            job_id: The job to fail.
+            error: Nonblank public error message.
+            failure_code: Why the job failed.
+            failure_details: JSON-compatible description of the failure.
 
         Raises:
             ValueError: If `error` is blank.
@@ -246,23 +318,16 @@ class JobService:
         if failure_details is not None:
             progress["failure_details"] = failure_details
             audit_details["failure_details"] = _audit_failure_details(failure_details)
-        with self._unit_of_work_factory() as unit_of_work:
-            mutation = unit_of_work.jobs.fail(
-                job_id, error=safe_error, now=datetime.now(UTC), progress=progress
+        mutation = unit_of_work.jobs.fail(
+            job_id, error=safe_error, now=datetime.now(UTC), progress=progress
+        )
+        if mutation.changed:
+            AuditService(unit_of_work.audit).record_job_lifecycle(
+                action=AuditAction.JOB_FAILED,
+                record=mutation.record,
+                details=audit_details,
             )
-            if mutation.changed:
-                AuditService(unit_of_work.audit).record_job_lifecycle(
-                    action=AuditAction.JOB_FAILED,
-                    record=mutation.record,
-                    details=audit_details,
-                )
-            # Cleanup shares this transaction: if it raises, the failed status
-            # and audit event roll back too, and a retry records all of them.
-            if cleanup is not None:
-                cleanup(unit_of_work)
-            failed = job_from_record(mutation.record)
-            unit_of_work.commit()
-        return failed
+        return job_from_record(mutation.record)
 
 
 def _audit_failure_details(details: dict[str, object]) -> dict[str, object]:

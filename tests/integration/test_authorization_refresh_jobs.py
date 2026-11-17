@@ -107,7 +107,7 @@ def test_authorization_refresh_job_succeeds_with_durable_result(
     job_id = _create_job(unit_of_work_factory)
     requests = _install_github(monkeypatch, [(SHA, VALID_SOURCE.encode())])
 
-    tasks.run_refresh.run(str(job_id))
+    tasks.run_job.run(str(job_id))
 
     job = _load_job(unit_of_work_factory, job_id)
     assert job.status == JobStatus.SUCCEEDED.value
@@ -156,7 +156,7 @@ def test_authorization_refresh_failure_is_safe_and_preserves_prior_state(
     job_id = _create_job(unit_of_work_factory)
     _install_github(monkeypatch, [source])
 
-    tasks.run_refresh.run(str(job_id))
+    tasks.run_job.run(str(job_id))
 
     job = _load_job(unit_of_work_factory, job_id)
     assert job.status == JobStatus.FAILED.value
@@ -185,11 +185,11 @@ def test_infrastructure_failure_requests_retry(
     # Calling `.run` outside a worker has no broker, so replace the retry call
     # with one that raises `Retry` as a worker would.
     monkeypatch.setattr(
-        tasks.run_refresh, "retry", lambda **_kwargs: (_ for _ in ()).throw(Retry())
+        tasks.run_job, "retry", lambda **_kwargs: (_ for _ in ()).throw(Retry())
     )
 
     with pytest.raises(Retry):
-        tasks.run_refresh.run(str(job_id))
+        tasks.run_job.run(str(job_id))
 
     assert _load_job(unit_of_work_factory, job_id).status == JobStatus.RUNNING.value
 
@@ -203,11 +203,11 @@ def test_redelivery_after_success_does_not_repeat_audit_work(
     """Redelivery of a completed job performs no source request or audit write."""
     job_id = _create_job(unit_of_work_factory)
     requests = _install_github(monkeypatch, [(SHA, VALID_SOURCE.encode())])
-    tasks.run_refresh.run(str(job_id))
+    tasks.run_job.run(str(job_id))
     with session_factory() as session:
         before = session.scalar(select(func.count()).select_from(AuditEventRecord))
 
-    tasks.run_refresh.run(str(job_id))
+    tasks.run_job.run(str(job_id))
 
     assert len(requests) == 2
     with session_factory() as session:
@@ -227,7 +227,7 @@ def test_scheduler_creates_job_before_dispatch_and_records_dispatch_failure(
         dispatched.append(job_id)
         raise RuntimeError("redis credential diagnostic")
 
-    monkeypatch.setattr(tasks.run_refresh, "delay", fail_dispatch)
+    monkeypatch.setattr(tasks.run_job, "delay", fail_dispatch)
 
     tasks.schedule_refresh.run("authorization")
 

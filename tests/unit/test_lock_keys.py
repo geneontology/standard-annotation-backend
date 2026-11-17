@@ -49,4 +49,4 @@ def test_different_values_in_one_namespace_use_different_keys() -> None:
 def test_lock_key_rejects_blank_values(value: str) -> None:
     """A blank value is rejected rather than silently sharing one lock."""
     with pytest.raises(ValueError, match="blank"):
-        lock_key(LockNamespace.QC_REPORT, value)
+        lock_key(LockNamespace.ANNOTATION_SCAN, value)

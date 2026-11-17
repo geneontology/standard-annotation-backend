@@ -864,6 +864,13 @@ GET /admin/jobs/{job_id}
 Job handlers should be idempotent where practical and designed for retry without
 corrupting annotation state.
 
+One Celery task runs every job type, through a registry that maps each job type to
+its runner. A job created but not sent to a worker fails with `dispatch_failed`. Term
+replacement and QC reports are annotation scan jobs: one runner queues and runs them,
+at most one job of a type runs per group set, and a scan job left running with no
+process running it is marked `abandoned`. The [job guide](docs/jobs.md) describes the
+lifecycle.
+
 ### Reference Data Refreshes
 
 SABE keeps authorization, GO Rule data, ontologies, entity catalogs, and group
@@ -1068,8 +1075,7 @@ because reference overlap is not transitive for multi-reference annotations, rep
 never group duplicate pairs into connected components. Counts are kept permanently, and
 findings only for the most recent completed report of each scope.
 [Annotation validation](docs/annotation-validation.md#reports) describes the API, and the
-[refresh infrastructure guide](docs/refresh-infrastructure.md#qc-report-jobs) describes
-how the jobs run.
+[job guide](docs/jobs.md#annotation-scan-jobs) describes how the jobs run.
 
 ## Deployment and Operations
 
@@ -1177,6 +1183,7 @@ developers can run locally and operate in AWS with limited specialized DevOps bu
 | Structural validation                                | Settled for the initial implementation                                                                   | No further policy input is needed.                                                                                                         | Structural schema validation blocks all writes and individual import records. Invalid imported records are isolated and reported instead of failing the whole import.                                                                                                                                                                                                                                                                                                                                                                                                        |
 | GORULE-style semantic validation                     | Settled: entity, ontology-term, duplicate, and write-blocking GO Rule checks block client writes         | No further policy input is needed for the checks in `docs/annotation-validation.md`.                                                       | Client creates and updates must have no semantic issues; deletes and GPAD imports are not checked. The rules and SABE's reading of each are in `docs/annotation-validation.md`. Term replacement writes meet the same checks, and QC reports apply them to stored annotations.                                                                                                                                                                                                                                                                                               |
 | Reference data snapshots                             | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | One `reference_snapshot` table with one lifecycle; refresh jobs are one transaction. This removes recovery and pre-activation state, three storage models, and four change rules, and readers never see pruned data. |
+| Job dispatch and abandoned jobs                      | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | A job that cannot be sent to a worker fails with `dispatch_failed` if the caller created it, and is left as is if it was joined or reused. An annotation scan job that holds its scan lock marks other running jobs of the same type and groups `abandoned`; the lock shows no process runs them. |
 
 ## Possible Future Expansion
 

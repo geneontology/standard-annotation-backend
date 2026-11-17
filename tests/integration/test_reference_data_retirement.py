@@ -20,9 +20,8 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.auth import system_context
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.jobs import JobFailureCode, JobType
 from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
     RefreshKindName,
 )
 from standard_annotation_backend.domain.snapshots import SnapshotKind
@@ -191,10 +190,10 @@ def test_a_removed_source_with_an_unfinished_job_is_retired_later(
     assert first.retired == ()
     assert active_snapshot(session_factory, SnapshotKind.ENTITY, "zfin") is not None
 
-    JobService(unit_of_work_factory).fail_refresh(
+    JobService(unit_of_work_factory).fail(
         pending.job_id,
         error="Entity refresh failed",
-        failure_code=RefreshFailureCode.UNKNOWN_SOURCE,
+        failure_code=JobFailureCode.UNKNOWN_SOURCE,
     )
     second = _start(unit_of_work_factory, RefreshKindName.ENTITY, None)
 

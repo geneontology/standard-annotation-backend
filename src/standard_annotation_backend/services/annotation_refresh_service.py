@@ -23,10 +23,13 @@ from standard_annotation_backend.domain.annotation_management import (
     NoValidAnnotationsError,
     RejectionReportBuilder,
 )
-from standard_annotation_backend.domain.jobs import JobType
-from standard_annotation_backend.domain.refresh import (
+from standard_annotation_backend.domain.jobs import (
+    FollowUpJob,
+    JobFailureCode,
+    JobType,
     ProgressReporter,
-    RefreshFailureCode,
+)
+from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     RefreshOutcome,
     SourceDocument,
@@ -49,11 +52,9 @@ from standard_annotation_backend.persistence.unit_of_work import (
 )
 from standard_annotation_backend.refresh.decoding import decode_source_text
 from standard_annotation_backend.refresh.sources import RefreshSources
+from standard_annotation_backend.services.annotation_scan import queue_or_join
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
-from standard_annotation_backend.services.term_replacement_service import (
-    queue_term_replacement,
-)
 
 _STAGING_BATCH_SIZE = 5_000
 
@@ -133,17 +134,17 @@ class AnnotationRefreshService:
             record = imports.publish(staged, actor_id=job.requested_by)
         except GpadHeaderError as error:
             raise TerminalRefreshError(
-                failure_code=RefreshFailureCode.HEADER,
+                failure_code=JobFailureCode.HEADER,
                 failure_details={"message": error.message},
             ) from None
         except NoValidAnnotationsError as error:
             raise TerminalRefreshError(
-                failure_code=RefreshFailureCode.NO_VALID_ANNOTATIONS,
+                failure_code=JobFailureCode.NO_VALID_ANNOTATIONS,
                 failure_details=STORED_REJECTION_REPORT.dump(error.report),
             ) from None
         except CutoverRejectedError as error:
             raise TerminalRefreshError(
-                failure_code=RefreshFailureCode.CUTOVER_REJECTED,
+                failure_code=JobFailureCode.CUTOVER_REJECTED,
                 failure_details=STORED_REJECTION_REPORT.dump(error.report),
             ) from None
         result = _import_result(record)
@@ -159,13 +160,16 @@ class AnnotationRefreshService:
             },
         )
         # Queued last: the queue lock is held until this transaction commits.
-        replacement = queue_term_replacement(
-            unit_of_work, group_key=result.group_key, requested_by=job.requested_by
+        replacement = queue_or_join(
+            unit_of_work,
+            job_type=JobType.TERM_REPLACEMENT,
+            group_key=result.group_key,
+            requested_by=job.requested_by,
         )
         return RefreshOutcome(
             result=result.to_job_result(),
             counts=result.to_progress(),
-            follow_up_job_ids=(replacement.job_id,),
+            follow_ups=(FollowUpJob(replacement.job.job_id, replacement.created),),
         )
 
 

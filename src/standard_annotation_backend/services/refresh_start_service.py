@@ -4,7 +4,6 @@ The API, the Celery Beat schedule, and the refresh CLI all start refreshes
 through `RefreshStartService`, so every path reuses existing work the same way.
 """
 
-import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,9 +24,7 @@ from standard_annotation_backend.domain.jobs import (
 )
 from standard_annotation_backend.domain.refresh import (
     REFRESH_JOB_TYPES,
-    RefreshFailureCode,
     RefreshKindName,
-    refresh_dispatch_failure_message,
 )
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.unit_of_work import (
@@ -41,8 +38,6 @@ from standard_annotation_backend.services.job_service import (
     JobService,
     job_from_record,
 )
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,7 +214,7 @@ class RefreshStartService:
             # that does not exist yet.
             uow.commit()
         return RefreshStart(
-            jobs=tuple(self._dispatch_started(kind, item) for item in started),
+            jobs=tuple(self._dispatch_started(item) for item in started),
             retired=retired,
         )
 
@@ -317,34 +312,16 @@ class RefreshStartService:
             and uow.jobs.find_active(job_type=other_type, source_key=key) is None
         ]
 
-    def _dispatch_started(self, kind: RefreshKindName, item: _StartedJob) -> Job:
-        """Dispatch an unfinished job; fail it only if this call created it."""
+    def _dispatch_started(self, item: _StartedJob) -> Job:
+        """Send an unfinished job through `JobService.send`.
+
+        If sending fails, the job is failed with `dispatch_failed` only when this
+        call created it and no worker has started it.
+        """
         # `find_active` only returns queued or running jobs, and new jobs are
         # queued, so this guard is defensive.
         if item.job.status not in ACTIVE_JOB_STATUSES:
             return item.job
-        try:
-            # Sending a job twice is harmless: a worker that cannot take the
-            # job's execution lock returns at once, and one that can take it
-            # continues the job from its stored state.
-            self._dispatch(item.job)
-        except Exception as error:
-            # Log only the job ID and the exception type. Broker errors can
-            # include connection URLs with credentials.
-            logger.error(
-                "Refresh job dispatch failed: job_id=%s failure_type=%s",
-                item.job.job_id,
-                type(error).__name__,
-            )
-            # A reused job may already be in the broker from an earlier
-            # dispatch, so only a job created by this call is marked failed. It
-            # is recorded like any other failed refresh, with a failure code.
-            # The next start for this source creates a new job, so nothing is
-            # lost; failing now tells the caller the job will not run.
-            if item.created:
-                return JobService(self._unit_of_work_factory).fail_refresh(
-                    item.job.job_id,
-                    error=refresh_dispatch_failure_message(kind),
-                    failure_code=RefreshFailureCode.DISPATCH_FAILED,
-                )
-        return item.job
+        return JobService(self._unit_of_work_factory).send(
+            item.job, created=item.created, dispatch=self._dispatch
+        )

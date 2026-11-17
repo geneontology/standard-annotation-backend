@@ -74,7 +74,7 @@ def get_refresh_start_service(
     return RefreshStartService(
         unit_of_work_factory,
         get_settings().sources,
-        lambda job: tasks.dispatch_refresh_job(job),
+        lambda job: tasks.dispatch_job(job),
     )
 
 

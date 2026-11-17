@@ -10,8 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.domain.refresh import RefreshFailureCode
+from standard_annotation_backend.domain.jobs import JobFailureCode, JobStatus, JobType
 from standard_annotation_backend.persistence.models import AuditEventRecord, JobRecord
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
@@ -19,6 +18,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
 )
 from standard_annotation_backend.services.job_service import (
     InvalidJobTransitionError,
+    Job,
     JobService,
 )
 
@@ -34,6 +34,18 @@ def _audit_actions(session_factory: sessionmaker[Session]) -> list[str]:
                 select(AuditEventRecord.action).order_by(AuditEventRecord.created_at)
             )
         )
+
+
+def _succeed(
+    unit_of_work_factory: UnitOfWorkFactory, job_id: UUID, result: dict[str, object]
+) -> Job:
+    """Record a running job's success in its own transaction."""
+    with unit_of_work_factory() as uow:
+        job = JobService(unit_of_work_factory).record_success(
+            uow, job_id, result=result, progress={"phase": "completed"}
+        )
+        uow.commit()
+    return job
 
 
 def test_job_lifecycle_commits_state_and_audit_together(
@@ -60,9 +72,10 @@ def test_job_lifecycle_commits_state_and_audit_together(
     assert running.status is JobStatus.RUNNING
     assert running.started_at is not None
 
-    completed = service.succeed(
+    completed = _succeed(
+        unit_of_work_factory,
         created.job_id,
-        result={"sync_id": "00000000-0000-0000-0000-000000000027"},
+        {"sync_id": "00000000-0000-0000-0000-000000000027"},
     )
     assert completed.status is JobStatus.SUCCEEDED
     assert completed.result == {"sync_id": "00000000-0000-0000-0000-000000000027"}
@@ -116,10 +129,10 @@ def test_job_can_fail_before_or_after_worker_start(
     )
     if start_first:
         service.start(job.job_id)
-    failed = service.fail_refresh(
+    failed = service.fail(
         job.job_id,
         error="Authorization synchronization failed",
-        failure_code=RefreshFailureCode.SOURCE_ERROR,
+        failure_code=JobFailureCode.SOURCE_ERROR,
     )
     assert failed.status is JobStatus.FAILED
     assert failed.started_at is not None if start_first else failed.started_at is None
@@ -139,9 +152,7 @@ def test_blank_failure_is_rejected_before_state_changes(
         parameters={},
     )
     with pytest.raises(ValueError, match="nonblank"):
-        service.fail_refresh(
-            job.job_id, error="  ", failure_code=RefreshFailureCode.SOURCE_ERROR
-        )
+        service.fail(job.job_id, error="  ", failure_code=JobFailureCode.SOURCE_ERROR)
     assert service.start(job.job_id).status is JobStatus.RUNNING
 
 
@@ -162,8 +173,8 @@ def test_repeated_transitions_are_idempotent_but_terminal_state_cannot_change(
     assert repeated_running == first_running
 
     result: dict[str, object] = {"sync_id": str(UUID(int=27))}
-    first_success = service.succeed(job.job_id, result=result)
-    repeated_success = service.succeed(job.job_id, result=result)
+    first_success = _succeed(unit_of_work_factory, job.job_id, result)
+    repeated_success = _succeed(unit_of_work_factory, job.job_id, result)
     assert repeated_success == first_success
     assert service.start(job.job_id) == first_success
     assert _audit_actions(session_factory) == [
@@ -173,8 +184,8 @@ def test_repeated_transitions_are_idempotent_but_terminal_state_cannot_change(
     ]
 
     with pytest.raises(InvalidJobTransitionError):
-        service.fail_refresh(
-            job.job_id, error="Too late", failure_code=RefreshFailureCode.SOURCE_ERROR
+        service.fail(
+            job.job_id, error="Too late", failure_code=JobFailureCode.SOURCE_ERROR
         )
 
 
@@ -190,9 +201,9 @@ def test_conflicting_repeated_success_is_rejected(
         parameters={},
     )
     service.start(job.job_id)
-    service.succeed(job.job_id, result={"value": 1})
+    _succeed(unit_of_work_factory, job.job_id, {"value": 1})
     with pytest.raises(InvalidJobTransitionError):
-        service.succeed(job.job_id, result={"value": 2})
+        _succeed(unit_of_work_factory, job.job_id, {"value": 2})
 
 
 def test_concurrent_start_records_one_transition(
@@ -252,10 +263,10 @@ def test_failed_refresh_records_code_and_details_with_truncated_audit(
     job_id = _running_refresh(unit_of_work_factory)
     issues = [{"line_number": line} for line in range(12)]
 
-    failed = service.fail_refresh(
+    failed = service.fail(
         job_id,
         error="Entity refresh failed",
-        failure_code=RefreshFailureCode.ROW_VALIDATION,
+        failure_code=JobFailureCode.ROW_VALIDATION,
         failure_details={"issue_count": 12, "issues": issues},
     )
 
@@ -282,8 +293,8 @@ def test_failed_refresh_without_details_records_only_the_code(
     service = _service(unit_of_work_factory)
     job_id = _running_refresh(unit_of_work_factory)
 
-    failed = service.fail_refresh(
-        job_id, error="Entity refresh failed", failure_code=RefreshFailureCode.TIMEOUT
+    failed = service.fail(
+        job_id, error="Entity refresh failed", failure_code=JobFailureCode.TIMEOUT
     )
 
     assert failed.progress == {"phase": "failed", "failure_code": "timeout"}
@@ -304,20 +315,20 @@ def test_failed_refresh_cleanup_commits_with_the_failure(
         raise RuntimeError("cleanup storage unavailable")
 
     with pytest.raises(RuntimeError):
-        service.fail_refresh(
+        service.fail(
             job_id,
             error="Entity refresh failed",
-            failure_code=RefreshFailureCode.SOURCE_ERROR,
+            failure_code=JobFailureCode.SOURCE_ERROR,
             cleanup=broken_cleanup,
         )
 
     assert service.find(job_id).status is JobStatus.RUNNING
     assert _failure_audits(session_factory) == []
 
-    service.fail_refresh(
+    service.fail(
         job_id,
         error="Entity refresh failed",
-        failure_code=RefreshFailureCode.SOURCE_ERROR,
+        failure_code=JobFailureCode.SOURCE_ERROR,
         cleanup=lambda _uow: cleaned.append(job_id),
     )
 
@@ -361,3 +372,27 @@ def test_success_recorded_in_a_callers_transaction_commits_only_with_it(
     assert stored.progress == {"phase": "completed"}
     assert stored.warnings == ("one warning",)
     assert _audit_actions(session_factory).count("job.succeeded") == 1
+
+
+def test_a_new_job_a_worker_already_started_is_not_failed_when_sending_errors(
+    unit_of_work_factory: UnitOfWorkFactory,
+) -> None:
+    """A send error reported after a worker started the job leaves it running.
+
+    A broker can raise after it has accepted the message, for example when a
+    publish confirmation times out. Only a job that is still queued is failed
+    with `dispatch_failed`.
+    """
+    service = _service(unit_of_work_factory)
+    job = create_job(
+        unit_of_work_factory, job_type=JobType.ANNOTATION_QC_REPORT, parameters={}
+    )
+
+    def delivered_then_raised(sent: Job) -> None:
+        service.start(sent.job_id)
+        raise TimeoutError("publish confirmation timed out")
+
+    returned = service.send(job, created=True, dispatch=delivered_then_raised)
+
+    assert returned.status is JobStatus.RUNNING
+    assert service.find(job.job_id).status is JobStatus.RUNNING

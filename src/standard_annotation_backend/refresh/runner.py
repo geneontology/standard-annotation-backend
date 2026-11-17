@@ -1,7 +1,7 @@
 """Run refresh jobs through one shared lifecycle.
 
-Celery's `sabe.refresh.run` task and the refresh CLI both call `RefreshRunner`,
-so a job behaves the same whichever process runs it.
+Celery's `sabe.job.run` task and the refresh CLI both reach `RefreshRunner` through
+`JobExecutors`, so a job behaves the same whichever process runs it.
 
 A refresh job is one transaction. The runner fetches the source, then opens a
 unit of work, calls the kind's `apply`, records the job's success with its
@@ -29,11 +29,12 @@ from uuid import UUID
 
 from standard_annotation_backend.domain.jobs import (
     TERMINAL_JOB_STATUSES,
+    FollowUpJob,
+    JobFailureCode,
     JobType,
+    ProgressReporter,
 )
 from standard_annotation_backend.domain.refresh import (
-    ProgressReporter,
-    RefreshFailureCode,
     RefreshKindName,
     RefreshOutcome,
     SourceDocument,
@@ -140,6 +141,11 @@ class RefreshRunner:
                 self._kinds[job_type] = kind
         self._dispatch_follow_up = dispatch_follow_up
 
+    @property
+    def job_types(self) -> frozenset[JobType]:
+        """Return the job types of every refresh kind this runner runs."""
+        return frozenset(self._kinds)
+
     def run(self, job_id: UUID) -> None:
         """Run one refresh job until it succeeds or fails.
 
@@ -200,7 +206,7 @@ class RefreshRunner:
 
     def _execute(
         self, kind: RefreshKind, job: Job, source_key: str
-    ) -> tuple[UUID, ...]:
+    ) -> tuple[FollowUpJob, ...]:
         """Fetch, apply, and record success in one transaction.
 
         Returns:
@@ -237,22 +243,29 @@ class RefreshRunner:
                 warnings=outcome.warnings,
             )
             unit_of_work.commit()
-        return outcome.follow_up_job_ids
+        return outcome.follow_ups
 
-    def _send_follow_up(self, job_id: UUID) -> None:
-        """Send a queued follow-up job, leaving it queued if sending fails.
+    def _send_follow_up(self, follow_up: FollowUpJob) -> None:
+        """Send a queued follow-up job after the refresh has committed.
 
-        A failure is logged. The job stays queued until the next refresh that
-        queues the same job, or another trigger, sends it again.
+        A job the refresh created is failed with `dispatch_failed` if sending it
+        fails. If even that cannot be recorded, the error is logged and the job
+        stays queued until the next refresh that queues the same job joins it
+        and sends it. Nothing here can fail the refresh, which has already
+        succeeded.
         """
         if self._dispatch_follow_up is None:
             return
         try:
-            self._dispatch_follow_up(self._jobs.find(job_id))
+            self._jobs.send(
+                self._jobs.find(follow_up.job_id),
+                created=follow_up.created,
+                dispatch=self._dispatch_follow_up,
+            )
         except Exception as error:
             logger.error(
-                "Follow-up job dispatch failed: job_id=%s failure_type=%s",
-                job_id,
+                "Follow-up job could not be sent: job_id=%s failure_type=%s",
+                follow_up.job_id,
                 type(error).__name__,
             )
 
@@ -275,12 +288,12 @@ class RefreshRunner:
             "Refresh job cannot run: job_id=%s job_type=%s failure_code=%s",
             job.job_id,
             job.job_type.value,
-            RefreshFailureCode.INVALID_PARAMETERS.value,
+            JobFailureCode.INVALID_PARAMETERS.value,
         )
         self._fail(
             job.job_id,
             None if kind is None else kind.name,
-            RefreshFailureCode.INVALID_PARAMETERS,
+            JobFailureCode.INVALID_PARAMETERS,
             None,
         )
 
@@ -288,7 +301,7 @@ class RefreshRunner:
         self,
         job_id: UUID,
         kind_name: RefreshKindName | None,
-        failure_code: RefreshFailureCode,
+        failure_code: JobFailureCode,
         failure_details: dict[str, object] | None,
     ) -> None:
         """Mark a job failed and audit it in one transaction.
@@ -301,7 +314,7 @@ class RefreshRunner:
             failure_details: Optional JSON-compatible details stored with the
                 failure.
         """
-        self._jobs.fail_refresh(
+        self._jobs.fail(
             job_id,
             error=refresh_failure_message(kind_name),
             failure_code=failure_code,

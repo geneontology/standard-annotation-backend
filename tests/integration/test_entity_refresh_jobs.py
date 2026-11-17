@@ -28,9 +28,8 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.jobs import JobFailureCode, JobStatus, JobType
 from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
     RefreshKindName,
 )
 from standard_annotation_backend.domain.snapshots import SnapshotKind
@@ -42,13 +41,13 @@ from standard_annotation_backend.persistence.models import (
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh import runner as refresh_runner
 from standard_annotation_backend.refresh.fetchers import SourceError
-from standard_annotation_backend.refresh.runner import RefreshRunner
 from standard_annotation_backend.services import (
     entity_refresh_service as entity_refresh,
 )
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
+from standard_annotation_backend.services.job_executors import JobExecutors
 from standard_annotation_backend.services.job_service import JobService
 
 SOURCE_URL = "https://example.org/mgi.gpi"
@@ -187,10 +186,10 @@ def entity_service(unit_of_work_factory: UnitOfWorkFactory) -> EntityRefreshServ
 @pytest.fixture
 def runner_for(
     database_engine: Engine, unit_of_work_factory: UnitOfWorkFactory
-) -> Callable[..., RefreshRunner]:
+) -> Callable[..., JobExecutors]:
     """Return a factory for runners around the given fake fetchers."""
 
-    def build(fetchers: FakeFetchers, **kwargs: Any) -> RefreshRunner:
+    def build(fetchers: FakeFetchers, **kwargs: Any) -> JobExecutors:
         return build_runner(database_engine, unit_of_work_factory, fetchers, **kwargs)
 
     return build
@@ -199,7 +198,7 @@ def runner_for(
 def test_entity_refresh_job_records_progress_and_result(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     integration_api_client: TestClient,
 ) -> None:
     """A successful refresh records its final progress and result.
@@ -242,7 +241,7 @@ def test_entity_refresh_job_records_progress_and_result(
 def test_gzip_compressed_source_stores_the_same_catalog(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
 ) -> None:
     """A gzip-compressed GPI file is expanded and stored like a plain one."""
     job_id = _create_job(unit_of_work_factory)
@@ -263,7 +262,7 @@ def test_entity_refresh_domain_failure_is_terminal_and_stores_nothing(
     unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     session_factory: sessionmaker[Session],
     seed_active_subjects: Callable[..., None],
     integration_api_client: TestClient,
@@ -285,7 +284,7 @@ def test_entity_refresh_domain_failure_is_terminal_and_stores_nothing(
     content = SOURCE_BYTES
     fetched: bytes | Exception = content
     if failure_code == "timeout":
-        fetched = SourceError(RefreshFailureCode.TIMEOUT)
+        fetched = SourceError(JobFailureCode.TIMEOUT)
     elif failure_code == "header":
         fetched = content = b""
     elif failure_code == "row_validation":
@@ -321,7 +320,7 @@ def test_invalid_rows_are_reported_on_the_failed_job(
     unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     session_factory: sessionmaker[Session],
     integration_api_client: TestClient,
 ) -> None:
@@ -387,7 +386,7 @@ def test_invalid_rows_are_reported_on_the_failed_job(
 def test_undecodable_download_fails_with_its_code(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     content: bytes,
     code: str,
 ) -> None:
@@ -405,7 +404,7 @@ def test_undecodable_download_fails_with_its_code(
 def test_unchanged_source_reports_the_active_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
 ) -> None:
     """A source matching the active catalog by locator and content completes unchanged.
 
@@ -435,7 +434,7 @@ def test_unchanged_source_reports_the_active_snapshot(
 def test_changed_url_or_content_stores_new_snapshot(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     session_factory: sessionmaker[Session],
     changed: str,
 ) -> None:
@@ -477,7 +476,7 @@ def test_matching_catalog_of_another_source_does_not_make_refresh_unchanged(
     jobs: JobService,
     entity_service: EntityRefreshService,
     unit_of_work_factory: UnitOfWorkFactory,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     session_factory: sessionmaker[Session],
 ) -> None:
     """Only the same source's active catalog can make a refresh unchanged.

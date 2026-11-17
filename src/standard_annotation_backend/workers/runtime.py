@@ -1,4 +1,4 @@
-"""Construct the services and refresh runner used by one Celery task or CLI run."""
+"""Construct the job runners and services used by one Celery task or CLI run."""
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -23,56 +23,43 @@ from standard_annotation_backend.refresh.sources import RefreshSources
 from standard_annotation_backend.services.annotation_refresh_service import (
     AnnotationRefreshService,
 )
+from standard_annotation_backend.services.annotation_scan import AnnotationScanRunner
 from standard_annotation_backend.services.authorization_refresh_service import (
     AuthorizationRefreshService,
 )
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
+from standard_annotation_backend.services.job_executors import JobExecutors
 from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.ontology_refresh_service import (
     OntologyRefreshService,
 )
-from standard_annotation_backend.services.qc_report_service import QcReportRunner
+from standard_annotation_backend.services.qc_report_service import QcReportScan
 from standard_annotation_backend.services.rules_refresh_service import (
     RulesRefreshService,
 )
 from standard_annotation_backend.services.term_replacement_service import (
-    TermReplacementService,
+    TermReplacementScan,
 )
 
 
-@dataclass(frozen=True, slots=True)
-class RefreshComponents:
-    """Group the runner with the services that callers use directly.
-
-    Attributes:
-        runner: Runs jobs of every kind.
-        term_replacement: Runs term replacement jobs.
-        qc_report: Runs QC report jobs.
-    """
-
-    runner: RefreshRunner
-    term_replacement: TermReplacementService
-    qc_report: QcReportRunner
-
-
-def create_refresh_runner(
+def create_job_executors(
     *,
     engine: Engine,
     unit_of_work_factory: UnitOfWorkFactory,
     sources: RefreshSources,
     fetchers: SourceFetcher,
-    dispatch_replacement: Callable[[Job], None] | None = None,
-) -> RefreshComponents:
-    """Build the refresh services and runner, and the term replacement and QC runners.
+    dispatch_follow_up: Callable[[Job], None] | None = None,
+) -> JobExecutors:
+    """Build the runners for every job type and the registry that picks one.
 
     Args:
         engine: Engine for advisory locks held on dedicated connections.
         unit_of_work_factory: Opens transactions for services.
         sources: Configured sources for every kind.
         fetchers: Fetches sources.
-        dispatch_replacement: Receives each job that a refresh queued, such as a
+        dispatch_follow_up: Receives each job that a refresh queued, such as a
             term replacement job, after the refresh commits. Celery tasks send
             the job to a worker; the CLI collects the jobs and runs them
             afterward. `None` leaves the jobs queued.
@@ -80,25 +67,33 @@ def create_refresh_runner(
     try_lock = bind_try_lock(engine)
     ontologies = sources.ontology_catalog()
     jobs = JobService(unit_of_work_factory)
-    return RefreshComponents(
-        term_replacement=TermReplacementService(
-            unit_of_work_factory, ontologies, try_lock
-        ),
-        qc_report=QcReportRunner(unit_of_work_factory, ontologies, try_lock),
-        runner=RefreshRunner(
-            try_lock=try_lock,
-            jobs=jobs,
-            unit_of_work_factory=unit_of_work_factory,
-            fetchers=fetchers,
-            sources=sources,
-            kinds=(
-                AuthorizationRefreshService(),
-                RulesRefreshService(ontologies),
-                EntityRefreshService(sources),
-                OntologyRefreshService(sources),
-                AnnotationRefreshService(sources),
+    return JobExecutors(
+        jobs,
+        (
+            RefreshRunner(
+                try_lock=try_lock,
+                jobs=jobs,
+                unit_of_work_factory=unit_of_work_factory,
+                fetchers=fetchers,
+                sources=sources,
+                kinds=(
+                    AuthorizationRefreshService(),
+                    RulesRefreshService(ontologies),
+                    EntityRefreshService(sources),
+                    OntologyRefreshService(sources),
+                    AnnotationRefreshService(sources),
+                ),
+                dispatch_follow_up=dispatch_follow_up,
             ),
-            dispatch_follow_up=dispatch_replacement,
+            AnnotationScanRunner(
+                try_lock=try_lock,
+                jobs=jobs,
+                unit_of_work_factory=unit_of_work_factory,
+                scans=(
+                    TermReplacementScan(unit_of_work_factory, ontologies),
+                    QcReportScan(unit_of_work_factory, ontologies),
+                ),
+            ),
         ),
     )
 
@@ -110,21 +105,19 @@ class WorkerRuntime:
     settings: Settings
     unit_of_work_factory: UnitOfWorkFactory
     jobs: JobService
-    runner: RefreshRunner
-    term_replacement: TermReplacementService
-    qc_report: QcReportRunner
+    executors: JobExecutors
 
 
 @contextmanager
 def worker_runtime(
     *,
-    dispatch_replacement: Callable[[Job], None] | None = None,
+    dispatch_follow_up: Callable[[Job], None] | None = None,
 ) -> Iterator[WorkerRuntime]:
     """Create a worker runtime and dispose its database engine afterward.
 
     Args:
-        dispatch_replacement: Receives each job that a refresh queued, such as a
-            term replacement job. See `create_refresh_runner`.
+        dispatch_follow_up: Receives each job that a refresh queued. See
+            `create_job_executors`.
     """
     settings = get_settings()
     engine = create_database_engine(settings.database_url)
@@ -137,20 +130,17 @@ def worker_runtime(
                 connect_timeout_seconds=settings.source_connect_timeout_seconds,
                 read_timeout_seconds=settings.source_read_timeout_seconds,
             )
-            refresh = create_refresh_runner(
-                engine=engine,
-                unit_of_work_factory=unit_of_work_factory,
-                sources=settings.sources,
-                fetchers=fetchers,
-                dispatch_replacement=dispatch_replacement,
-            )
             yield WorkerRuntime(
                 settings=settings,
                 unit_of_work_factory=unit_of_work_factory,
                 jobs=JobService(unit_of_work_factory),
-                runner=refresh.runner,
-                term_replacement=refresh.term_replacement,
-                qc_report=refresh.qc_report,
+                executors=create_job_executors(
+                    engine=engine,
+                    unit_of_work_factory=unit_of_work_factory,
+                    sources=settings.sources,
+                    fetchers=fetchers,
+                    dispatch_follow_up=dispatch_follow_up,
+                ),
             )
     finally:
         engine.dispose()

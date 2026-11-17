@@ -11,6 +11,8 @@ from uuid import UUID
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
+from standard_annotation_backend.domain.jobs import JobType
+
 GLOBAL_ANNOTATION_WRITE_LOCK_KEY = -(2**63)
 _MAX_SIGNATURE_LOCK_KEY = (1 << 63) - 1
 _HEXADECIMAL_CHARACTERS = frozenset(string.hexdigits)
@@ -30,26 +32,19 @@ class LockNamespace(Enum):
             without a value.
         REFRESH_START: Creation of refresh jobs of every kind. Used without a
             value.
-        QC_REPORT: Running of a QC report. Keyed by group key for a report on
-            one group, or used without a value for a report on all groups, so
-            two reports on the same group, or two on all groups, never run at
-            once.
-        QC_REPORT_START: Creation of QC report jobs. Used without a value.
-        TERM_REPLACEMENT: Running of a term replacement job. Keyed by group key
-            for a job on one group, or used without a value for a job on all
-            groups, so two jobs on the same group, or two on all groups, never
-            run at once.
-        TERM_REPLACEMENT_START: Creation of term replacement jobs. Used without a
+        ANNOTATION_SCAN: Running of an annotation scan job (a term replacement or
+            QC report job). Keyed by `scan_lock_value`, so two jobs of one type
+            covering the same groups never run at once, while jobs of different
+            types, or covering different groups, can.
+        ANNOTATION_SCAN_START: Creation of annotation scan jobs. Used without a
             value.
     """
 
     JOB = b"SABEJOB"
     ENTITY_ACTIVATION = b"SABEENTACT"
     REFRESH_START = b"SABERSTRT"
-    QC_REPORT = b"SABEQC"
-    QC_REPORT_START = b"SABEQCSTRT"
-    TERM_REPLACEMENT = b"SABETERM"
-    TERM_REPLACEMENT_START = b"SABETRPLS"
+    ANNOTATION_SCAN = b"SABESCAN"
+    ANNOTATION_SCAN_START = b"SABESCANSTRT"
 
 
 def lock_key(namespace: LockNamespace, value: str | UUID | None = None) -> int:
@@ -83,6 +78,25 @@ def lock_key(namespace: LockNamespace, value: str | UUID | None = None) -> int:
         data = value.encode("utf-8")
     digest = hashlib.blake2b(data, digest_size=8, person=namespace.value).digest()
     return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+def scan_lock_value(job_type: JobType, group_key: str | None) -> str:
+    """Return the `ANNOTATION_SCAN` lock value for a job type and owning group.
+
+    Job type values contain no `/`, so a value for all groups (`term_replacement`)
+    never equals a value for one group (`term_replacement/MGI`), and values of
+    different job types never collide.
+
+    Args:
+        job_type: The annotation scan job's type.
+        group_key: The one group the job covers, or `None` for all groups.
+
+    Returns:
+        The value that `try_advisory_lock` derives the lock key from.
+    """
+    if group_key is None:
+        return job_type.value
+    return f"{job_type.value}/{group_key}"
 
 
 @contextmanager

@@ -14,8 +14,8 @@ from uuid import UUID
 from go_standard_annotation_schema.datamodel import Entity
 from pydantic import Field
 
+from standard_annotation_backend.domain.jobs import JobFailureCode
 from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
     SourceProvenance,
     TerminalRefreshError,
 )
@@ -65,7 +65,7 @@ class EntityCatalogCollisionError(TerminalRefreshError):
     leaves them out, so logs stay short and contain no source data.
     """
 
-    failure_code = RefreshFailureCode.CATALOG_COLLISION
+    failure_code = JobFailureCode.CATALOG_COLLISION
 
     def __init__(self, colliding_ids: tuple[str, ...]) -> None:
         self.colliding_ids = tuple(sorted(set(colliding_ids)))

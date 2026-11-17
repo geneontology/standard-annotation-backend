@@ -23,7 +23,7 @@ from standard_annotation_backend.domain.annotation_management import (
     GroupSabeManagedError,
 )
 from standard_annotation_backend.domain.auth import system_context
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.jobs import JobStatus
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     UnknownSourceError,
@@ -62,7 +62,7 @@ def run_refreshes(
         # The start service calls this after committing the jobs, where the API
         # and the schedule would send the job to Celery instead.
         try:
-            runtime.runner.run(job.job_id)
+            runtime.executors.run(job.job_id)
         except Exception as error:
             # A Celery worker would retry this job later. The CLI does not wait to
             # retry: the job stays running with nothing committed, the summary
@@ -84,24 +84,24 @@ def run_refreshes(
     )
 
 
-def run_replacements(runtime: WorkerRuntime, queued: Sequence[Job]) -> tuple[Job, ...]:
-    """Run each queued term replacement job once, in this process.
+def run_follow_ups(runtime: WorkerRuntime, queued: Sequence[Job]) -> tuple[Job, ...]:
+    """Run each follow-up job once, in this process.
 
-    Ontology activations and annotation publications queue these jobs, which a
-    Celery worker would otherwise run. Several refreshes can queue the same job,
-    so each distinct job runs once. A job that raises is logged and reported in
-    whatever state it reached.
+    Ontology activations and annotation publications queue term replacement
+    jobs, which a Celery worker would otherwise run. Several refreshes can queue
+    the same job, so each distinct job runs once. A job that raises is logged and
+    reported in whatever state it reached.
 
     Returns:
-        The state of every replacement job after it ran.
+        The state of every follow-up job after it ran.
     """
     ran: list[Job] = []
     for job_id in dict.fromkeys(job.job_id for job in queued):
         try:
-            runtime.term_replacement.run(job_id)
+            runtime.executors.run(job_id)
         except Exception as error:
             logger.error(
-                "Term replacement job stopped before finishing: job_id=%s failure_type=%s",
+                "Follow-up job stopped before finishing: job_id=%s failure_type=%s",
                 job_id,
                 type(error).__name__,
             )
@@ -139,10 +139,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if kind in _SINGLE_SOURCE_KINDS and arguments.source_key is not None:
         parser.error(f"{kind.value} has a single source; omit source_key")
     try:
-        replacements: list[Job] = []
-        with worker_runtime(dispatch_replacement=replacements.append) as runtime:
+        follow_ups: list[Job] = []
+        with worker_runtime(dispatch_follow_up=follow_ups.append) as runtime:
             jobs, retired = run_refreshes(runtime, kind, arguments.source_key)
-            jobs += run_replacements(runtime, replacements)
+            jobs += run_follow_ups(runtime, follow_ups)
             sources_configured = bool(runtime.settings.sources.keys(kind))
     except UnknownSourceError:
         print(f"No {kind.value} source is configured with that key", file=sys.stderr)
@@ -190,16 +190,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _describe(job: Job) -> str:
-    """Return `<job type> <source key or scope> <status> <job id> [failure code]`."""
+    """Return `<job type> <source key or groups> <status> <job id> [failure code]`."""
     scope = job.parameters.get("source_key")
-    if job.job_type is JobType.TERM_REPLACEMENT:
+    if scope is None:
+        # Annotation scan jobs name the group they cover, or none for all
+        # groups, instead of a source. Reading the key directly never raises,
+        # so a job with unexpected parameters is still printed.
         scope = job.parameters.get("group_key", "all")
-    parts = [
-        job.job_type.value,
-        str(scope),
-        job.status.value,
-        str(job.job_id),
-    ]
+    parts = [job.job_type.value, str(scope), job.status.value, str(job.job_id)]
     failure_code = job.progress.get("failure_code")
     if job.status is JobStatus.FAILED and isinstance(failure_code, str):
         parts.append(failure_code)

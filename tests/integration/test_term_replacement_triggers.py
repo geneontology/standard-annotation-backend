@@ -50,7 +50,7 @@ def test_an_activation_queues_and_dispatches_a_job_for_all_groups(
         database_engine,
         unit_of_work_factory,
         FakeFetchers({"go": obo(OboTerm("GO:0000001"))}),
-        dispatch_replacement=dispatched.append,
+        dispatch_follow_up=dispatched.append,
     ).run(job.job_id)
 
     (queued,) = _replacement_jobs(session_factory)
@@ -79,7 +79,7 @@ def test_a_publication_queues_a_job_for_its_group_and_an_unchanged_file_does_not
         database_engine,
         unit_of_work_factory,
         FakeFetchers({"mgi-gpad": gpad_bytes(gpad_row("UniProtKB:P12345"))}),
-        dispatch_replacement=dispatched.append,
+        dispatch_follow_up=dispatched.append,
     )
 
     def run_refresh() -> Job:

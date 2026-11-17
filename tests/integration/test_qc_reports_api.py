@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
-from refresh_helpers import TEST_ONTOLOGIES
+from refresh_helpers import build_scan_runner
 from seeding import create_job, insert_annotation
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -20,12 +20,10 @@ from standard_annotation_backend.domain.auth import (
 )
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.main import app
-from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.repositories import QcReportRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.job_service import Job
-from standard_annotation_backend.services.qc_report_service import QcReportRunner
 from standard_annotation_backend.workers import tasks
 
 PATH = "/reports/annotation-qc"
@@ -39,7 +37,7 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[UUID]:
     def record(job: Job) -> None:
         jobs.append(job.job_id)
 
-    monkeypatch.setattr(tasks, "dispatch_qc_report", record)
+    monkeypatch.setattr(tasks, "dispatch_job", record)
     return jobs
 
 
@@ -77,9 +75,7 @@ def _annotation(**changes: object) -> Annotation:
 def _run(
     unit_of_work_factory: UnitOfWorkFactory, database_engine: Engine, report_id: UUID
 ) -> None:
-    QcReportRunner(
-        unit_of_work_factory, TEST_ONTOLOGIES, bind_try_lock(database_engine)
-    ).run(report_id)
+    build_scan_runner(database_engine, unit_of_work_factory).run(report_id)
 
 
 def _start(client: TestClient, body: dict[str, object]) -> UUID:
@@ -526,3 +522,54 @@ def test_a_report_scope_with_surrounding_whitespace_is_rejected(
     assert sent == []
     assert listing.status_code == status.HTTP_200_OK
     assert listing.json()["total"] == 0
+
+
+def test_a_new_report_that_cannot_be_sent_is_returned_failed(
+    integration_api_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A report this request created fails with `dispatch_failed` if sending fails.
+
+    The broker's error text is not exposed, and the next start queues a new
+    report instead of joining the failed one.
+    """
+
+    def fail(_job: Job) -> None:
+        raise ConnectionError("redis://user:secret@broker")
+
+    monkeypatch.setattr(tasks, "dispatch_job", fail)
+
+    response = integration_api_client.post(PATH, json={})
+
+    assert response.status_code == status.HTTP_202_ACCEPTED
+    failed = response.json()
+    assert failed["status"] == "failed"
+    assert failed["error"] == "QC report could not be dispatched"
+    assert failed["progress"] == {"phase": "failed", "failure_code": "dispatch_failed"}
+    assert "secret" not in response.text
+
+    monkeypatch.setattr(tasks, "dispatch_job", lambda _job: None)
+    again = integration_api_client.post(PATH, json={})
+
+    assert again.json()["status"] == "queued"
+    assert again.json()["job_id"] != failed["job_id"]
+
+
+def test_a_joined_report_that_cannot_be_sent_stays_queued(
+    integration_api_client: TestClient,
+    sent: list[UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A report another start created is left queued when sending it again fails.
+
+    The earlier send may already have put it in the broker.
+    """
+    first = integration_api_client.post(PATH, json={})
+
+    def fail(_job: Job) -> None:
+        raise ConnectionError("broker unavailable")
+
+    monkeypatch.setattr(tasks, "dispatch_job", fail)
+    again = integration_api_client.post(PATH, json={})
+
+    assert again.json()["job_id"] == first.json()["job_id"]
+    assert again.json()["status"] == "queued"

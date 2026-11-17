@@ -22,7 +22,7 @@ from sqlalchemy.types import Text
 from standard_annotation_backend.domain.jobs import (
     JobStatus,
     JobType,
-    group_scope_parameters,
+    scan_group_parameters,
 )
 from standard_annotation_backend.domain.qc_reports import (
     ISSUE_TYPES,
@@ -230,9 +230,9 @@ class QcReportRepository:
         if covering_group is not None:
             statement = statement.where(
                 or_(
-                    JobRecord.parameters == cast(group_scope_parameters(None), JSONB),
+                    JobRecord.parameters == cast(scan_group_parameters(None), JSONB),
                     JobRecord.parameters
-                    == cast(group_scope_parameters(covering_group), JSONB),
+                    == cast(scan_group_parameters(covering_group), JSONB),
                 )
             )
         if status is not None:

@@ -27,8 +27,8 @@ from uuid import UUID
 from pydantic import Field
 
 from standard_annotation_backend.domain.errors import ConflictError
+from standard_annotation_backend.domain.jobs import JobFailureCode
 from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
     SourceProvenance,
     TerminalRefreshError,
 )
@@ -226,7 +226,7 @@ class GroupSabeManagedError(ConflictError, TerminalRefreshError):
         group_key: The SABE-managed group.
     """
 
-    failure_code = RefreshFailureCode.GROUP_SABE_MANAGED
+    failure_code = JobFailureCode.GROUP_SABE_MANAGED
     code = "group_sabe_managed"
     message = (
         "The source's group is managed in SABE, so GPAD can no longer replace its "
@@ -293,7 +293,7 @@ class AnnotationImportConflictError(TerminalRefreshError):
     then fails with `invalid_parameters`.
     """
 
-    failure_code = RefreshFailureCode.INVALID_PARAMETERS
+    failure_code = JobFailureCode.INVALID_PARAMETERS
 
     def __init__(self) -> None:
         super().__init__("job has no usable annotation import")
