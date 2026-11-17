@@ -120,21 +120,14 @@ class JobRepository:
             .limit(1)
         )
 
-    def lock_qc_report_starts(self) -> None:
-        """Make QC report job creation run one request at a time.
+    def lock_annotation_scan_starts(self) -> None:
+        """Make annotation scan job creation run one caller at a time.
 
-        The lock is held until the transaction ends, so two requests cannot both
-        find no queued report and both create one.
+        The lock is held until the transaction ends, so two callers cannot both
+        find no queued job and both create one. One lock covers both job types;
+        creation is short, and a single key cannot deadlock with itself.
         """
-        acquire_transaction_lock(self.session, LockNamespace.QC_REPORT_START)
-
-    def lock_term_replacement_starts(self) -> None:
-        """Make term replacement job creation run one request at a time.
-
-        The lock is held until the transaction ends, so two requests cannot both
-        find no queued job and both create one.
-        """
-        acquire_transaction_lock(self.session, LockNamespace.TERM_REPLACEMENT_START)
+        acquire_transaction_lock(self.session, LockNamespace.ANNOTATION_SCAN_START)
 
     def find_queued(
         self, *, job_type: JobType, parameters: dict[str, object]
@@ -159,6 +152,41 @@ class JobRepository:
             .with_for_update()
             .execution_options(populate_existing=True)
         )
+
+    def running(
+        self,
+        *,
+        job_type: JobType,
+        parameters: dict[str, object],
+        excluding: UUID,
+    ) -> list[JobRecord]:
+        """Return running jobs with this type and these parameters, oldest first.
+
+        Args:
+            job_type: The job type to match.
+            parameters: The parameters to match exactly.
+            excluding: A job to leave out, such as the caller's own job.
+        """
+        return list(
+            self.session.scalars(
+                select(JobRecord)
+                .where(
+                    JobRecord.job_type == job_type,
+                    JobRecord.status == JobStatus.RUNNING,
+                    JobRecord.parameters == cast(parameters, JSONB),
+                    JobRecord.job_id != excluding,
+                )
+                .order_by(JobRecord.created_at, JobRecord.job_id)
+            )
+        )
+
+    def lock(self, job_id: UUID) -> JobRecord:
+        """Load a job under a row lock held until the transaction ends.
+
+        Raises:
+            JobNotFoundError: If the job does not exist.
+        """
+        return self._lock(job_id)
 
     def get(self, job_id: UUID) -> JobRecord | None:
         """Return a job by identifier without applying request authorization."""

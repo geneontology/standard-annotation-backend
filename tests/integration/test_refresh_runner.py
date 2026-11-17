@@ -1,6 +1,6 @@
 """Verify the shared refresh job lifecycle for every refresh kind."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -22,12 +22,11 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.jobs import JobFailureCode, JobStatus, JobType
 from standard_annotation_backend.domain.ontology import (
     OntologyClosureRow,
     OntologySnapshot,
 )
-from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.go_site.rule_files import GOREFS_PATH
 from standard_annotation_backend.persistence.locks import bind_try_lock
@@ -50,6 +49,7 @@ from standard_annotation_backend.refresh import runner as refresh_runner
 from standard_annotation_backend.refresh.fetchers import SourceError
 from standard_annotation_backend.refresh.runner import RefreshRunner
 from standard_annotation_backend.services import ontology_refresh_service
+from standard_annotation_backend.services.annotation_scan import queue_or_join
 from standard_annotation_backend.services.authorization_refresh_service import (
     AuthorizationRefreshService,
 )
@@ -86,7 +86,7 @@ class KindCase:
     source_key: str
     content: bytes
     invalid_content: bytes
-    invalid_code: RefreshFailureCode
+    invalid_code: JobFailureCode
     applied_action: AuditAction
     public_error: str
 
@@ -97,7 +97,7 @@ CASES = {
         source_key="mgi",
         content=(FIXTURES / "gpi" / "minimal.gpi").read_bytes(),
         invalid_content=(FIXTURES / "gpi" / "invalid-row.gpi").read_bytes(),
-        invalid_code=RefreshFailureCode.ROW_VALIDATION,
+        invalid_code=JobFailureCode.ROW_VALIDATION,
         applied_action=AuditAction.ENTITY_REFRESHED,
         public_error="Entity refresh failed",
     ),
@@ -106,7 +106,7 @@ CASES = {
         source_key="go",
         content=(FIXTURES / "ontology" / "minimal-go.obo").read_bytes(),
         invalid_content=(FIXTURES / "ontology" / "invalid-reference.obo").read_bytes(),
-        invalid_code=RefreshFailureCode.INVALID_DOCUMENT,
+        invalid_code=JobFailureCode.INVALID_DOCUMENT,
         applied_action=AuditAction.ONTOLOGY_REFRESHED,
         public_error="Ontology refresh failed",
     ),
@@ -115,7 +115,7 @@ CASES = {
         source_key="go-site",
         content=USERS_YAML,
         invalid_content=INVALID_USERS_YAML,
-        invalid_code=RefreshFailureCode.INVALID_DOCUMENT,
+        invalid_code=JobFailureCode.INVALID_DOCUMENT,
         applied_action=AuditAction.AUTHORIZATION_REFRESHED,
         public_error="Authorization refresh failed",
     ),
@@ -124,7 +124,7 @@ CASES = {
         source_key="go-site",
         content=rule_files(),
         invalid_content=rule_files({GOREFS_PATH: b"- id: GO_REF:15\n"}),
-        invalid_code=RefreshFailureCode.INVALID_DOCUMENT,
+        invalid_code=JobFailureCode.INVALID_DOCUMENT,
         applied_action=AuditAction.RULES_REFRESHED,
         public_error="Rules refresh failed",
     ),
@@ -142,7 +142,7 @@ ANNOTATION_CASE = KindCase(
     source_key="mgi-gpad",
     content=gpad_bytes(gpad_row("UniProtKB:P12345")),
     invalid_content=b"not gpad\n",
-    invalid_code=RefreshFailureCode.HEADER,
+    invalid_code=JobFailureCode.HEADER,
     applied_action=AuditAction.ANNOTATION_REFRESH_PUBLISHED,
     public_error="Annotation refresh failed",
 )
@@ -246,14 +246,14 @@ def test_finished_job_is_not_run_again(
 @pytest.mark.parametrize(
     "code",
     [
-        RefreshFailureCode.TIMEOUT,
-        RefreshFailureCode.HTTP_STATUS,
-        RefreshFailureCode.SOURCE_ERROR,
+        JobFailureCode.TIMEOUT,
+        JobFailureCode.HTTP_STATUS,
+        JobFailureCode.SOURCE_ERROR,
     ],
 )
 def test_source_failure_is_terminal_with_its_code(
     case: KindCase,
-    code: RefreshFailureCode,
+    code: JobFailureCode,
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
 ) -> None:
@@ -417,29 +417,6 @@ def test_invalid_users_yaml_reports_issues_without_values(
     assert "owner" not in str(details)
 
 
-def test_job_type_no_kind_claims_fails_generically_without_fetching(
-    unit_of_work_factory: UnitOfWorkFactory,
-    database_engine: Engine,
-) -> None:
-    """A job type the runner does not run fails once, generically."""
-    fetchers = FakeFetchers({})
-    runner = build_runner(database_engine, unit_of_work_factory, fetchers)
-    job_id = create_job(
-        unit_of_work_factory,
-        job_type=JobType.TERM_REPLACEMENT,
-        requested_by="curator",
-        parameters={"source_key": "mgi"},
-    ).job_id
-
-    runner.run(job_id)
-
-    record = _read(unit_of_work_factory, job_id)
-    assert record.status == JobStatus.FAILED
-    assert record.error == "Refresh failed"
-    assert record.progress == {"phase": "failed", "failure_code": "invalid_parameters"}
-    assert fetchers.calls == []
-
-
 def test_two_kinds_claiming_one_job_type_are_rejected(
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
@@ -582,22 +559,18 @@ def test_follow_up_jobs_are_sent_after_the_refresh_commits(
         database_engine,
         unit_of_work_factory,
         FakeFetchers({"go": obo(OboTerm("GO:0000001"))}),
-        dispatch_replacement=send,
+        dispatch_follow_up=send,
     ).run(job.job_id)
 
     assert statuses_when_sent == [JobStatus.SUCCEEDED]
 
 
-def test_a_failed_follow_up_send_leaves_the_refresh_succeeded_and_the_job_queued(
+def _activate_go(
     database_engine: Engine,
     unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """A broker failure while sending a replacement job does not fail the refresh."""
-
-    def broken(_job: Job) -> None:
-        raise RuntimeError("broker unavailable")
-
+    dispatch: Callable[[Job], None],
+) -> Job:
+    """Run an ontology refresh that activates GO, sending follow-ups to `dispatch`."""
     job = create_job(
         unit_of_work_factory,
         job_type=JobType.ONTOLOGY_REFRESH,
@@ -608,17 +581,86 @@ def test_a_failed_follow_up_send_leaves_the_refresh_succeeded_and_the_job_queued
         database_engine,
         unit_of_work_factory,
         FakeFetchers({"go": obo(OboTerm("GO:0000001"))}),
-        dispatch_replacement=broken,
+        dispatch_follow_up=dispatch,
     ).run(job.job_id)
+    return JobService(unit_of_work_factory).find(job.job_id)
 
-    assert JobService(unit_of_work_factory).find(job.job_id).status is (
-        JobStatus.SUCCEEDED
-    )
+
+def _replacement_jobs(session_factory: sessionmaker[Session]) -> list[JobRecord]:
     with session_factory() as session:
-        (replacement,) = session.scalars(
-            select(JobRecord).where(JobRecord.job_type == JobType.TERM_REPLACEMENT)
+        return list(
+            session.scalars(
+                select(JobRecord).where(JobRecord.job_type == JobType.TERM_REPLACEMENT)
+            )
         )
-        assert replacement.status is JobStatus.QUEUED
+
+
+def _broken(_job: Job) -> None:
+    raise RuntimeError("broker unavailable")
+
+
+def test_a_new_follow_up_that_cannot_be_sent_fails_and_the_refresh_succeeds(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A replacement job the refresh created fails with `dispatch_failed`."""
+    refresh = _activate_go(database_engine, unit_of_work_factory, _broken)
+
+    assert refresh.status is JobStatus.SUCCEEDED
+    (replacement,) = _replacement_jobs(session_factory)
+    assert replacement.status is JobStatus.FAILED
+    assert replacement.error == "Term replacement could not be dispatched"
+    assert replacement.progress == {
+        "phase": "failed",
+        "failure_code": "dispatch_failed",
+    }
+
+
+def test_a_joined_follow_up_that_cannot_be_sent_stays_queued(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A replacement job queued before the refresh joined it is left queued."""
+    with unit_of_work_factory() as uow:
+        earlier = queue_or_join(
+            uow,
+            job_type=JobType.TERM_REPLACEMENT,
+            group_key=None,
+            requested_by="cli",
+        ).job
+        uow.commit()
+
+    refresh = _activate_go(database_engine, unit_of_work_factory, _broken)
+
+    assert refresh.status is JobStatus.SUCCEEDED
+    (replacement,) = _replacement_jobs(session_factory)
+    assert replacement.job_id == earlier.job_id
+    assert replacement.status is JobStatus.QUEUED
+
+
+def test_a_follow_up_whose_failure_cannot_be_recorded_stays_queued(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If recording `dispatch_failed` fails too, the refresh still succeeds.
+
+    The replacement job stays queued for the next trigger to join and send.
+    """
+
+    def lose_database(*_args: object, **_kwargs: object) -> Job:
+        raise ConnectionResetError("database lost")
+
+    monkeypatch.setattr(JobService, "record_failure", lose_database)
+
+    refresh = _activate_go(database_engine, unit_of_work_factory, _broken)
+
+    assert refresh.status is JobStatus.SUCCEEDED
+    (replacement,) = _replacement_jobs(session_factory)
+    assert replacement.status is JobStatus.QUEUED
 
 
 def test_progress_reported_during_apply_commits_before_the_job_does(

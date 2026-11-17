@@ -10,7 +10,12 @@ prunes ontology snapshots that are no longer kept (see
 
 from dataclasses import replace
 
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.jobs import (
+    FollowUpJob,
+    JobFailureCode,
+    JobType,
+    ProgressReporter,
+)
 from standard_annotation_backend.domain.ontology import (
     STORED_ONTOLOGY_REFRESH_RESULT,
     OntologyDefinition,
@@ -25,8 +30,6 @@ from standard_annotation_backend.domain.ontology import (
     ontology_refresh_warnings,
 )
 from standard_annotation_backend.domain.refresh import (
-    ProgressReporter,
-    RefreshFailureCode,
     RefreshKindName,
     RefreshOutcome,
     SourceDocument,
@@ -38,11 +41,9 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
 from standard_annotation_backend.refresh.sources import RefreshSources
+from standard_annotation_backend.services.annotation_scan import queue_or_join
 from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import Job
-from standard_annotation_backend.services.term_replacement_service import (
-    queue_term_replacement,
-)
 
 
 class OntologyRefreshService:
@@ -143,11 +144,15 @@ class OntologyRefreshService:
         )
         snapshots.prune(SnapshotKind.ONTOLOGY)
         # Queued last: the queue lock is held until this transaction commits.
-        replacement = queue_term_replacement(
-            unit_of_work, group_key=None, requested_by=job.requested_by
+        replacement = queue_or_join(
+            unit_of_work,
+            job_type=JobType.TERM_REPLACEMENT,
+            group_key=None,
+            requested_by=job.requested_by,
         )
         return replace(
-            _stored(result.to_stored()), follow_up_job_ids=(replacement.job_id,)
+            _stored(result.to_stored()),
+            follow_ups=(FollowUpJob(replacement.job.job_id, replacement.created),),
         )
 
 
@@ -165,13 +170,13 @@ def _parse(
     except OntologyParseError as error:
         # An invalid file stays invalid, so retrying cannot help.
         raise TerminalRefreshError(
-            failure_code=RefreshFailureCode.INVALID_DOCUMENT,
+            failure_code=JobFailureCode.INVALID_DOCUMENT,
             failure_details={"message": str(error)},
         ) from None
     missing = missing_required_subsets(snapshot, definition)
     if missing:
         raise TerminalRefreshError(
-            failure_code=RefreshFailureCode.INVALID_DOCUMENT,
+            failure_code=JobFailureCode.INVALID_DOCUMENT,
             failure_details={
                 "message": "ontology source does not declare the subsets "
                 + ", ".join(missing)

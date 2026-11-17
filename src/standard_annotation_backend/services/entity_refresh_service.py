@@ -15,10 +15,12 @@ from standard_annotation_backend.domain.entities import (
     EntityRefreshResult,
     EntityRefreshUnchangedResult,
 )
-from standard_annotation_backend.domain.jobs import JobType
-from standard_annotation_backend.domain.refresh import (
+from standard_annotation_backend.domain.jobs import (
+    JobFailureCode,
+    JobType,
     ProgressReporter,
-    RefreshFailureCode,
+)
+from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     RefreshOutcome,
     SourceDocument,
@@ -177,7 +179,7 @@ class EntityRefreshService:
                 _failure_log_summary(error),
             )
             raise TerminalRefreshError(
-                failure_code=RefreshFailureCode(error.code),
+                failure_code=JobFailureCode(error.code),
                 failure_details=error.details,
             ) from None
 

@@ -16,10 +16,12 @@ from standard_annotation_backend.auth.users_yaml import (
     InvalidUsersDocumentError,
     parse_users_yaml,
 )
-from standard_annotation_backend.domain.jobs import JobType
-from standard_annotation_backend.domain.refresh import (
+from standard_annotation_backend.domain.jobs import (
+    JobFailureCode,
+    JobType,
     ProgressReporter,
-    RefreshFailureCode,
+)
+from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     RefreshOutcome,
     SourceDocument,
@@ -130,12 +132,12 @@ class AuthorizationRefreshService:
         try:
             yaml_text = document.content.decode("utf-8")
         except UnicodeDecodeError:
-            raise SourceError(RefreshFailureCode.INVALID_UTF8) from None
+            raise SourceError(JobFailureCode.INVALID_UTF8) from None
         try:
             users, summary = _users(yaml_text)
         except InvalidUsersDocumentError as error:
             raise TerminalRefreshError(
-                failure_code=RefreshFailureCode.INVALID_DOCUMENT,
+                failure_code=JobFailureCode.INVALID_DOCUMENT,
                 failure_details=validation_failure_details(error.errors),
             ) from None
         stored_summary = STORED_AUTHORIZATION_SUMMARY.dump(summary)

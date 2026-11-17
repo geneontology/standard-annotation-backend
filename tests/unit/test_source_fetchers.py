@@ -5,8 +5,8 @@ from hashlib import sha256
 import httpx2
 import pytest
 
+from standard_annotation_backend.domain.jobs import JobFailureCode
 from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
     pack_source_files,
     unpack_source_files,
 )
@@ -116,7 +116,7 @@ def test_rules_source_fails_if_any_file_is_unavailable() -> None:
     with pytest.raises(SourceError) as raised:
         _fetchers(httpx2.MockTransport(handle)).fetch("go-site", RULES)
 
-    assert raised.value.code is RefreshFailureCode.SOURCE_ERROR
+    assert raised.value.code is JobFailureCode.SOURCE_ERROR
 
 
 def test_packing_the_same_files_always_gives_the_same_content() -> None:
@@ -158,14 +158,14 @@ def test_https_source_follows_redirects_and_keeps_configured_locator() -> None:
 @pytest.mark.parametrize(
     ("outcome", "code"),
     [
-        (httpx2.Response(404), RefreshFailureCode.HTTP_STATUS),
-        (httpx2.Response(503), RefreshFailureCode.HTTP_STATUS),
-        (httpx2.ReadTimeout("slow"), RefreshFailureCode.TIMEOUT),
-        (httpx2.ConnectError("refused"), RefreshFailureCode.SOURCE_ERROR),
+        (httpx2.Response(404), JobFailureCode.HTTP_STATUS),
+        (httpx2.Response(503), JobFailureCode.HTTP_STATUS),
+        (httpx2.ReadTimeout("slow"), JobFailureCode.TIMEOUT),
+        (httpx2.ConnectError("refused"), JobFailureCode.SOURCE_ERROR),
     ],
 )
 def test_https_failures_have_stable_codes_without_urls(
-    outcome: httpx2.Response | Exception, code: RefreshFailureCode
+    outcome: httpx2.Response | Exception, code: JobFailureCode
 ) -> None:
     """Retrieval failures report a fixed code and never the URL."""
 
@@ -191,7 +191,7 @@ def test_https_redirect_loop_stops_with_source_error() -> None:
     with pytest.raises(SourceError) as raised:
         _fetchers(loop).fetch("mgi", HTTPS)
 
-    assert raised.value.code is RefreshFailureCode.SOURCE_ERROR
+    assert raised.value.code is JobFailureCode.SOURCE_ERROR
 
 
 def test_https_redirect_to_plain_http_is_rejected() -> None:
@@ -205,7 +205,7 @@ def test_https_redirect_to_plain_http_is_rejected() -> None:
     with pytest.raises(SourceError) as raised:
         _fetchers(httpx2.MockTransport(handle)).fetch("mgi", HTTPS)
 
-    assert raised.value.code is RefreshFailureCode.SOURCE_ERROR
+    assert raised.value.code is JobFailureCode.SOURCE_ERROR
     assert "example.org" not in str(raised.value)
 
 
@@ -218,7 +218,7 @@ def test_github_connection_failure_reports_source_error() -> None:
     with pytest.raises(SourceError) as raised:
         _fetchers(httpx2.MockTransport(handle)).fetch("go-site", GITHUB)
 
-    assert raised.value.code is RefreshFailureCode.SOURCE_ERROR
+    assert raised.value.code is JobFailureCode.SOURCE_ERROR
 
 
 @pytest.mark.parametrize("status", [404, 500])
@@ -229,4 +229,4 @@ def test_github_failures_report_source_error(status: int) -> None:
     with pytest.raises(SourceError) as raised:
         _fetchers(transport).fetch("go-site", GITHUB)
 
-    assert raised.value.code is RefreshFailureCode.SOURCE_ERROR
+    assert raised.value.code is JobFailureCode.SOURCE_ERROR

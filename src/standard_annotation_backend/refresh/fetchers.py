@@ -16,8 +16,8 @@ from typing import Protocol
 
 import httpx2
 
+from standard_annotation_backend.domain.jobs import JobFailureCode
 from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
     SourceDocument,
     TerminalRefreshError,
     pack_source_files,
@@ -35,11 +35,11 @@ from standard_annotation_backend.refresh.sources import (
 
 _RETRIEVAL_CODES = frozenset(
     {
-        RefreshFailureCode.SOURCE_ERROR,
-        RefreshFailureCode.HTTP_STATUS,
-        RefreshFailureCode.TIMEOUT,
-        RefreshFailureCode.INVALID_GZIP,
-        RefreshFailureCode.INVALID_UTF8,
+        JobFailureCode.SOURCE_ERROR,
+        JobFailureCode.HTTP_STATUS,
+        JobFailureCode.TIMEOUT,
+        JobFailureCode.INVALID_GZIP,
+        JobFailureCode.INVALID_UTF8,
     }
 )
 
@@ -55,7 +55,7 @@ class SourceError(TerminalRefreshError):
         ValueError: If `code` is not one of those retrieval codes.
     """
 
-    def __init__(self, code: RefreshFailureCode) -> None:
+    def __init__(self, code: JobFailureCode) -> None:
         if code not in _RETRIEVAL_CODES:
             raise ValueError("source errors require a retrieval failure code")
         self.code = code
@@ -98,7 +98,7 @@ class GitHubSourceFetcher:
                 source.repository, source.path, commit
             )
         except GitHubIntegrationError:
-            raise SourceError(RefreshFailureCode.SOURCE_ERROR) from None
+            raise SourceError(JobFailureCode.SOURCE_ERROR) from None
         return SourceDocument(
             source_key=source_key,
             source_type="github",
@@ -128,7 +128,7 @@ class GitHubSourceFetcher:
                 for path in source.paths
             }
         except GitHubIntegrationError:
-            raise SourceError(RefreshFailureCode.SOURCE_ERROR) from None
+            raise SourceError(JobFailureCode.SOURCE_ERROR) from None
         content = pack_source_files(files)
         return SourceDocument(
             source_key=source_key,
@@ -169,13 +169,13 @@ class HttpsSourceFetcher:
             if response.url.scheme != "https" or any(
                 hop.url.scheme != "https" for hop in response.history
             ):
-                raise SourceError(RefreshFailureCode.SOURCE_ERROR)
+                raise SourceError(JobFailureCode.SOURCE_ERROR)
         except httpx2.TimeoutException:
-            raise SourceError(RefreshFailureCode.TIMEOUT) from None
+            raise SourceError(JobFailureCode.TIMEOUT) from None
         except httpx2.HTTPStatusError:
-            raise SourceError(RefreshFailureCode.HTTP_STATUS) from None
+            raise SourceError(JobFailureCode.HTTP_STATUS) from None
         except httpx2.HTTPError:
-            raise SourceError(RefreshFailureCode.SOURCE_ERROR) from None
+            raise SourceError(JobFailureCode.SOURCE_ERROR) from None
         return SourceDocument(
             source_key=source_key,
             source_type="https",

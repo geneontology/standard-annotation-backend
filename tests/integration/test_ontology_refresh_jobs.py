@@ -136,7 +136,7 @@ consider: GO:9999999
     job_id = _create_job(unit_of_work_factory)
     _install_source(monkeypatch, _source_responses(content))
 
-    tasks.run_refresh.run(str(job_id))
+    tasks.run_job.run(str(job_id))
 
     job = _load_job(unit_of_work_factory, job_id)
     assert job.status == JobStatus.SUCCEEDED.value
@@ -175,7 +175,7 @@ def test_source_and_parse_failures_store_only_public_error(
     job_id = _create_job(unit_of_work_factory)
     _install_source(monkeypatch, responses.copy())
 
-    tasks.run_refresh.run(str(job_id))
+    tasks.run_job.run(str(job_id))
 
     job = _load_job(unit_of_work_factory, job_id)
     assert job.status == JobStatus.FAILED.value
@@ -204,7 +204,7 @@ def test_scheduler_persists_only_key_and_records_dispatch_failure(
         dispatched.append(job_id)
         raise RuntimeError("redis detail")
 
-    monkeypatch.setattr(tasks.run_refresh, "delay", fail_dispatch)
+    monkeypatch.setattr(tasks.run_job, "delay", fail_dispatch)
 
     tasks.schedule_refresh.run("ontology")
 

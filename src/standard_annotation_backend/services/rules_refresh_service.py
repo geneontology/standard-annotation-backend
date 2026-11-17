@@ -14,11 +14,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.jobs import (
+    JobFailureCode,
+    JobType,
+    ProgressReporter,
+)
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.refresh import (
-    ProgressReporter,
-    RefreshFailureCode,
     RefreshKindName,
     RefreshOutcome,
     SourceDocument,
@@ -228,13 +230,13 @@ def _parse(document: SourceDocument) -> RuleFiles:
         files = unpack_source_files(document.content)
     except ValueError:
         raise TerminalRefreshError(
-            failure_code=RefreshFailureCode.INVALID_DOCUMENT
+            failure_code=JobFailureCode.INVALID_DOCUMENT
         ) from None
     texts = {path: decode_source_text(content) for path, content in files.items()}
     try:
         return parse_rule_files(texts)
     except InvalidRuleFileError as error:
         raise TerminalRefreshError(
-            failure_code=RefreshFailureCode.INVALID_DOCUMENT,
+            failure_code=JobFailureCode.INVALID_DOCUMENT,
             failure_details=validation_failure_details(error.issues),
         ) from None

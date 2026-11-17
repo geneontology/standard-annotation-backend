@@ -22,7 +22,7 @@ from standard_annotation_backend.persistence.models import (
     AnnotationStagingRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.refresh.runner import RefreshRunner
+from standard_annotation_backend.services.job_executors import JobExecutors
 from standard_annotation_backend.services.job_service import JobService
 
 SOURCE = "mgi-gpad"
@@ -38,10 +38,10 @@ def jobs(unit_of_work_factory: UnitOfWorkFactory) -> JobService:
 @pytest.fixture
 def runner_for(
     database_engine: Engine, unit_of_work_factory: UnitOfWorkFactory
-) -> Callable[..., RefreshRunner]:
+) -> Callable[..., JobExecutors]:
     """Return a function that builds a refresh runner using given fake fetchers."""
 
-    def build(fetchers: FakeFetchers, **kwargs: Any) -> RefreshRunner:
+    def build(fetchers: FakeFetchers, **kwargs: Any) -> JobExecutors:
         return build_runner(database_engine, unit_of_work_factory, fetchers, **kwargs)
 
     return build
@@ -79,7 +79,7 @@ def _group_annotations(session_factory: sessionmaker[Session]) -> int:
 def test_refresh_job_publishes_and_records_counts(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     session_factory: sessionmaker[Session],
 ) -> None:
     """A GPAD refresh job publishes the file and records its counts and result."""
@@ -104,7 +104,7 @@ def test_refresh_job_publishes_and_records_counts(
 def test_unchanged_file_is_skipped_and_cutover_never_skips(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     session_factory: sessionmaker[Session],
 ) -> None:
     """A refresh skips a file it already imported into an unchanged group.
@@ -169,7 +169,7 @@ def test_unchanged_file_is_skipped_and_cutover_never_skips(
 )
 def test_terminal_failures_keep_the_group_and_clean_staging(
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     content: bytes,
@@ -215,7 +215,7 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
 def test_job_for_a_sabe_managed_group_fails_with_group_sabe_managed(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
-    runner_for: Callable[..., RefreshRunner],
+    runner_for: Callable[..., JobExecutors],
     session_factory: sessionmaker[Session],
 ) -> None:
     """A job for a group that is already SABE-managed fails with `group_sabe_managed`."""

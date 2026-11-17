@@ -47,14 +47,16 @@ def test_try_lock_does_not_block_other_values_or_namespaces(
     database_engine: Engine,
 ) -> None:
     """A held try-lock leaves other values and other namespaces available."""
-    with try_advisory_lock(database_engine, LockNamespace.QC_REPORT, "go") as acquired:
+    with try_advisory_lock(
+        database_engine, LockNamespace.ANNOTATION_SCAN, "go"
+    ) as acquired:
         assert acquired is True
         with try_advisory_lock(
-            database_engine, LockNamespace.QC_REPORT, "future-ontology"
+            database_engine, LockNamespace.ANNOTATION_SCAN, "future-ontology"
         ) as other_value:
             assert other_value is True
         with try_advisory_lock(
-            database_engine, LockNamespace.TERM_REPLACEMENT, "go"
+            database_engine, LockNamespace.ENTITY_ACTIVATION, "go"
         ) as other_namespace:
             assert other_namespace is True
 
@@ -65,11 +67,13 @@ def test_try_lock_is_released_when_the_context_raises(
     """An error inside the context still releases the lock."""
     with (
         pytest.raises(RuntimeError, match="injected"),
-        try_advisory_lock(database_engine, LockNamespace.QC_REPORT, "mgi") as acquired,
+        try_advisory_lock(
+            database_engine, LockNamespace.ANNOTATION_SCAN, "mgi"
+        ) as acquired,
     ):
         assert acquired is True
         raise RuntimeError("injected")
-    assert _available_elsewhere(database_engine, LockNamespace.QC_REPORT, "mgi")
+    assert _available_elsewhere(database_engine, LockNamespace.ANNOTATION_SCAN, "mgi")
 
 
 def test_transaction_lock_is_held_until_the_transaction_ends(
@@ -83,7 +87,7 @@ def test_transaction_lock_is_held_until_the_transaction_ends(
                 database_engine, LockNamespace.REFRESH_START, None
             )
             assert _available_elsewhere(
-                database_engine, LockNamespace.QC_REPORT_START, None
+                database_engine, LockNamespace.ANNOTATION_SCAN_START, None
             )
             finish(session)
             assert _available_elsewhere(

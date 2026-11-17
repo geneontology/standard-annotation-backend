@@ -15,9 +15,8 @@ from source_provenance import github_provenance
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.jobs import JobFailureCode, JobType
 from standard_annotation_backend.domain.refresh import (
-    RefreshFailureCode,
     SourceProvenance,
     TerminalRefreshError,
 )
@@ -104,7 +103,7 @@ def test_invalid_sync_preserves_all_last_valid_state(
     before = _snapshot(session_factory)
     with pytest.raises(TerminalRefreshError) as raised:
         apply_users_yaml(unit_of_work_factory, source, github_provenance("b" * 40))
-    assert raised.value.failure_code is RefreshFailureCode.INVALID_DOCUMENT
+    assert raised.value.failure_code is JobFailureCode.INVALID_DOCUMENT
     assert _snapshot(session_factory) == before
 
 

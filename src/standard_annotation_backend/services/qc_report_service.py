@@ -10,14 +10,11 @@ entity catalogs) that are active when the batch is read, and the report records
 every set of versions it used.
 """
 
-import logging
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from uuid import UUID
 
-from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import (
     AuthorizationContext,
     AuthorizationScope,
@@ -26,12 +23,10 @@ from standard_annotation_backend.domain.auth import (
     authorize_role,
 )
 from standard_annotation_backend.domain.jobs import (
-    TERMINAL_JOB_STATUSES,
-    JobNotFoundError,
     JobStatus,
     JobType,
-    group_scope,
-    group_scope_parameters,
+    ProgressReporter,
+    scan_groups,
 )
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.qc_reports import (
@@ -46,12 +41,7 @@ from standard_annotation_backend.domain.qc_reports import (
     ReferenceDataVersions,
     issue_types_of,
 )
-from standard_annotation_backend.domain.refresh import RefreshFailureCode
 from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
-from standard_annotation_backend.domain.semantic_validation.facts import (
-    ReferenceDataUnavailableError,
-)
-from standard_annotation_backend.persistence.locks import AdvisoryTryLock, LockNamespace
 from standard_annotation_backend.persistence.models import (
     JobRecord,
     QcReportFindingRecord,
@@ -60,11 +50,14 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
+from standard_annotation_backend.services.annotation_scan import (
+    ScanOutcome,
+    queue_or_join,
+)
 from standard_annotation_backend.services.annotation_validator import (
     AnnotationValidator,
     Candidate,
 )
-from standard_annotation_backend.services.audit_service import AuditService
 from standard_annotation_backend.services.job_service import (
     Job,
     JobService,
@@ -76,141 +69,65 @@ from standard_annotation_backend.services.resource_authorization import (
 )
 from standard_annotation_backend.version import get_application_version
 
-logger = logging.getLogger(__name__)
-
 _BATCH_SIZE = 500
-_FAILURE_MESSAGE = "QC report failed"
 
 
-def queue_qc_report(
-    unit_of_work: SqlAlchemyUnitOfWork, *, group_key: str | None, requested_by: str
-) -> Job:
-    """Return the queued QC report for a scope, creating one if none is queued.
+class QcReportScan:
+    """Validate every active annotation a report covers, and store its findings.
 
-    A lock held until the caller's transaction ends lets only one caller at a
-    time look for or create a report. A queued report that is found stays locked
-    for the same time, so it cannot start until the caller that reused it
-    commits. A report that is already running is never reused; a new report is
-    queued instead. The caller must commit and then send the job to a worker.
-
-    Args:
-        unit_of_work: The caller's transaction.
-        group_key: The group to report on, or `None` for all groups.
-        requested_by: The actor recorded as the requester of a new report.
-
-    Returns:
-        The queued report, either new or already queued.
-    """
-    unit_of_work.jobs.lock_qc_report_starts()
-    parameters = group_scope_parameters(group_key)
-    record = unit_of_work.jobs.find_queued(
-        job_type=JobType.ANNOTATION_QC_REPORT, parameters=parameters
-    )
-    if record is None:
-        record = unit_of_work.jobs.create(
-            job_type=JobType.ANNOTATION_QC_REPORT,
-            requested_by=requested_by,
-            parameters=parameters,
-            now=datetime.now(UTC),
-        )
-        AuditService(unit_of_work.audit).record_job_lifecycle(
-            action=AuditAction.JOB_QUEUED, record=record
-        )
-    return job_from_record(record)
-
-
-class QcReportBusyError(RuntimeError):
-    """Report that another QC report of the same scope is running.
-
-    The report stays queued; the Celery task retries it later.
-    """
-
-    def __init__(self) -> None:
-        super().__init__("another QC report for this scope is running")
-
-
-class QcReportRunner:
-    """Run QC report jobs.
+    `QcReportScan` is the annotation scan for `annotation_qc_report` jobs (see
+    `services/annotation_scan.py`).
 
     Args:
         unit_of_work_factory: Opens the transactions for reading and storing.
         ontologies: The configured ontologies and the identifier prefixes each owns.
-        try_lock: Takes a PostgreSQL advisory lock only if it is free. The runner
-            locks the job, so only one process runs it, and the report's scope,
-            so only one report of a scope runs at a time.
     """
 
     def __init__(
-        self,
-        unit_of_work_factory: UnitOfWorkFactory,
-        ontologies: OntologyCatalog,
-        try_lock: AdvisoryTryLock,
+        self, unit_of_work_factory: UnitOfWorkFactory, ontologies: OntologyCatalog
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
-        self._try_lock = try_lock
-        self._jobs = JobService(unit_of_work_factory)
         self._ontologies = ontologies
         self._validator = AnnotationValidator(ontologies)
 
-    def run(self, job_id: UUID) -> None:
-        """Run one QC report to completion or failure.
+    @property
+    def job_type(self) -> JobType:
+        """Return `annotation_qc_report`."""
+        return JobType.ANNOTATION_QC_REPORT
 
-        Nothing happens if another process is running the report or the report
-        has finished. A report whose job parameters are invalid fails with
-        `invalid_parameters`. A report that finds required reference data
-        missing fails with `reference_data_unavailable`, and its findings and
-        counts are deleted. A report that starts again after an interruption
-        first deletes the findings and counts it stored earlier. When the report
-        succeeds, the findings of every older report of the same scope are
-        deleted in the transaction that records the success.
+    @property
+    def failure_message(self) -> str:
+        """Return "QC report failed"."""
+        return "QC report failed"
 
-        Raises:
-            QcReportBusyError: If another report of the same scope is running.
-                The report stays queued.
+    def prepare(self, unit_of_work: SqlAlchemyUnitOfWork, job: Job) -> None:
+        """Delete findings and counts an earlier attempt of this report stored."""
+        unit_of_work.qc_reports.clear(job.job_id)
+
+    def execute(
+        self, job: Job, group_key: str | None, report: ProgressReporter
+    ) -> ScanOutcome:
+        """Validate every active annotation of `group_key`, or of all groups."""
+        result = self._check(job, group_key, report)
+        return ScanOutcome(result=result.to_job_result(), counts=_progress(result))
+
+    def finalize(self, unit_of_work: SqlAlchemyUnitOfWork, job: Job) -> None:
+        """Delete the findings of older reports covering the same groups.
+
+        This runs in the transaction that records the report's success, so
+        readers move from the older findings to the newer ones in one step.
         """
-        with self._try_lock(LockNamespace.JOB, job_id) as acquired:
-            if not acquired:
-                return
-            try:
-                job = self._jobs.find(job_id)
-            except JobNotFoundError:
-                return
-            if job.status in TERMINAL_JOB_STATUSES:
-                return
-            try:
-                if job.job_type is not JobType.ANNOTATION_QC_REPORT:
-                    raise ValueError("not a QC report job")
-                group_key = group_scope(job.parameters)
-            except ValueError:
-                self._fail(job_id, RefreshFailureCode.INVALID_PARAMETERS)
-                return
-            with self._try_lock(LockNamespace.QC_REPORT, group_key) as free:
-                if not free:
-                    raise QcReportBusyError
-                job = self._jobs.start(job_id)
-                with self._unit_of_work_factory() as unit_of_work:
-                    unit_of_work.qc_reports.clear(job_id)
-                    unit_of_work.commit()
-                try:
-                    result = self._check(job, group_key)
-                except ReferenceDataUnavailableError:
-                    self._fail(job_id, RefreshFailureCode.REFERENCE_DATA_UNAVAILABLE)
-                    return
-                self._jobs.update_progress(
-                    job_id, progress={**_progress(result), "phase": "completed"}
-                )
-                parameters = dict(job.parameters)
-                self._jobs.succeed(
-                    job_id,
-                    result=result.to_job_result(),
-                    finalize=lambda unit_of_work: (
-                        unit_of_work.qc_reports.expire_findings_of_older_reports(
-                            job_id, parameters
-                        )
-                    ),
-                )
+        unit_of_work.qc_reports.expire_findings_of_older_reports(
+            job.job_id, dict(job.parameters)
+        )
 
-    def _check(self, job: Job, group_key: str | None) -> QcReportResult:
+    def cleanup(self, unit_of_work: SqlAlchemyUnitOfWork, job: Job) -> None:
+        """Delete the findings and counts of a failed report."""
+        unit_of_work.qc_reports.clear(job.job_id)
+
+    def _check(
+        self, job: Job, group_key: str | None, report: ProgressReporter
+    ) -> QcReportResult:
         """Validate every active annotation of the scope, batch by batch."""
         checked = 0
         with_issues = 0
@@ -268,10 +185,9 @@ class QcReportRunner:
                 unit_of_work.commit()
             checked += len(records)
             with_issues += len(findings)
-            self._jobs.update_progress(
-                job.job_id,
-                progress={
-                    "phase": "checking",
+            report(
+                "checking",
+                {
                     "annotations_checked": checked,
                     "annotations_with_issues": with_issues,
                 },
@@ -285,16 +201,8 @@ class QcReportRunner:
             schema_version=SCHEMA_PACKAGE_VERSION,
         )
 
-    def _fail(self, job_id: UUID, code: RefreshFailureCode) -> None:
-        self._jobs.fail_refresh(
-            job_id,
-            error=_FAILURE_MESSAGE,
-            failure_code=code,
-            cleanup=lambda unit_of_work: unit_of_work.qc_reports.clear(job_id),
-        )
 
-
-def _progress(result: QcReportResult) -> dict[str, object]:
+def _progress(result: QcReportResult) -> dict[str, int]:
     """Return a report's counts in job-progress form."""
     return {
         "annotations_checked": result.annotations_checked,
@@ -369,15 +277,15 @@ class QcReportService:
 
         A global admin reports on one group or, without `owning_group_id`, on all
         groups. An admin limited to one group always reports on that group. If
-        sending the job fails, the error is logged and the job stays queued; the
-        next start for the same scope reuses it and sends it again.
+        sending the report to a worker fails, a report this call created is
+        returned failed with `dispatch_failed`; a reused report is left queued.
 
         Args:
             context: The caller's authorization.
             owning_group_id: The group to report on, if the caller names one.
 
         Returns:
-            The queued report.
+            The queued report, or the failed one if it could not be sent.
 
         Raises:
             PermissionDeniedError: If the caller is not an admin, or names a
@@ -394,21 +302,16 @@ class QcReportService:
         else:
             group_key = context.group_id
         with self._unit_of_work_factory() as unit_of_work:
-            job = queue_qc_report(
-                unit_of_work, group_key=group_key, requested_by=context.actor_id
+            queued = queue_or_join(
+                unit_of_work,
+                job_type=JobType.ANNOTATION_QC_REPORT,
+                group_key=group_key,
+                requested_by=context.actor_id,
             )
             unit_of_work.commit()
-        try:
-            self._dispatch(job)
-        except Exception as error:
-            # The job stays queued; the next start of the same scope reuses it
-            # and sends it again.
-            logger.error(
-                "QC report dispatch failed: job_id=%s failure_type=%s",
-                job.job_id,
-                type(error).__name__,
-            )
-        return job
+        return JobService(self._unit_of_work_factory).send(
+            queued.job, created=queued.created, dispatch=self._dispatch
+        )
 
     def list(
         self,
@@ -461,7 +364,7 @@ class QcReportService:
             issues = unit_of_work.qc_reports.issue_counts(report_id, group)
         return QcReportSummary(
             job=job,
-            owning_group_id=group_scope(job.parameters),
+            owning_group_id=scan_groups(job.parameters),
             annotations_checked=sum(
                 counts.annotations_checked for counts in groups.values()
             ),
@@ -556,7 +459,7 @@ def _listing(record: JobRecord, superseded: set[UUID]) -> QcReportListing:
     job = job_from_record(record)
     return QcReportListing(
         job=job,
-        owning_group_id=group_scope(job.parameters),
+        owning_group_id=scan_groups(job.parameters),
         findings_available=(
             job.status is JobStatus.SUCCEEDED and job.job_id not in superseded
         ),

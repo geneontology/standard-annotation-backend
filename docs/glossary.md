@@ -136,8 +136,8 @@ can no longer be read.
 ## Jobs and refreshes
 
 **Job.** A durable record of one asynchronous operation: `queued`, then `running`, then
-`succeeded` or `failed`. A Celery worker or the refresh CLI runs it. See
-[Running a job](refresh-infrastructure.md#running-a-job).
+`succeeded` or `failed`. A Celery worker or the refresh CLI runs it. See the
+[job guide](jobs.md).
 
 **Refresh and refresh all.** A refresh is a job that fetches one source and applies it.
 "Refresh all" starts a refresh for every configured source of a kind, and for
@@ -161,7 +161,8 @@ record in the file to be importable, and it starts only through the admin API.
 
 **Term replacement.** A job that replaces obsolete terms and alternative IDs in active
 annotations with their current terms, wherever the result passes validation. Every
-ontology activation and every GPAD publication queues one. See
+ontology activation and every GPAD publication queues one. It is an annotation scan
+job. See
 [Automatic term replacement](annotation-validation.md#automatic-term-replacement).
 
 **Replacement chain.** The sequence of replacements that term replacement follows from
@@ -172,12 +173,19 @@ an obsolete term to its only `replaced_by` term, until it reaches a current term
 **Follow-up job.** A job that a refresh queues in its own transaction, such as a term
 replacement job. The runner sends it to a worker after the refresh commits.
 
+**Annotation scan job.** A job that reads every active annotation of one owning
+group, or of all groups, in batches. Term replacement and QC reports are annotation
+scan jobs. See [Annotation scan jobs](jobs.md#annotation-scan-jobs).
+
 **QC report and finding.** A QC report is a job that validates every active annotation
-in its scope (all groups or one group). A finding is one annotation's list of issues in
-a report. See [Reports](annotation-validation.md#reports).
+of one group or all groups; it is an annotation scan job. A finding is one
+annotation's list of issues in a report. See
+[Reports](annotation-validation.md#reports).
 
 **Failure code.** The machine-readable reason a job failed, such as `invalid_document`
-or `catalog_collision`, stored in the job's progress.
+or `catalog_collision`, stored in the job's progress. Every job type can fail with
+`dispatch_failed`; annotation scan jobs can also fail with `abandoned`. See
+[The job record](jobs.md#the-job-record).
 
 ## Validation
 

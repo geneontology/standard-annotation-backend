@@ -46,10 +46,10 @@ def _assert_safe_retry(caught: pytest.ExceptionInfo[Retry], logs: str) -> None:
 @pytest.mark.parametrize(
     ("task", "arguments"),
     [
-        (tasks.run_refresh, (str(uuid4()),)),
+        (tasks.run_job, (str(uuid4()),)),
         (tasks.schedule_refresh, ("entity",)),
     ],
-    ids=["refresh", "refresh_schedule"],
+    ids=["job", "refresh_schedule"],
 )
 def test_runtime_startup_failure_retries_without_diagnostic_chain(
     monkeypatch: pytest.MonkeyPatch,
@@ -85,14 +85,14 @@ def test_runner_failure_retries_without_diagnostic_chain(
 
     @contextmanager
     def runtime(**_kwargs: object):
-        yield SimpleNamespace(runner=SimpleNamespace(run=fail))
+        yield SimpleNamespace(executors=SimpleNamespace(run=fail))
 
     monkeypatch.setattr(tasks, "worker_runtime", runtime)
-    _safe_retry(monkeypatch, tasks.run_refresh)
+    _safe_retry(monkeypatch, tasks.run_job)
     _enable_task_logs(monkeypatch)
 
     with pytest.raises(Retry) as caught:
-        tasks.run_refresh.run(str(uuid4()))
+        tasks.run_job.run(str(uuid4()))
 
     _assert_safe_retry(caught, caplog.text)
 

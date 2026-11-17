@@ -38,7 +38,7 @@ from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.refresh_start_service import (
     RefreshStartService,
 )
-from standard_annotation_backend.workers.runtime import create_refresh_runner
+from standard_annotation_backend.workers.runtime import create_job_executors
 
 USERS_YAML = b"""
 - accounts: {github: curator}
@@ -65,21 +65,19 @@ def use_runtime(
 
         @contextmanager
         def runtime(
-            *, dispatch_replacement: Callable[[Job], None] | None = None
+            *, dispatch_follow_up: Callable[[Job], None] | None = None
         ) -> Iterator[SimpleNamespace]:
-            components = create_refresh_runner(
-                engine=database_engine,
-                unit_of_work_factory=unit_of_work_factory,
-                sources=sources,
-                fetchers=fetchers,
-                dispatch_replacement=dispatch_replacement,
-            )
             yield SimpleNamespace(
                 unit_of_work_factory=unit_of_work_factory,
                 settings=SimpleNamespace(sources=sources),
                 jobs=JobService(unit_of_work_factory),
-                runner=components.runner,
-                term_replacement=components.term_replacement,
+                executors=create_job_executors(
+                    engine=database_engine,
+                    unit_of_work_factory=unit_of_work_factory,
+                    sources=sources,
+                    fetchers=fetchers,
+                    dispatch_follow_up=dispatch_follow_up,
+                ),
             )
 
         monkeypatch.setattr(cli, "worker_runtime", runtime)

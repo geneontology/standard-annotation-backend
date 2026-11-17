@@ -8,7 +8,7 @@ import pytest
 from standard_annotation_backend.domain.annotation_management import (
     AnnotationRejection,
 )
-from standard_annotation_backend.domain.refresh import RefreshFailureCode
+from standard_annotation_backend.domain.jobs import JobFailureCode
 from standard_annotation_backend.gpad.parser import (
     GpadDocument,
     GpadHeaderError,
@@ -116,5 +116,5 @@ def test_decoding_expands_gzip_and_rejects_bad_bytes() -> None:
     with pytest.raises(SourceError) as bad_utf8:
         decode_source_text(b"\xff")
 
-    assert bad_gzip.value.code is RefreshFailureCode.INVALID_GZIP
-    assert bad_utf8.value.code is RefreshFailureCode.INVALID_UTF8
+    assert bad_gzip.value.code is JobFailureCode.INVALID_GZIP
+    assert bad_utf8.value.code is JobFailureCode.INVALID_UTF8

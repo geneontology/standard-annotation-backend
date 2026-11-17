@@ -10,17 +10,17 @@ from typing import Literal, cast
 from seeding import create_job
 from sqlalchemy import Engine
 
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.jobs import JobType, ProgressReporter
 from standard_annotation_backend.domain.refresh import (
-    ProgressReporter,
     RefreshOutcome,
     SourceDocument,
     SourceProvenance,
     pack_source_files,
 )
 from standard_annotation_backend.go_site.rule_files import RULE_FILE_PATHS
+from standard_annotation_backend.persistence.locks import bind_try_lock
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
-from standard_annotation_backend.refresh.runner import RefreshKind, RefreshRunner
+from standard_annotation_backend.refresh.runner import RefreshKind
 from standard_annotation_backend.refresh.sources import (
     ConfiguredSource,
     GitHubRulesSource,
@@ -28,11 +28,17 @@ from standard_annotation_backend.refresh.sources import (
     RefreshSources,
     SourcesFile,
 )
+from standard_annotation_backend.services.annotation_scan import AnnotationScanRunner
 from standard_annotation_backend.services.authorization_refresh_service import (
     AuthorizationRefreshService,
 )
+from standard_annotation_backend.services.job_executors import JobExecutors
 from standard_annotation_backend.services.job_service import Job, JobService
-from standard_annotation_backend.workers.runtime import create_refresh_runner
+from standard_annotation_backend.services.qc_report_service import QcReportScan
+from standard_annotation_backend.services.term_replacement_service import (
+    TermReplacementScan,
+)
+from standard_annotation_backend.workers.runtime import create_job_executors
 
 TEST_ANNOTATION_SOURCES: dict[str, object] = {
     "mgi-gpad": {
@@ -184,16 +190,31 @@ def build_runner(
     fetchers: FakeFetchers,
     *,
     sources: RefreshSources = TEST_SOURCES,
-    dispatch_replacement: Callable[[Job], None] | None = None,
-) -> RefreshRunner:
-    """Build the production runner and kinds around fake fetchers."""
-    return create_refresh_runner(
+    dispatch_follow_up: Callable[[Job], None] | None = None,
+) -> JobExecutors:
+    """Build the production runners and registry around fake fetchers."""
+    return create_job_executors(
         engine=engine,
         unit_of_work_factory=unit_of_work_factory,
         sources=sources,
         fetchers=fetchers,
-        dispatch_replacement=dispatch_replacement,
-    ).runner
+        dispatch_follow_up=dispatch_follow_up,
+    )
+
+
+def build_scan_runner(
+    engine: Engine, unit_of_work_factory: UnitOfWorkFactory
+) -> AnnotationScanRunner:
+    """Build the production annotation scan runner and scans for the test ontologies."""
+    return AnnotationScanRunner(
+        try_lock=bind_try_lock(engine),
+        jobs=JobService(unit_of_work_factory),
+        unit_of_work_factory=unit_of_work_factory,
+        scans=(
+            TermReplacementScan(unit_of_work_factory, TEST_ONTOLOGIES),
+            QcReportScan(unit_of_work_factory, TEST_ONTOLOGIES),
+        ),
+    )
 
 
 def source_document(

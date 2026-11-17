@@ -57,7 +57,7 @@ def dispatched(monkeypatch: pytest.MonkeyPatch) -> list[Job]:
     monkeypatch.setattr(
         admin, "get_settings", lambda: SimpleNamespace(sources=TEST_SOURCES)
     )
-    monkeypatch.setattr(tasks, "dispatch_refresh_job", sent.append)
+    monkeypatch.setattr(tasks, "dispatch_job", sent.append)
     return sent
 
 
@@ -238,7 +238,7 @@ def test_dispatch_failure_returns_failed_job_without_broker_details(
     def fail(_job: Job) -> None:
         raise ConnectionError("redis://user:secret@broker")
 
-    monkeypatch.setattr(tasks, "dispatch_refresh_job", fail)
+    monkeypatch.setattr(tasks, "dispatch_job", fail)
 
     body = None if path in SINGLE_SOURCE_ROUTES else {"source_key": key}
 

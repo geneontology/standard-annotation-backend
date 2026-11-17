@@ -4,7 +4,8 @@ This guide is for developers changing or debugging reference data refreshes.
 `ARCHITECTURE.md` describes the design at a high level, and docstrings describe
 each piece. This guide connects the two. It follows a refresh from the moment
 something starts it, through the job that runs it, to the rows it writes in
-PostgreSQL.
+PostgreSQL. The [job guide](jobs.md) covers what every job shares: the job record,
+dispatch, retries, and failure codes.
 
 SABE refreshes five kinds of reference data:
 
@@ -45,10 +46,10 @@ flowchart LR
     settings --> start
 
     start -->|"commit job rows"| jobs[("job, audit_event")]
-    start -->|"Celery dispatch"| run["sabe.refresh.run(job_id)"]
+    start -->|"Celery dispatch"| run["sabe.job.run(job_id)"]
     start -->|"CLI dispatch"| inproc["run in the CLI process"]
 
-    run --> runner["RefreshRunner"]
+    run --> runner["JobExecutors → RefreshRunner"]
     inproc --> runner
     settings --> runner
     runner --> fetch["SourceFetchers<br/>(GitHub or HTTPS)"]
@@ -107,8 +108,8 @@ service separates them again with `unpack_source_files`.
 
 | Trigger | Entry point | `requested_by` | How jobs are dispatched |
 |---|---|---|---|
-| Schedule | Beat entries `authorization-refresh`, `rules-refresh`, `ontology-refresh`, `entity-refresh`, `annotation-refresh` call `sabe.refresh.schedule(kind)` in `workers/tasks.py` | `scheduler` | Celery (`tasks.dispatch_refresh_job`) |
-| API | `api/routes/admin.py` | the caller's actor ID | Celery (`tasks.dispatch_refresh_job`) |
+| Schedule | Beat entries `authorization-refresh`, `rules-refresh`, `ontology-refresh`, `entity-refresh`, `annotation-refresh` call `sabe.refresh.schedule(kind)` in `workers/tasks.py` | `scheduler` | Celery (`tasks.dispatch_job`) |
+| API | `api/routes/admin.py` | the caller's actor ID | Celery (`tasks.dispatch_job`) |
 | CLI | `cli/refresh.py` (`just refresh`) | `cli` | in the CLI process, one job at a time |
 
 All three triggers call `RefreshStartService.start(kind, requested_by=..., source_key=...)`.
@@ -154,11 +155,12 @@ Points worth knowing when something looks wrong:
   It returns the existing one and dispatches it again. That is how a job whose
   worker disappeared runs again: any later start sends it again.
 - **Commit before dispatch.** A worker must be able to read the job it is sent.
-- **Dispatch failures.** Only a job created by this call is marked failed
-  (`dispatch_failed`). A reused job may already be in the broker, so it is left
-  as it is.
-- **Routing.** `tasks.dispatch_refresh_job` sends every job to `sabe.refresh.run`.
-  Celery messages carry only the job ID.
+- **Dispatch failures.** Sent through `JobService.send`: only a job created by
+  this call is marked failed (`dispatch_failed`). A reused job may already be in
+  the broker, so it is left as it is. See
+  [Sending jobs to workers](jobs.md#sending-jobs-to-workers).
+- **Routing.** `tasks.dispatch_job` sends every job to `sabe.job.run`. Celery
+  messages carry only the job ID.
 - **Retirement.** For ontologies and entities, "refresh all" retires, in the start
   transaction, each source that has an active snapshot but is no longer configured and
   has no unfinished refresh job. It writes an `ontology.retired` or `entity.retired`
@@ -174,7 +176,7 @@ Points worth knowing when something looks wrong:
 ## Running a job
 
 `RefreshRunner.run(job_id)` in `refresh/runner.py` is the same for every kind.
-The Celery task `sabe.refresh.run` and the CLI both call it.
+The Celery task `sabe.job.run` and the CLI both reach it through `JobExecutors`.
 
 ```mermaid
 flowchart TD
@@ -201,11 +203,10 @@ Any exception raised after the job has started is classified:
 | anything else | re-raised; the job's transaction rolls back and the job stays `running` |
 
 The job's transaction covers `apply` and the recording of success. Fetching
-happens before it opens, and follow-up jobs are sent after it commits. If
-sending one fails, the runner logs `Follow-up job dispatch failed` and the
-follow-up job stays `queued`.
+happens before it opens, and follow-up jobs are sent after it commits; see
+[Sending jobs to workers](jobs.md#sending-jobs-to-workers).
 
-The runner records a failed job through `JobService.fail_refresh`: the status,
+The runner records a failed job through `JobService.fail`: the status,
 the failure progress
 `{"phase": "failed", "failure_code": ..., "failure_details"?: ...}`, and the
 `job.failed` audit event commit in one transaction.
@@ -216,19 +217,7 @@ after 30 seconds. The CLI logs it and reports the job as still `running`. A
 re-raised error rolls back everything the attempt did, and the next delivery or
 start runs the job from the beginning.
 
-### The job record over time
-
-```mermaid
-stateDiagram-v2
-    [*] --> queued: start (audit job.queued)
-    queued --> running: runner starts it (audit job.started)
-    queued --> failed: dispatch_failed
-    running --> running: phases fetching, applying (and kind-specific phases)
-    running --> succeeded: phase completed (audit job.succeeded)
-    running --> failed: phase failed + failure_code (audit job.failed)
-    succeeded --> [*]
-    failed --> [*]
-```
+The job's states are in the [job guide](jobs.md#the-job-record).
 
 Kinds may report their own phases inside `applying`. Snapshot kinds (ontology,
 rules, and entity) report `storing` and then `activating` when they store a new
@@ -294,81 +283,23 @@ Some details that matter when debugging:
   fail structural validation are rejected and reported; an ordinary refresh
   publishes the rest, and a cutover fails on any rejection.
 
-## Term replacement jobs
-
-A `term_replacement` job replaces obsolete terms and alternative IDs in active
-annotations (see `docs/annotation-validation.md`). It is not a refresh kind: it
-fetches nothing, and `TermReplacementService` runs it instead of `RefreshRunner`.
-
-- **Triggers.** Every ontology activation queues a job for all groups
-  (parameters `{}`), and every annotation publication queues one for that group
-  (`{"group_key": ...}`). The job is created in the activation's or publication's
-  transaction, with the triggering job's requester, and is sent to
-  `sabe.term_replacement.run` after that transaction commits.
-- **Coalescing.** A trigger joins the scope's queued job if there is one; a running
-  job is never joined, because it may have read its facts before the change. If
-  sending a job fails, it stays queued, and the next trigger for its scope joins it
-  and sends it again.
-- **Running.** The job holds its own lock and its scope's lock; if another job of
-  the same scope is running, the task is retried and the job stays queued. It reads
-  active annotations in `annotation_id` order, 500 at a time, without locks, and
-  writes each changed annotation in its own transaction through the normal update
-  path. The result counts annotations scanned, replaced, skipped because of issues,
-  and skipped as stale, and lists the snapshot IDs read.
-- **Failures.** `invalid_parameters` for parameters other than `{}` or
-  `{"group_key": ...}`, and `reference_data_unavailable` when a configured ontology
-  or the go-site rule data has no active snapshot, or the active rule data was stored
-  by an earlier release and cannot be read until a rules refresh.
-- **The CLI.** `just refresh` runs the replacement jobs its refreshes queued once,
-  in its own process, after the refresh jobs finish, and prints a line for each.
-
-## QC report jobs
-
-An `annotation_qc_report` job validates every active annotation in its scope and stores
-findings and counts (see `docs/annotation-validation.md`). Like term replacement, it is
-not a refresh kind: `QcReportRunner` runs it instead of `RefreshRunner`.
-
-- **Triggers.** `POST /reports/annotation-qc` (admin role) and the Beat entry
-  `annotation-qc-report`, which calls `sabe.qc_report.schedule` on `SABE_QC_REPORT_CRON`
-  to start an all-groups report. Both join the scope's queued report if there is one,
-  and send the job to `sabe.qc_report.run` after it commits. If sending fails, the job
-  stays queued until the next start of its scope.
-- **Running.** The job holds its own lock and its scope's lock; if another report of the
-  same scope is running, the task is retried and the job stays queued. It first deletes
-  rows left by an earlier attempt and checks that reference data is available. It then
-  reads active annotations in `annotation_id` order, 500 at a time, without locks, and
-  commits each batch's findings and counts. Reference data is resolved per batch, and
-  the result lists every distinct set used. Marking the job succeeded and deleting the
-  findings of earlier reports of its scope commit together. Reports of a scope are
-  ordered by completion time, then job ID.
-- **Failures.** `invalid_parameters`, and `reference_data_unavailable`. A failed report
-  keeps no findings or counts.
-- **The CLI.** `just refresh` does not run QC reports.
-
 ## Locks
 
 | Lock | Kind of lock | Held by | Prevents |
 |---|---|---|---|
 | Refresh start lock | transaction advisory lock | `RefreshStartService.start` | two starts both creating a job for the same source |
-| Job execution lock | session try-lock, one per job | `RefreshRunner.run`, `TermReplacementService.run`, `QcReportRunner.run` | two processes running one job after a duplicate delivery |
 | Entity activation lock | transaction advisory lock | entity `apply`, from the collision check through commit | two sources activating the same new identifier |
 | Snapshot read locks | `FOR KEY SHARE` row locks on `reference_snapshot` | `SnapshotRepository.resolve` and `require_readable` | pruning a snapshot a transaction is reading (pruning skips locked snapshots) |
 | Annotation system-update lock | exclusive global annotation-write lock | annotation publication | ordinary annotation writes during group replacement |
-| Term replacement start lock | transaction advisory lock | `queue_term_replacement` | two triggers both creating a queued job |
-| Term replacement scope lock | session try-lock, one per scope | `TermReplacementService.run` | two jobs of one scope running at once |
-| QC report start lock | transaction advisory lock | `queue_qc_report` | two starts both creating a queued report |
-| QC report scope lock | session try-lock, one per scope | `QcReportRunner.run` | two reports of one scope running at once |
 
-The try-locks never wait. A process that cannot take one either returns (job
-lock) or raises so the task is retried later: the term replacement and QC report
-scope locks (`TermReplacementBusyError` and `QcReportBusyError`).
+The job execution lock and the annotation scan locks are in the
+[job guide](jobs.md#locks).
 
 ## Where to start
 
 | Symptom or task | Look at |
 |---|---|
-| A job stays `running` | worker logs for `Worker task unavailable` (Celery retries) or `Refresh job stopped before finishing` (CLI); a refresh that stopped committed nothing, so start the same refresh again to dispatch it, and it runs from the beginning. A running term replacement or QC report job resumes only when Celery redelivers or retries its task; a QC report then starts again from empty rows |
-| A term replacement or QC report job stays `queued` | worker logs for `Follow-up job dispatch failed` or `QC report dispatch failed` (the next trigger for its scope sends it again), or another job of its scope holding the scope lock (the task retries every 30 seconds) |
+| A job stays `running` | worker logs for `Worker task unavailable` (Celery retries) or `Refresh job stopped before finishing` (CLI); a refresh that stopped committed nothing, so start the same refresh again to dispatch it, and it runs from the beginning. |
 | A job failed | its `progress.failure_code` and `failure_details` through `GET /admin/jobs/{job_id}`; the table of classified errors above |
 | `unknown_source` | the job's `source_key` against `config/sources.yaml` as loaded by the running process (settings are cached per process) |
 | A refresh did nothing | completed progress with `"unchanged": true` (also in the job result): the source document is already active |
@@ -376,7 +307,7 @@ scope locks (`TermReplacementBusyError` and `QcReportBusyError`).
 | Reference data needs reloading | a migration that clears snapshots, or a raised `READER_VERSIONS` entry: run `just refresh` for the kind (writes return `503 reference_data_unavailable` until every configured ontology and the rules have snapshots). To reload everything, refresh rules, then entity, then ontology: an ontology refresh queues a term replacement job, which needs the rules and every ontology loaded, and saves a replacement only for an annotation whose subject is in an entity catalog |
 | Adding a source to an existing kind | `config/sources.yaml` only; no code change |
 | Adding a source type | `refresh/sources.py` (model) and `refresh/fetchers.py` (fetcher) |
-| Adding a refresh kind | a refresh service implementing `RefreshKind` in `services/`, its job type and audit action in `domain/`, wiring in `workers/runtime.py`, a section in `config/sources.yaml`, a Beat entry, and an admin route |
+| Adding a refresh kind | a refresh service implementing `RefreshKind` in `services/`, its job type and audit action in `domain/`, wiring in `workers/runtime.py`, a section in `config/sources.yaml`, a Beat entry, and an admin route (and the job type steps in the [job guide](jobs.md#where-to-start)) |
 
 ## Tests
 
@@ -391,4 +322,4 @@ scope locks (`TermReplacementBusyError` and `QcReportBusyError`).
 
 `tests/integration/refresh_helpers.py` provides `FakeFetchers`, which returns
 fixed documents instead of using the network, and `build_runner`, which builds
-the production runner and kinds around them.
+the production registry and runners around them.

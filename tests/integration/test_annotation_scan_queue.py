@@ -1,4 +1,9 @@
-"""Verify that triggers share one queued term replacement job per scope."""
+"""Verify that triggers share one queued annotation scan job per type and group.
+
+Both annotation scan job types are queued by `queue_or_join`, so term
+replacement jobs stand for both here. QC report starts are covered through the
+API in `test_qc_reports_api.py`.
+"""
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -15,27 +20,34 @@ from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
     create_unit_of_work_factory,
 )
-from standard_annotation_backend.services.job_service import Job, JobService
-from standard_annotation_backend.services.term_replacement_service import (
-    queue_term_replacement,
+from standard_annotation_backend.services.annotation_scan import (
+    queue_or_join,
 )
+from standard_annotation_backend.services.job_service import Job, JobService
 
 TIMEOUT = 10
 
 
 def _queue(
-    unit_of_work_factory: UnitOfWorkFactory, group_key: str | None, actor: str = "cli"
+    unit_of_work_factory: UnitOfWorkFactory,
+    group_key: str | None,
+    *,
+    job_type: JobType = JobType.TERM_REPLACEMENT,
+    actor: str = "cli",
 ) -> Job:
     with unit_of_work_factory() as uow:
-        job = queue_term_replacement(uow, group_key=group_key, requested_by=actor)
+        job = queue_or_join(
+            uow, job_type=job_type, group_key=group_key, requested_by=actor
+        ).job
         uow.commit()
     return job
 
 
-def test_a_trigger_queues_a_job_with_the_requester_and_scope(
-    unit_of_work_factory: UnitOfWorkFactory, session_factory: sessionmaker[Session]
+def test_a_trigger_queues_a_job_with_the_requester_and_group(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
 ) -> None:
-    """The queued job records its requester, its scope, and a queued audit event."""
+    """The queued job records its requester, its group, and a queued audit event."""
     job = _queue(unit_of_work_factory, "MGI", actor="curator")
 
     assert job.job_type is JobType.TERM_REPLACEMENT
@@ -49,20 +61,22 @@ def test_a_trigger_queues_a_job_with_the_requester_and_scope(
     assert actions == [AuditAction.JOB_QUEUED]
 
 
-def test_triggers_join_the_queued_job_of_their_scope_only(
+def test_triggers_join_the_queued_job_of_their_type_and_group_only(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
-    """The same scope reuses its queued job; another scope gets its own."""
+    """The same type and group reuse the queued job; other groups or types do not."""
     first = _queue(unit_of_work_factory, None)
     again = _queue(unit_of_work_factory, None)
     group = _queue(unit_of_work_factory, "MGI")
+    report = _queue(unit_of_work_factory, None, job_type=JobType.ANNOTATION_QC_REPORT)
 
     assert again.job_id == first.job_id
     assert group.job_id != first.job_id
+    assert report.job_id != first.job_id
 
 
 def test_a_running_job_is_not_joined(unit_of_work_factory: UnitOfWorkFactory) -> None:
-    """Once the scope's job starts, the next trigger queues a new one."""
+    """Once a job starts, the next trigger for its type and group queues a new one."""
     first = _queue(unit_of_work_factory, None)
     JobService(unit_of_work_factory).start(first.job_id)
 
@@ -91,7 +105,12 @@ def test_concurrent_triggers_on_independent_connections_share_one_job(
                 assert queued.wait(TIMEOUT)
             uow_factory = create_unit_of_work_factory(lambda: session)
             with uow_factory() as uow:
-                job = queue_term_replacement(uow, group_key=None, requested_by=actor)
+                job = queue_or_join(
+                    uow,
+                    job_type=JobType.TERM_REPLACEMENT,
+                    group_key=None,
+                    requested_by=actor,
+                ).job
                 if first:
                     queued.set()
                     assert release.wait(TIMEOUT)
@@ -139,7 +158,12 @@ def test_a_job_cannot_start_until_a_trigger_that_joined_it_commits(
         with session_factory() as session:
             uow_factory = create_unit_of_work_factory(lambda: session)
             with uow_factory() as uow:
-                job = queue_term_replacement(uow, group_key=None, requested_by="b")
+                job = queue_or_join(
+                    uow,
+                    job_type=JobType.TERM_REPLACEMENT,
+                    group_key=None,
+                    requested_by="b",
+                ).job
                 joined.set()
                 assert release.wait(TIMEOUT)
                 uow.commit()

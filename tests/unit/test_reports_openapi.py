@@ -27,6 +27,7 @@ def test_starting_a_report_returns_202_with_the_job(schema: dict) -> None:
         "$ref": "#/components/schemas/QcReportRequest"
     }
     assert set(operation["responses"]) == {"202", "401", "403", "422", "500", "503"}
+    assert "`dispatch_failed`" in operation["description"]
 
 
 @pytest.mark.parametrize(

@@ -17,11 +17,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Protocol
-from uuid import UUID
+from typing import Literal
 
 from standard_annotation_backend.domain.errors import InvalidInputError
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.jobs import FollowUpJob, JobFailureCode, JobType
 from standard_annotation_backend.domain.validation import ValidationIssue
 
 SOURCE_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
@@ -42,35 +41,6 @@ class RefreshKindName(StrEnum):
     ENTITY = "entity"
     ANNOTATION = "annotation"
     RULES = "rules"
-
-
-class RefreshFailureCode(StrEnum):
-    """List the codes recorded when a job fails in a way retrying cannot fix.
-
-    Refresh jobs use every code except `reference_data_unavailable`. Term
-    replacement and QC report jobs use two: `invalid_parameters`, and
-    `reference_data_unavailable` when a configured ontology or the go-site rule
-    data has no active snapshot. The codes are fixed strings, so job records and
-    logs never contain source URLs or content. Operators use them to tell
-    retrieval, decoding, parsing, and activation or publication failures apart.
-    """
-
-    INVALID_PARAMETERS = "invalid_parameters"
-    DISPATCH_FAILED = "dispatch_failed"
-    UNKNOWN_SOURCE = "unknown_source"
-    SOURCE_ERROR = "source_error"
-    HTTP_STATUS = "http_status"
-    TIMEOUT = "timeout"
-    INVALID_GZIP = "invalid_gzip"
-    INVALID_UTF8 = "invalid_utf8"
-    INVALID_DOCUMENT = "invalid_document"
-    HEADER = "header"
-    ROW_VALIDATION = "row_validation"
-    CATALOG_COLLISION = "catalog_collision"
-    NO_VALID_ANNOTATIONS = "no_valid_annotations"
-    CUTOVER_REJECTED = "cutover_rejected"
-    GROUP_SABE_MANAGED = "group_sabe_managed"
-    REFERENCE_DATA_UNAVAILABLE = "reference_data_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,14 +116,14 @@ class TerminalRefreshError(Exception):
             rows. It must not contain URLs.
     """
 
-    failure_code: RefreshFailureCode
+    failure_code: JobFailureCode
     failure_details: dict[str, object] | None = None
 
     def __init__(
         self,
         message: str | None = None,
         *,
-        failure_code: RefreshFailureCode | None = None,
+        failure_code: JobFailureCode | None = None,
         failure_details: dict[str, object] | None = None,
     ) -> None:
         if failure_code is not None:
@@ -177,7 +147,7 @@ class UnknownSourceError(InvalidInputError, TerminalRefreshError):
         source_key: The unconfigured key.
     """
 
-    failure_code = RefreshFailureCode.UNKNOWN_SOURCE
+    failure_code = JobFailureCode.UNKNOWN_SOURCE
     code = "unknown_source"
     message = "Source is not configured"
 
@@ -209,34 +179,16 @@ class RefreshOutcome:
         warnings: Short messages stored on the job.
         unchanged: Whether the document was already active, so nothing was
             applied.
-        follow_up_job_ids: Jobs that `apply` queued, such as a term replacement
-            job after an ontology activation. The runner sends them to workers
-            after the transaction commits.
+        follow_ups: Jobs that `apply` queued, such as a term replacement job
+            after an ontology activation. The runner sends them to workers after
+            the transaction commits.
     """
 
     result: dict[str, object]
     counts: Mapping[str, int] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
     unchanged: bool = False
-    follow_up_job_ids: tuple[UUID, ...] = ()
-
-
-class ProgressReporter(Protocol):
-    """Record a running job's phase, counts, and warnings while a refresh applies.
-
-    `RefreshRunner` passes one to each refresh service's `apply` and turns the
-    reports into the job's progress, so services never build progress
-    dictionaries.
-    """
-
-    def __call__(
-        self,
-        phase: str,
-        counts: Mapping[str, int] | None = None,
-        warnings: tuple[str, ...] = (),
-    ) -> None:
-        """Store `phase`, `counts`, and `warnings` on the job."""
-        ...
+    follow_ups: tuple[FollowUpJob, ...] = ()
 
 
 REFRESH_JOB_TYPES: Mapping[RefreshKindName, JobType] = {
@@ -252,6 +204,7 @@ Annotation cutovers use `JobType.ANNOTATION_CUTOVER` and are started only by
 `RefreshStartService.start_cutover`.
 """
 
+
 _SOURCE_KEY = re.compile(SOURCE_KEY_PATTERN)
 
 
@@ -264,11 +217,6 @@ def refresh_failure_message(kind: RefreshKindName | None) -> str:
     if kind is None:
         return "Refresh failed"
     return f"{kind.value.capitalize()} refresh failed"
-
-
-def refresh_dispatch_failure_message(kind: RefreshKindName) -> str:
-    """Return the public error stored when a new refresh job cannot be sent."""
-    return f"{kind.value.capitalize()} refresh could not be dispatched"
 
 
 MAX_REPORTED_ISSUES = 100
