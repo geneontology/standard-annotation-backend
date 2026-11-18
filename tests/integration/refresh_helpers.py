@@ -19,7 +19,10 @@ from standard_annotation_backend.domain.refresh import (
 )
 from standard_annotation_backend.go_site.rule_files import RULE_FILE_PATHS
 from standard_annotation_backend.persistence.locks import bind_try_lock
-from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.persistence.unit_of_work import (
+    SqlAlchemyUnitOfWork,
+    UnitOfWorkFactory,
+)
 from standard_annotation_backend.refresh.runner import RefreshKind
 from standard_annotation_backend.refresh.sources import (
     ConfiguredSource,
@@ -203,18 +206,73 @@ def build_runner(
 
 
 def build_scan_runner(
-    engine: Engine, unit_of_work_factory: UnitOfWorkFactory
+    engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    *,
+    scan_unit_of_work_factory: UnitOfWorkFactory | None = None,
 ) -> AnnotationScanRunner:
-    """Build the production annotation scan runner and scans for the test ontologies."""
+    """Build the production annotation scan runner and scans for the test ontologies.
+
+    Args:
+        engine: The test database engine, for advisory locks.
+        unit_of_work_factory: Opens the runner's transactions.
+        scan_unit_of_work_factory: Opens the scans' own transactions, if they
+            should differ from the runner's, such as a `refreshing_factory`.
+    """
+    scan_factory = scan_unit_of_work_factory or unit_of_work_factory
     return AnnotationScanRunner(
         try_lock=bind_try_lock(engine),
         jobs=JobService(unit_of_work_factory),
         unit_of_work_factory=unit_of_work_factory,
         scans=(
-            TermReplacementScan(unit_of_work_factory, TEST_ONTOLOGIES),
-            QcReportScan(unit_of_work_factory, TEST_ONTOLOGIES),
+            TermReplacementScan(scan_factory, TEST_ONTOLOGIES),
+            QcReportScan(scan_factory, TEST_ONTOLOGIES),
         ),
     )
+
+
+def refreshing_factory(
+    factory: UnitOfWorkFactory, *, before_call: int, refresh: Callable[[], object]
+) -> UnitOfWorkFactory:
+    """Return a factory that calls `refresh` once, before opening one unit of work.
+
+    Tests use it to activate new reference data between two transactions of a
+    scan, without patching the scan.
+
+    Args:
+        factory: The factory to open every unit of work with.
+        before_call: Which unit of work, counting from 1, `refresh` runs before.
+        refresh: Work to run first, such as `refresh_go`.
+    """
+    calls = 0
+
+    def open_unit_of_work() -> SqlAlchemyUnitOfWork:
+        nonlocal calls
+        calls += 1
+        if calls == before_call:
+            refresh()
+        return factory()
+
+    return open_unit_of_work
+
+
+def refresh_go(
+    engine: Engine, unit_of_work_factory: UnitOfWorkFactory, content: bytes
+) -> Job:
+    """Run a GO ontology refresh job with `content` as the GO document, and return it.
+
+    The term replacement job it queues is left queued.
+    """
+    job = create_job(
+        unit_of_work_factory,
+        job_type=JobType.ONTOLOGY_REFRESH,
+        parameters={"source_key": "go"},
+        requested_by="scheduler",
+    )
+    build_runner(engine, unit_of_work_factory, FakeFetchers({"go": content})).run(
+        job.job_id
+    )
+    return JobService(unit_of_work_factory).find(job.job_id)
 
 
 def source_document(

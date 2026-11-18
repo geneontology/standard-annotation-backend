@@ -20,6 +20,7 @@ from standard_annotation_backend.domain.errors import (
     NotFoundError,
 )
 from standard_annotation_backend.domain.semantic_validation.rules import RULES
+from standard_annotation_backend.domain.snapshots import ReferenceDataVersions
 from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.domain.validation import (
     ValidationIssue,
@@ -118,51 +119,6 @@ class QcFinding:
 
 
 @dataclass(frozen=True, slots=True)
-class OntologySnapshotUse:
-    """Identify one ontology snapshot a report read.
-
-    Attributes:
-        ontology_key: The configured ontology.
-        version_id: The snapshot.
-        document_version: The version the ontology file declares, if any.
-        source_revision: The source's revision, if it has one.
-    """
-
-    ontology_key: str
-    version_id: UUID
-    document_version: str | None
-    source_revision: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class EntityCatalogUse:
-    """Identify one active entity catalog snapshot a report read.
-
-    Attributes:
-        source_key: The configured entity source.
-        snapshot_id: The catalog snapshot.
-    """
-
-    source_key: str
-    snapshot_id: UUID
-
-
-@dataclass(frozen=True, slots=True)
-class ReferenceDataVersions:
-    """Identify one set of reference data a report validated against.
-
-    Attributes:
-        ontologies: Each configured ontology's active snapshot.
-        go_site_revision: The go-site commit of the active rule data, if known.
-        entity_catalogs: Each active entity catalog snapshot.
-    """
-
-    ontologies: tuple[OntologySnapshotUse, ...]
-    go_site_revision: str | None
-    entity_catalogs: tuple[EntityCatalogUse, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class QcReportResult:
     """Summarize a completed QC report, as stored on its job.
 
@@ -170,11 +126,11 @@ class QcReportResult:
         owning_group_id: The group the report covered, or `None` for all groups.
         annotations_checked: Active annotations validated.
         annotations_with_issues: Annotations given a finding.
-        reference_data: Every distinct set of reference data used, in the order
-            first used, starting with the set that was active when the report
-            started. The report looks up the active snapshots again for each
-            batch of annotations, so a report that runs while reference data is
-            refreshed lists more than one set.
+        reference_data: Every distinct set of reference data the report's
+            batches used, in the order first used; empty when the report had
+            nothing to check. The report looks up the active snapshots again for
+            each batch of annotations, so a report that runs while reference
+            data is refreshed lists more than one set.
         sabe_version: The SABE release that ran the report.
         schema_version: Version of the `go-standard-annotation-schema` package
             the report validated with.

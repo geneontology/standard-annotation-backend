@@ -15,7 +15,6 @@ import json
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any
-from uuid import UUID
 
 from pydantic import Field
 
@@ -29,6 +28,7 @@ from standard_annotation_backend.domain.semantic_validation.identifiers import (
     split_identifier,
     term_identifiers,
 )
+from standard_annotation_backend.domain.snapshots import ReferenceDataVersions
 from standard_annotation_backend.domain.stored_json import StoredJson
 
 type Count = Annotated[int, Field(ge=0)]
@@ -138,8 +138,9 @@ def replaced_annotation(
 
     The same fields that semantic validation checks for terms are examined:
     `ontology_class_id`, each extension term, each `with_or_from` value, and each
-    interacting taxon. When a replacement repeats a value already in its list,
-    only the first copy is kept.
+    interacting taxon. When a replacement gives a list entry a value the list
+    already holds, the replaced entry is removed; repeats the client entered are
+    kept.
 
     Returns:
         The replaced annotation, or `None` when nothing would change.
@@ -149,7 +150,7 @@ def replaced_annotation(
             invalid, for example because a `replaced_by` value is malformed.
     """
     data = annotation.model_dump(mode="json")
-    changed_lists: set[str] = set()
+    replaced_entries: dict[str, set[int]] = {}
     changed = False
     for occurrence in term_identifiers(annotation):
         target = replacement_for(occurrence.identifier, terms, ontologies)
@@ -159,25 +160,36 @@ def replaced_annotation(
         _set_value(data, path, target)
         changed = True
         if len(path) > 1:
-            changed_lists.add(str(path[0]))
-    for name in changed_lists:
-        data[name] = _first_copies(data[name])
+            replaced_entries.setdefault(str(path[0]), set()).add(int(path[1]))
+    for name, replaced in replaced_entries.items():
+        data[name] = _without_repeated_replacements(data[name], replaced)
     return Annotation.model_validate(data) if changed else None
 
 
-def _first_copies(values: list[Any]) -> list[Any]:
-    """Return the list without repeated values, keeping each one's first position.
+def _without_repeated_replacements(
+    values: list[Any], replaced: Collection[int]
+) -> list[Any]:
+    """Remove each replaced entry whose value the list already holds.
 
     A replacement can turn one entry into a value the list already holds, such
-    as an alternative ID whose primary term is also listed.
+    as an alternative ID whose primary term is also listed. Entries that were not
+    replaced are always kept, so a client's own repeats survive. A replaced entry
+    is kept only when no unreplaced entry and no earlier kept replaced entry has
+    its value.
+
+    Args:
+        values: The list after replacement.
+        replaced: The positions of the entries that were replaced.
     """
-    seen: set[str] = set()
+    keys = [json.dumps(value, sort_keys=True) for value in values]
+    held = {key for index, key in enumerate(keys) if index not in replaced}
     kept: list[Any] = []
-    for value in values:
-        key = json.dumps(value, sort_keys=True)
-        if key not in seen:
-            seen.add(key)
-            kept.append(value)
+    for index, (key, value) in enumerate(zip(keys, values, strict=True)):
+        if index in replaced:
+            if key in held:
+                continue
+            held.add(key)
+        kept.append(value)
     return kept
 
 
@@ -202,8 +214,11 @@ class TermReplacementResult:
             annotation would not pass schema or semantic validation.
         annotation_stale_skip_count: Annotations left unchanged because they
             changed or were deleted after the job read them.
-        snapshot_ids: The IDs of every snapshot the job read, keyed by ontology
-            key, plus `rules` for the go-site rule data.
+        reference_data: Every distinct set of reference data the job checked
+            annotations against, in the order first used: each set a batch read
+            replacement chains from, and each set a replacement was validated
+            against before it was written. Empty when the job had nothing to
+            check.
     """
 
     group_key: str | None
@@ -211,7 +226,7 @@ class TermReplacementResult:
     annotation_replaced_count: Count
     annotation_issue_skip_count: Count
     annotation_stale_skip_count: Count
-    snapshot_ids: dict[str, tuple[UUID, ...]]
+    reference_data: tuple[ReferenceDataVersions, ...]
 
     def to_progress(self) -> dict[str, int]:
         """Return the counts, as job progress shows them."""

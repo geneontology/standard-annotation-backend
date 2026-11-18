@@ -24,12 +24,10 @@ from standard_annotation_backend.domain.jobs import (
     ProgressReporter,
 )
 from standard_annotation_backend.domain.ontology import OntologyCatalog
-from standard_annotation_backend.domain.semantic_validation.facts import (
-    RULES_REFERENCE_DATA,
-)
 from standard_annotation_backend.domain.semantic_validation.identifiers import (
     term_identifiers,
 )
+from standard_annotation_backend.domain.snapshots import ReferenceDataVersions
 from standard_annotation_backend.domain.term_replacement import (
     TermReplacementResult,
     replaced_annotation,
@@ -39,7 +37,10 @@ from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
 )
-from standard_annotation_backend.services.annotation_scan import ScanOutcome
+from standard_annotation_backend.services.annotation_scan import (
+    ReferenceDataLog,
+    ScanOutcome,
+)
 from standard_annotation_backend.services.annotation_validator import (
     AnnotationValidator,
 )
@@ -58,7 +59,8 @@ class TermReplacementScan:
     with the same locks, version check, and semantic validation as a client
     update. A replacement is saved only when the result has no semantic issues,
     and an annotation that changed after the job read it is skipped. A run that
-    stops early keeps the replacements it already made.
+    stops early keeps the replacements it already made. The result lists the
+    reference data each batch and each validated replacement used.
 
     Args:
         unit_of_work_factory: Opens the transactions for reading and updating.
@@ -103,10 +105,11 @@ class TermReplacementScan:
     ) -> TermReplacementResult:
         """Replace terms in every active annotation of the scope, batch by batch."""
         counts: Counter[str] = Counter()
-        snapshot_ids: dict[str, set[UUID]] = {}
+        reference_data = ReferenceDataLog()
         after: UUID | None = None
         # Resolved before the first batch, so a scope with no annotations still
-        # fails when reference data is missing.
+        # fails when reference data is missing. Nothing is checked against this
+        # set, so it is not recorded.
         with self._unit_of_work_factory() as unit_of_work:
             unit_of_work.snapshots.resolve(self._ontologies)
         while True:
@@ -135,6 +138,7 @@ class TermReplacementScan:
                     except ValidationError:
                         counts["issues"] += 1
                 snapshots = unit_of_work.snapshots.resolve(self._ontologies)
+                reference_data.record(unit_of_work, snapshots)
                 terms = replacement_chain_terms(
                     {
                         occurrence.identifier
@@ -147,11 +151,6 @@ class TermReplacementScan:
                         snapshots=snapshots,
                     ),
                 )
-            for key, snapshot_id in {
-                **snapshots.ontology_versions,
-                RULES_REFERENCE_DATA: snapshots.rules_snapshot_id,
-            }.items():
-                snapshot_ids.setdefault(key, set()).add(snapshot_id)
             for annotation_id, version, annotation in readable:
                 try:
                     replaced = replaced_annotation(annotation, terms, self._ontologies)
@@ -162,15 +161,26 @@ class TermReplacementScan:
                     continue
                 if replaced is not None:
                     counts[
-                        self._replace_one(job, annotation_id, version, replaced)
+                        self._replace_one(
+                            job, annotation_id, version, replaced, reference_data
+                        )
                     ] += 1
-            report("replacing", _result(group_key, counts, {}).to_progress())
-        return _result(group_key, counts, snapshot_ids)
+            report("replacing", _result(group_key, counts, ()).to_progress())
+        return _result(group_key, counts, reference_data.versions())
 
     def _replace_one(
-        self, job: Job, annotation_id: UUID, version: int, replaced: Annotation
+        self,
+        job: Job,
+        annotation_id: UUID,
+        version: int,
+        replaced: Annotation,
+        reference_data: ReferenceDataLog,
     ) -> str:
         """Save one replacement if it passes validation, and return the outcome.
+
+        The replacement is validated against the snapshots active when it is
+        written. They are recorded in `reference_data` when validation ran,
+        whether or not it passed; a stale annotation is never validated.
 
         Returns:
             `replaced` if a new version was saved, `issues` if the result has
@@ -178,9 +188,14 @@ class TermReplacementScan:
             after the job read it.
         """
         with self._unit_of_work_factory() as unit_of_work:
+            snapshots = unit_of_work.snapshots.resolve(self._ontologies)
             try:
                 validated = self._validator.prepare_update(
-                    unit_of_work, annotation_id, replaced, expected_version=version
+                    unit_of_work,
+                    annotation_id,
+                    replaced,
+                    expected_version=version,
+                    snapshots=snapshots,
                 )
             except (
                 StaleAnnotationVersionError,
@@ -189,7 +204,9 @@ class TermReplacementScan:
             ):
                 return "stale"
             except InvalidAnnotationPayloadError:
+                reference_data.record(unit_of_work, snapshots)
                 return "issues"
+            reference_data.record(unit_of_work, snapshots)
             updated = unit_of_work.annotations.update(
                 validated,
                 actor_id=job.requested_by,
@@ -208,7 +225,7 @@ class TermReplacementScan:
 def _result(
     group_key: str | None,
     counts: Counter[str],
-    snapshot_ids: dict[str, set[UUID]],
+    reference_data: tuple[ReferenceDataVersions, ...],
 ) -> TermReplacementResult:
     """Build a job result from the running counts."""
     return TermReplacementResult(
@@ -217,7 +234,5 @@ def _result(
         annotation_replaced_count=counts["replaced"],
         annotation_issue_skip_count=counts["issues"],
         annotation_stale_skip_count=counts["stale"],
-        snapshot_ids={
-            key: tuple(sorted(ids)) for key, ids in sorted(snapshot_ids.items())
-        },
+        reference_data=reference_data,
     )

@@ -8,16 +8,18 @@ from standard_annotation_backend.domain.qc_reports import (
     ISSUE_TYPES,
     STORED_QC_REPORT_RESULT,
     STORED_VALIDATION_ISSUE,
-    EntityCatalogUse,
-    OntologySnapshotUse,
     QcReportResult,
-    ReferenceDataVersions,
     issue_types_of,
 )
 from standard_annotation_backend.domain.semantic_validation.details import (
     IssueDetails,
 )
 from standard_annotation_backend.domain.semantic_validation.rules import RULES
+from standard_annotation_backend.domain.snapshots import (
+    EntityCatalogUse,
+    OntologySnapshotUse,
+    ReferenceDataVersions,
+)
 from standard_annotation_backend.domain.stored_json import StoredDataError
 from standard_annotation_backend.domain.validation import (
     ValidationIssue,

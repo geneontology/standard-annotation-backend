@@ -6,13 +6,16 @@ are recorded the same way. Instead of sending each job to a Celery worker, it
 runs the job in this process and waits for it. This is the supported way to load
 authorization into a new database, before anyone holds a token for the admin API.
 Annotation cutovers are available only through the admin API. After the
-refreshes, any term replacement jobs they queued also run in this process.
+refreshes, any term replacement jobs they queued also run in this process. One
+whose groups another job of its type is already covering is deferred: it stays
+queued until the next ontology activation or annotation publication sends it.
 """
 
 import argparse
 import logging
 import sys
 from collections.abc import Sequence
+from uuid import UUID
 
 from pydantic import ValidationError
 from pydantic_settings import SettingsError
@@ -28,6 +31,9 @@ from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     UnknownSourceError,
 )
+from standard_annotation_backend.services.annotation_scan import (
+    AnnotationScanBusyError,
+)
 from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.refresh_start_service import (
     RefreshStartService,
@@ -35,6 +41,12 @@ from standard_annotation_backend.services.refresh_start_service import (
 from standard_annotation_backend.workers.runtime import WorkerRuntime, worker_runtime
 
 logger = logging.getLogger(__name__)
+
+_DEFERRED = (
+    " deferred: another job of this type and scope is running; the next ontology "
+    "activation or annotation publication sends it"
+)
+"""Printed after a follow-up job that stayed queued because its scope was busy."""
 
 _SINGLE_SOURCE_KINDS = frozenset({RefreshKindName.AUTHORIZATION, RefreshKindName.RULES})
 """Kinds with exactly one configured source, which take no `source_key`."""
@@ -84,21 +96,34 @@ def run_refreshes(
     )
 
 
-def run_follow_ups(runtime: WorkerRuntime, queued: Sequence[Job]) -> tuple[Job, ...]:
+def run_follow_ups(
+    runtime: WorkerRuntime, queued: Sequence[Job]
+) -> tuple[tuple[Job, ...], frozenset[UUID]]:
     """Run each follow-up job once, in this process.
 
     Ontology activations and annotation publications queue term replacement
     jobs, which a Celery worker would otherwise run. Several refreshes can queue
-    the same job, so each distinct job runs once. A job that raises is logged and
-    reported in whatever state it reached.
+    the same job, so each distinct job runs once. A job whose groups another job
+    of its type is covering does not start: it stays queued until the next
+    ontology activation or annotation publication sends it. A job that raises
+    anything else is logged and reported in whatever state it reached.
 
     Returns:
-        The state of every follow-up job after it ran.
+        The state of every follow-up job after it ran, and the IDs of the jobs
+        that were deferred because their scope was busy.
     """
     ran: list[Job] = []
+    deferred: set[UUID] = set()
     for job_id in dict.fromkeys(job.job_id for job in queued):
         try:
             runtime.executors.run(job_id)
+        except AnnotationScanBusyError:
+            logger.info(
+                "Follow-up job deferred: job_id=%s, another job of its type and "
+                "scope is running",
+                job_id,
+            )
+            deferred.add(job_id)
         except Exception as error:
             logger.error(
                 "Follow-up job stopped before finishing: job_id=%s failure_type=%s",
@@ -106,7 +131,7 @@ def run_follow_ups(runtime: WorkerRuntime, queued: Sequence[Job]) -> tuple[Job, 
                 type(error).__name__,
             )
         ran.append(runtime.jobs.find(job_id))
-    return tuple(ran)
+    return tuple(ran), frozenset(deferred)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -114,11 +139,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     Refreshing every ontology or entity source also retires the sources that
     `config/sources.yaml` no longer lists; each is printed as
-    `<kind> <source key> retired` before the job lines.
+    `<kind> <source key> retired` before the job lines. A follow-up job deferred
+    because another job covers its groups is printed as queued, followed by
+    "deferred" and the reason.
 
     Returns:
-        Zero when every job succeeded or there was nothing to refresh, otherwise
-        one. Argument errors exit with status two.
+        Zero when every job succeeded or was deferred, or there was nothing to
+        refresh, otherwise one. Argument errors exit with status two.
     """
     parser = argparse.ArgumentParser(
         prog="refresh",
@@ -142,7 +169,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         follow_ups: list[Job] = []
         with worker_runtime(dispatch_follow_up=follow_ups.append) as runtime:
             jobs, retired = run_refreshes(runtime, kind, arguments.source_key)
-            jobs += run_follow_ups(runtime, follow_ups)
+            follow_up_jobs, deferred = run_follow_ups(runtime, follow_ups)
+            jobs += follow_up_jobs
             sources_configured = bool(runtime.settings.sources.keys(kind))
     except UnknownSourceError:
         print(f"No {kind.value} source is configured with that key", file=sys.stderr)
@@ -184,9 +212,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     for key in retired:
         print(f"{kind.value} {key} retired")
+    waiting = {
+        job.job_id
+        for job in jobs
+        if job.job_id in deferred and job.status is JobStatus.QUEUED
+    }
     for job in jobs:
-        print(_describe(job))
-    return 0 if all(job.status is JobStatus.SUCCEEDED for job in jobs) else 1
+        print(_describe(job) + (_DEFERRED if job.job_id in waiting else ""))
+    finished = all(
+        job.status is JobStatus.SUCCEEDED or job.job_id in waiting for job in jobs
+    )
+    return 0 if finished else 1
 
 
 def _describe(job: Job) -> str:

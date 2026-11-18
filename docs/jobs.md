@@ -92,7 +92,8 @@ types:
   publication queues one for that group, with the triggering job's requester.
   Each replacement commits on its own, so a job that stops keeps the replacements
   it made. Its result counts annotations scanned, replaced, skipped because of
-  issues, and skipped as stale, and lists the snapshot IDs read.
+  issues, and skipped as stale. Like a QC report's result, it lists each set of
+  reference data its checks used.
 - **`annotation_qc_report`** validates every annotation and stores findings and
   counts (see [Reports](annotation-validation.md#reports)). `POST
   /reports/annotation-qc` and the Beat entry `annotation-qc-report`
@@ -147,7 +148,9 @@ abandoned report.
 
 **The CLI.** `just refresh` runs the term replacement jobs its refreshes queued
 once, in its own process, after the refresh jobs finish, and prints a line for
-each. It does not run QC reports.
+each. A job whose groups another job of its type is covering is printed as
+`deferred`: it has no Celery task, so it stays `queued` until the next ontology
+activation or annotation publication sends it. The CLI does not run QC reports.
 
 ## Locks
 
@@ -166,7 +169,7 @@ the task is retried. Locks specific to refreshes are in the refresh guide.
 | Symptom or task | Look at |
 |---|---|
 | A job failed with `dispatch_failed` | worker or web logs for `Job dispatch failed`; check Redis. The next trigger creates a new job |
-| A term replacement or QC report job stays `queued` | another job of its type and groups holding the scan lock (the task retries every 30 seconds), or `Follow-up job could not be sent` in the logs (the next trigger sends it) |
+| A term replacement or QC report job stays `queued` | another job of its type and groups holding the scan lock (the task retries every 30 seconds), `Follow-up job could not be sent` in the logs, or a job `just refresh` printed as `deferred` (in both cases the next trigger sends it) |
 | A term replacement or QC report job stays `running` | worker logs for `Worker task unavailable` (Celery retries). If its message was lost, or while its task waits to retry, the next job of its type and groups to start marks it `abandoned` |
 | A job failed with `abandoned` | a later job of the same type and groups started while this one had no process running it; `Annotation scan job abandoned` in the logs names the later job |
 | Adding a job type | a `JobType` member and the `ck_job_type_allowed` migration, a dispatch-failure message in `domain/jobs.py`, and a runner that claims it in `workers/runtime.py` (`JobExecutors` refuses to start otherwise). An annotation scan type is a new `AnnotationScan` |

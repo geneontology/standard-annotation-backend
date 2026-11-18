@@ -142,9 +142,9 @@ class RefreshStartService:
 
         A cutover moves the source's group to SABE management permanently, so it
         is started only on request, never by the schedule or for every source.
-        An unfinished cutover job for the source is reused. A group has at most
-        one unfinished GPAD job, so an unfinished ordinary refresh blocks the
-        request.
+        An unfinished cutover job for the source is reused, and an unfinished
+        ordinary refresh for the source blocks the request (see
+        `_annotation_targets`).
 
         Raises:
             PermissionDeniedError: If the caller lacks global admin, checked
@@ -276,13 +276,21 @@ class RefreshStartService:
     ) -> list[tuple[JobType, str]]:
         """List annotation jobs to start, leaving out groups that cannot take one.
 
-        A group whose annotations are SABE-managed never gets a GPAD job. A group
-        has at most one unfinished GPAD job: an unfinished job of the requested
-        type is reused by `_start`, but one of the other type blocks the request.
-        Modes and unfinished jobs are read while the start lock is held, so they
-        match the jobs created in the same transaction. Publication checks the
-        group's mode again, so a group that is cut over after this check still
-        cannot be overwritten.
+        A group whose annotations are SABE-managed never gets a GPAD job. Each
+        source has at most one unfinished GPAD job: an unfinished job of the
+        requested type is reused by `_start`, but one of the other type blocks
+        the request. Modes and unfinished jobs are read while the start lock is
+        held, so they match the jobs created in the same transaction.
+        Publication checks the group's mode again, so a group that is cut over
+        after this check still cannot be overwritten.
+
+        Unfinished jobs are matched by source key, not by group, which is enough
+        to keep one GPAD job per group. A job looks up its source when it runs,
+        so a job left under a key the configuration no longer lists, such as
+        after a source is renamed, fails with `unknown_source` before fetching
+        and never touches the group. Every process restarts together when the
+        configuration changes, so a job still running under the old key cannot
+        overlap a new job under the new one.
 
         Raises:
             GroupSabeManagedError: If `source_key` names a source whose group is

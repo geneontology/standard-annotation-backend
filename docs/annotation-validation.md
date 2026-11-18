@@ -161,8 +161,9 @@ exactly one `replaced_by`, or that is an alternative ID, with the current term a
 end of its chain. It follows chains within the identifier's ontology, in every field
 the term checks cover. A chain that ends at a term that is not current, loops, or
 leaves the ontology is not followed. GO_REF alternative IDs are not replaced. If a
-replacement repeats a value already in the same list, such as two `with_or_from`
-entries that lead to one term, only the first copy is kept.
+replacement gives a list entry a value the list already holds, such as an alternative
+ID whose primary term is also listed, the replaced entry is removed; repeats the client
+entered are kept.
 
 Each replacement is written like a client update and must pass semantic validation.
 An annotation whose replaced result would have any issue, including becoming a
