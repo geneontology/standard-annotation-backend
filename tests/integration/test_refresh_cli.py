@@ -23,7 +23,13 @@ from standard_annotation_backend.domain.annotation_management import (
 )
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.auth import system_context
+from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.snapshots import SnapshotKind
+from standard_annotation_backend.persistence.locks import (
+    LockNamespace,
+    scan_lock_value,
+    try_advisory_lock,
+)
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     JobRecord,
@@ -374,3 +380,69 @@ def test_cli_runs_the_queued_replacement_job_once_after_its_refreshes(
     assert len(lines) == 2
     assert lines[1].startswith("term_replacement ")
     assert " succeeded " in lines[1]
+
+
+DEFERRED = (
+    " deferred: another job of this type and scope is running; the next ontology "
+    "activation or annotation publication sends it"
+)
+
+
+def test_a_busy_follow_up_is_reported_as_deferred_and_exits_zero(
+    use_runtime: InstallRuntime,
+    seed_active_subjects: Callable[..., None],
+    reference_data: Callable[..., None],
+    database_engine: Engine,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A follow-up whose scope another job holds stays queued and is not a failure."""
+    seed_active_subjects("UniProtKB:P12345")
+    use_runtime({"mgi-gpad": gpad_bytes(gpad_row("UniProtKB:P12345"))})
+
+    with try_advisory_lock(
+        database_engine,
+        LockNamespace.ANNOTATION_SCAN,
+        scan_lock_value(JobType.TERM_REPLACEMENT, "MGI"),
+    ) as held:
+        assert held
+        status = cli.main(["annotation", "mgi-gpad"])
+
+    assert status == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("annotation_refresh mgi-gpad succeeded")
+    assert lines[1].startswith("term_replacement MGI queued ")
+    assert lines[1].endswith(DEFERRED)
+    assert "stopped before finishing" not in caplog.text
+
+
+def test_a_busy_follow_up_does_not_hide_a_failed_refresh(
+    use_runtime: InstallRuntime,
+    seed_active_subjects: Callable[..., None],
+    reference_data: Callable[..., None],
+    database_engine: Engine,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CLI still exits nonzero when a refresh fails beside a deferred follow-up."""
+    seed_active_subjects("UniProtKB:P12345")
+    use_runtime(
+        {
+            "mgi-gpad": gpad_bytes(gpad_row("UniProtKB:P12345")),
+            "rgd-gpad": RuntimeError("source down"),
+        }
+    )
+
+    with try_advisory_lock(
+        database_engine,
+        LockNamespace.ANNOTATION_SCAN,
+        scan_lock_value(JobType.TERM_REPLACEMENT, "MGI"),
+    ) as held:
+        assert held
+        status = cli.main(["annotation"])
+
+    assert status == 1
+    lines = capsys.readouterr().out.splitlines()
+    (rgd,) = [line for line in lines if " rgd-gpad " in line]
+    assert " succeeded " not in rgd
+    (replacement,) = [line for line in lines if line.startswith("term_replacement")]
+    assert replacement.endswith(DEFERRED)

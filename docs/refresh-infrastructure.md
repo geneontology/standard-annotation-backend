@@ -332,6 +332,7 @@ The job execution lock and the annotation scan locks are in the
 | Symptom or task | Look at |
 |---|---|
 | A job stays `running` | worker logs for `Worker task unavailable` (Celery retries) or `Refresh job stopped before finishing` (CLI); a refresh that stopped committed nothing, so start the same refresh again to dispatch it, and it runs from the beginning. |
+| `just refresh` prints a follow-up job as `deferred` | another term replacement job covering the same groups was running; the deferred job stays `queued` until the next ontology activation or annotation publication sends it |
 | A job failed | its `progress.failure_code` and `failure_details` through `GET /admin/jobs/{job_id}`; the table of classified errors above |
 | `unknown_source` | the job's `source_key` against `config/sources.yaml` as loaded by the running process (settings are cached per process) |
 | A refresh did nothing | completed progress with `"unchanged": true` (also in the job result): the source document is already active |

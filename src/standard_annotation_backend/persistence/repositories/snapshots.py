@@ -29,12 +29,15 @@ the one place that defines how snapshots behave:
   snapshot IDs are never reused, so a cached entry is always current for its
   snapshot.
 - Retention: For each source with an active snapshot, the active snapshot and
-  the one it replaced keep their data. Every refresh job of a kind prunes the
-  kind's other snapshots: their data rows are deleted and `pruned_at` is set,
-  skipping any snapshot another transaction has locked. Snapshot rows and detail
-  rows are kept as provenance. The replaced snapshot is kept so that no snapshot
-  is pruned in the transaction that deactivates it; a reader whose query began
-  just before that commit can still lock and read it.
+  the one it replaced keep their data. Activation records the replaced snapshot
+  in `replaced_snapshot_id`, so retention never depends on activation times.
+  Every refresh job of a kind prunes the kind's other snapshots: their data rows
+  are deleted and `pruned_at` is set, skipping any snapshot another transaction
+  has locked. Snapshot rows and detail rows are kept as provenance. The replaced
+  snapshot is kept so that no snapshot is pruned in the transaction that
+  deactivates it; a reader whose query began just before that commit can still
+  lock and read it. A snapshot activated when its source had no active snapshot,
+  such as after the source was retired, replaced nothing.
 - Retirement: `retire` deactivates the active snapshots of sources that are
   no longer configured and records `retired_at`. The kind's next refresh job
   prunes their data.
@@ -53,11 +56,6 @@ from sqlalchemy import Select, and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.ontology import OntologyCatalog
-from standard_annotation_backend.domain.qc_reports import (
-    EntityCatalogUse,
-    OntologySnapshotUse,
-    ReferenceDataVersions,
-)
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     SourceProvenance,
@@ -72,6 +70,9 @@ from standard_annotation_backend.domain.semantic_validation.rule_data import (
     RuleDataIndex,
 )
 from standard_annotation_backend.domain.snapshots import (
+    EntityCatalogUse,
+    OntologySnapshotUse,
+    ReferenceDataVersions,
     SnapshotKind,
     SourceContent,
     current_reader_version,
@@ -243,7 +244,7 @@ class SnapshotRepository:
     def activate(
         self, record: ReferenceSnapshotRecord
     ) -> ReferenceSnapshotRecord | None:
-        """Make `record` its source's active snapshot.
+        """Make `record` its source's active snapshot, recording the one it replaces.
 
         Returns:
             The snapshot it replaces, if any. It keeps its data until a later
@@ -257,6 +258,7 @@ class SnapshotRepository:
             self.session.flush([previous])
         record.active = True
         record.activated_at = datetime.now(UTC)
+        record.replaced_snapshot_id = None if previous is None else previous.snapshot_id
         self.session.flush([record])
         return previous
 
@@ -397,7 +399,7 @@ class SnapshotRepository:
         """Delete the data of the kind's snapshots that are no longer kept.
 
         For each source with an active snapshot, the active snapshot and the
-        most recently activated inactive one keep their data. Every other
+        snapshot it replaced keep their data. Every other
         snapshot of the kind, including every snapshot of a retired source, has
         its data rows deleted and `pruned_at` set. A snapshot another
         transaction has locked is skipped and pruned by a later job.
@@ -411,24 +413,13 @@ class SnapshotRepository:
                 ReferenceSnapshotRecord.pruned_at.is_(None),
             )
         ).all()
-        kept = {record.snapshot_id for record in records if record.active}
-        active_sources = {record.source_key for record in records if record.active}
-        predecessors: dict[str, ReferenceSnapshotRecord] = {}
-        for record in records:
-            if (
-                record.active
-                or record.activated_at is None
-                or record.source_key not in active_sources
-            ):
-                continue
-            newest = predecessors.get(record.source_key)
-            if (
-                newest is None
-                or newest.activated_at is None
-                or record.activated_at > newest.activated_at
-            ):
-                predecessors[record.source_key] = record
-        kept |= {record.snapshot_id for record in predecessors.values()}
+        kept = {
+            snapshot_id
+            for record in records
+            if record.active
+            for snapshot_id in (record.snapshot_id, record.replaced_snapshot_id)
+            if snapshot_id is not None
+        }
         candidates = sorted(
             record.snapshot_id for record in records if record.snapshot_id not in kept
         )

@@ -3,14 +3,21 @@
 from uuid import UUID
 
 import pytest
-from refresh_helpers import build_scan_runner
-from seeding import deactivate_reference_data, insert_annotation
+from refresh_helpers import (
+    OboTerm,
+    build_scan_runner,
+    obo,
+    refresh_go,
+    refreshing_factory,
+)
+from seeding import active_snapshot, deactivate_reference_data, insert_annotation
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from test_qc_report_repository import _finding
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.qc_reports import STORED_QC_REPORT_RESULT
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import AnnotationRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
@@ -248,18 +255,53 @@ def test_a_redelivered_running_report_starts_from_empty_rows(
     assert UUID(int=9) not in _findings(unit_of_work_factory, job.job_id)
 
 
-def test_an_empty_report_succeeds_and_records_its_reference_data(
+def test_an_empty_report_succeeds_and_records_no_reference_data(
     unit_of_work_factory: UnitOfWorkFactory, database_engine: Engine
 ) -> None:
-    """A report with nothing to check succeeds and records the versions it used."""
+    """A report with nothing to check succeeds and lists no reference data."""
     empty = _run(unit_of_work_factory, database_engine, group_key="ZFIN")
 
     assert empty.status is JobStatus.SUCCEEDED
     assert empty.result is not None
     assert empty.result["annotations_checked"] == 0
-    reference_data = empty.result["reference_data"]
-    assert isinstance(reference_data, list)
-    assert len(reference_data) == 1
+    assert empty.result["reference_data"] == []
+
+
+def test_a_refresh_before_the_first_batch_lists_only_the_batch_set(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+) -> None:
+    """A report lists the set its first batch used, not the set active at its start."""
+    _insert(session_factory, _annotation())
+    job = _queue(unit_of_work_factory, None)
+    # The scan's first unit of work checks reference data is available; the
+    # second reads the first batch.
+    scan_factory = refreshing_factory(
+        unit_of_work_factory,
+        before_call=2,
+        refresh=lambda: refresh_go(
+            database_engine, unit_of_work_factory, obo(OboTerm("GO:0006915"))
+        ),
+    )
+
+    build_scan_runner(
+        database_engine,
+        unit_of_work_factory,
+        scan_unit_of_work_factory=scan_factory,
+    ).run(job.job_id)
+
+    finished = JobService(unit_of_work_factory).find(job.job_id)
+    assert finished.status is JobStatus.SUCCEEDED
+    assert finished.result is not None
+    (versions,) = STORED_QC_REPORT_RESULT.load(finished.result).reference_data
+    active = active_snapshot(session_factory, SnapshotKind.ONTOLOGY, "go")
+    assert active is not None
+    assert [
+        ontology.version_id
+        for ontology in versions.ontologies
+        if ontology.ontology_key == "go"
+    ] == [active.snapshot_id]
 
 
 def test_an_abandoned_report_keeps_no_findings_or_counts(

@@ -222,7 +222,8 @@ class JobService:
             job_id: The running job.
             result: The result to store.
             progress: The final progress to store.
-            warnings: The final warnings to store.
+            warnings: The warnings to store; they replace any stored earlier,
+                so a job with none ends with none.
 
         Raises:
             InvalidJobTransitionError: If the job is not running, or already

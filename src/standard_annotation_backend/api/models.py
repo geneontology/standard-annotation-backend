@@ -35,11 +35,11 @@ from standard_annotation_backend.domain.qc_reports import (
     ISSUE_TYPES,
     IssueTypeEntry,
     QcFinding,
-    ReferenceDataVersions,
 )
 from standard_annotation_backend.domain.semantic_validation.details import (
     IssueDetails,
 )
+from standard_annotation_backend.domain.snapshots import ReferenceDataVersions
 from standard_annotation_backend.domain.tokens import TokenMetadata
 from standard_annotation_backend.refresh.sources import SourceKey
 from standard_annotation_backend.services.annotation_service import (
@@ -905,8 +905,9 @@ class QcReportResource(BaseModel):
     by_group: dict[str, QcGroupCountsResource]
     reference_data: list[QcReferenceDataResource] = Field(
         description=(
-            "Every set of reference data the report used, in the order first "
-            "used. Empty until the report succeeds."
+            "Every set of reference data the report's batches used, in the order "
+            "first used. Empty until the report succeeds, and empty for a report "
+            "that had no annotations to check."
         )
     )
     sabe_version: str | None = Field(

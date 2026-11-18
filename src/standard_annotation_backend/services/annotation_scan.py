@@ -39,8 +39,10 @@ from standard_annotation_backend.domain.jobs import (
     scan_groups,
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
+    ActiveSnapshots,
     ReferenceDataUnavailableError,
 )
+from standard_annotation_backend.domain.snapshots import ReferenceDataVersions
 from standard_annotation_backend.persistence.locks import (
     AdvisoryTryLock,
     LockNamespace,
@@ -130,6 +132,40 @@ class ScanOutcome:
 
     result: dict[str, object]
     counts: Mapping[str, int] = field(default_factory=dict)
+
+
+class ReferenceDataLog:
+    """Record each distinct set of snapshots a scan used, in the order first used.
+
+    A scan looks up the active snapshots again for each batch, and a term
+    replacement job for each write, so a scan that runs while reference data is
+    refreshed uses more than one set. Only sets that checked annotations are
+    recorded; a scan records none when it has nothing to check.
+    """
+
+    def __init__(self) -> None:
+        self._seen: set[frozenset[UUID]] = set()
+        self._versions: list[ReferenceDataVersions] = []
+
+    def record(
+        self, unit_of_work: SqlAlchemyUnitOfWork, snapshots: ActiveSnapshots
+    ) -> None:
+        """Record `snapshots` unless an equal set is already recorded.
+
+        Where a new set of snapshots came from is read in `unit_of_work`, which
+        must be the transaction that resolved them. Sets already seen are not
+        read again.
+        """
+        if snapshots.snapshot_ids in self._seen:
+            return
+        self._seen.add(snapshots.snapshot_ids)
+        versions = unit_of_work.snapshots.reference_versions(snapshots)
+        if versions not in self._versions:
+            self._versions.append(versions)
+
+    def versions(self) -> tuple[ReferenceDataVersions, ...]:
+        """Return every recorded set, in the order first used."""
+        return tuple(self._versions)
 
 
 class AnnotationScan(Protocol):

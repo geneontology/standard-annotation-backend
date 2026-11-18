@@ -524,6 +524,12 @@ class ReferenceSnapshotRecord(Base):
     reader_version: Mapped[int] = mapped_column(Integer)
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The snapshot this one replaced when it was activated; pruning keeps it while
+    # this one is active.
+    replaced_snapshot_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("reference_snapshot.snapshot_id", ondelete="SET NULL"),
+    )
     pruned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

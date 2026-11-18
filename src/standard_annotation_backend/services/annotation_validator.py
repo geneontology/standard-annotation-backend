@@ -116,6 +116,7 @@ class AnnotationValidator:
         payload: object,
         *,
         expected_version: int,
+        snapshots: ActiveSnapshots | None = None,
     ) -> ValidatedUpdate:
         """Lock an annotation and check its replacement, for `update`.
 
@@ -127,6 +128,9 @@ class AnnotationValidator:
             annotation_id: The annotation to replace.
             payload: The replacement's data, or an `Annotation`.
             expected_version: The version that must still be current.
+            snapshots: Active snapshots to validate against, resolved earlier in
+                `unit_of_work`, for a caller that records which ones it used.
+                Looked up here when omitted.
 
         Raises:
             InvalidAnnotationPayloadError: If the replacement fails the structural
@@ -142,7 +146,7 @@ class AnnotationValidator:
             annotation_id, annotation, expected_version=expected_version
         )
         self._require_no_semantic_issues(
-            unit_of_work, annotation, locked.duplicate_peer_ids
+            unit_of_work, annotation, locked.duplicate_peer_ids, snapshots=snapshots
         )
         return ValidatedUpdate(locked)
 
@@ -218,10 +222,12 @@ class AnnotationValidator:
         unit_of_work: SqlAlchemyUnitOfWork,
         annotation: Annotation,
         duplicate_peer_ids: tuple[UUID, ...],
+        *,
+        snapshots: ActiveSnapshots | None = None,
     ) -> None:
         """Raise `InvalidAnnotationPayloadError` if any semantic check fails."""
         (facts,) = unit_of_work.validation_facts.gather(
-            [annotation], [duplicate_peer_ids], self._ontologies
+            [annotation], [duplicate_peer_ids], self._ontologies, snapshots=snapshots
         )
         issues = validate_semantics(annotation, facts)
         if issues:

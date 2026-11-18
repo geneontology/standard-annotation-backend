@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from uuid import UUID
 
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
@@ -108,3 +109,50 @@ class SourceContent:
             identifier_prefixes=tuple(sorted(identifier_prefixes)),
             closure_predicates=tuple(sorted(closure_predicates)),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OntologySnapshotUse:
+    """Identify one ontology snapshot a job read.
+
+    Attributes:
+        ontology_key: The configured ontology.
+        version_id: The snapshot.
+        document_version: The version the ontology file declares, if any.
+        source_revision: The source's revision, if it has one.
+    """
+
+    ontology_key: str
+    version_id: UUID
+    document_version: str | None
+    source_revision: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EntityCatalogUse:
+    """Identify one active entity catalog snapshot a job read.
+
+    Attributes:
+        source_key: The configured entity source.
+        snapshot_id: The catalog snapshot.
+    """
+
+    source_key: str
+    snapshot_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceDataVersions:
+    """Identify one set of reference data a job checked annotations against.
+
+    QC reports and term replacement jobs record these in their results.
+
+    Attributes:
+        ontologies: Each configured ontology's active snapshot.
+        go_site_revision: The go-site commit of the active rule data, if known.
+        entity_catalogs: Each active entity catalog snapshot.
+    """
+
+    ontologies: tuple[OntologySnapshotUse, ...]
+    go_site_revision: str | None
+    entity_catalogs: tuple[EntityCatalogUse, ...]

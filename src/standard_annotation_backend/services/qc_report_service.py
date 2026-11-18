@@ -7,7 +7,7 @@ batches without locking them, so an annotation edited during the run may be
 checked as it was before or after the edit. Each batch is checked against the
 reference data snapshots (the stored versions of ontologies, GO Rule data, and
 entity catalogs) that are active when the batch is read, and the report records
-every set of versions it used.
+every set of versions its batches used.
 """
 
 from collections import Counter
@@ -38,7 +38,6 @@ from standard_annotation_backend.domain.qc_reports import (
     QcReportNotCompletedError,
     QcReportNotFoundError,
     QcReportResult,
-    ReferenceDataVersions,
     issue_types_of,
 )
 from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
@@ -51,6 +50,7 @@ from standard_annotation_backend.persistence.unit_of_work import (
     UnitOfWorkFactory,
 )
 from standard_annotation_backend.services.annotation_scan import (
+    ReferenceDataLog,
     ScanOutcome,
     queue_or_join,
 )
@@ -131,13 +131,12 @@ class QcReportScan:
         """Validate every active annotation of the scope, batch by batch."""
         checked = 0
         with_issues = 0
+        reference_data = ReferenceDataLog()
         # Resolved before the first batch, so a scope with no annotations still
-        # fails when reference data is missing, and records what it checked against.
+        # fails when reference data is missing. Nothing is checked against this
+        # set, so it is not recorded.
         with self._unit_of_work_factory() as unit_of_work:
-            snapshots = unit_of_work.snapshots.resolve(self._ontologies)
-            reference_data: list[ReferenceDataVersions] = [
-                unit_of_work.snapshots.reference_versions(snapshots)
-            ]
+            unit_of_work.snapshots.resolve(self._ontologies)
         after: UUID | None = None
         while True:
             with self._unit_of_work_factory() as unit_of_work:
@@ -148,9 +147,7 @@ class QcReportScan:
                     break
                 after = records[-1].annotation_id
                 snapshots = unit_of_work.snapshots.resolve(self._ontologies)
-                versions = unit_of_work.snapshots.reference_versions(snapshots)
-                if versions not in reference_data:
-                    reference_data.append(versions)
+                reference_data.record(unit_of_work, snapshots)
                 creators = unit_of_work.annotations.creators(
                     [record.annotation_id for record in records]
                 )
@@ -196,7 +193,7 @@ class QcReportScan:
             owning_group_id=group_key,
             annotations_checked=checked,
             annotations_with_issues=with_issues,
-            reference_data=tuple(reference_data),
+            reference_data=reference_data.versions(),
             sabe_version=get_application_version(),
             schema_version=SCHEMA_PACKAGE_VERSION,
         )

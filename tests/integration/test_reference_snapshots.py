@@ -7,6 +7,7 @@ reading the snapshots they resolved until their transaction ends.
 
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from types import MappingProxyType
 
 import pytest
@@ -29,7 +30,7 @@ from refresh_helpers import (
 )
 from seeding import SHIPPED_SOURCES, active_snapshot
 from seeding import create_job as queue_job
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain import snapshots as snapshot_vocabulary
@@ -49,6 +50,9 @@ from standard_annotation_backend.persistence.models import (
     StoredEntityRecord,
 )
 from standard_annotation_backend.persistence.repositories import SnapshotPrunedError
+from standard_annotation_backend.persistence.repositories.snapshots import (
+    SnapshotRepository,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
@@ -275,6 +279,74 @@ def test_each_job_keeps_the_active_snapshot_and_its_predecessor(
     assert _data_row_count(session_factory, kind, second.snapshot_id) > 0
     assert active is not None and active.snapshot_id == third.snapshot_id
     assert _data_row_count(session_factory, kind, third.snapshot_id) > 0
+
+
+def _refresh_go(
+    database_engine: Engine, unit_of_work_factory: UnitOfWorkFactory, n: int
+) -> Job:
+    """Run a GO refresh whose document differs for each `n`."""
+    return _run(
+        database_engine,
+        unit_of_work_factory,
+        JobType.ONTOLOGY_REFRESH,
+        "go",
+        obo(OboTerm(f"GO:000000{n}")),
+    )
+
+
+def test_the_replaced_snapshot_is_kept_whatever_its_activation_time(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Pruning keeps the snapshot the active one replaced, not the newest by clock.
+
+    The first snapshot is given a later activation time than the second, as clock
+    skew between workers could do. The third refresh still keeps the second.
+    """
+    first_job = _refresh_go(database_engine, unit_of_work_factory, 1)
+    second_job = _refresh_go(database_engine, unit_of_work_factory, 2)
+    second = _snapshot_of(session_factory, second_job)
+    assert second.activated_at is not None
+    with session_factory.begin() as session:
+        session.execute(
+            update(ReferenceSnapshotRecord)
+            .where(ReferenceSnapshotRecord.job_id == first_job.job_id)
+            .values(activated_at=second.activated_at + timedelta(hours=1))
+        )
+
+    third_job = _refresh_go(database_engine, unit_of_work_factory, 3)
+
+    first = _snapshot_of(session_factory, first_job)
+    second = _snapshot_of(session_factory, second_job)
+    third = _snapshot_of(session_factory, third_job)
+    kind = SnapshotKind.ONTOLOGY
+    assert first.pruned_at is not None
+    assert _data_row_count(session_factory, kind, first.snapshot_id) == 0
+    assert second.pruned_at is None
+    assert _data_row_count(session_factory, kind, second.snapshot_id) > 0
+    active = active_snapshot(session_factory, kind, "go")
+    assert active is not None and active.snapshot_id == third.snapshot_id
+
+
+def test_a_reconfigured_source_does_not_keep_its_retired_snapshot(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A source's first snapshot after retirement replaced nothing, so it keeps none."""
+    first_job = _refresh_go(database_engine, unit_of_work_factory, 1)
+    with session_factory.begin() as session:
+        SnapshotRepository(session).retire(SnapshotKind.ONTOLOGY, ["go"])
+
+    second_job = _refresh_go(database_engine, unit_of_work_factory, 2)
+
+    first = _snapshot_of(session_factory, first_job)
+    assert first.pruned_at is not None
+    assert (
+        _data_row_count(session_factory, SnapshotKind.ONTOLOGY, first.snapshot_id) == 0
+    )
+    assert _snapshot_of(session_factory, second_job).replaced_snapshot_id is None
 
 
 def test_a_reader_keeps_its_snapshot_through_two_activations_and_prunes(

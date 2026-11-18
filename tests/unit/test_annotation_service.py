@@ -21,6 +21,7 @@ from standard_annotation_backend.domain.auth import (
     RequestContext,
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
+    ActiveSnapshots,
     AnnotationFacts,
     EntityFact,
 )
@@ -282,6 +283,8 @@ class FakeValidationFacts:
         annotations: Sequence[Annotation],
         peers: Sequence[tuple[UUID, ...]],
         ontologies: Mapping[str, tuple[str, ...]],
+        *,
+        snapshots: ActiveSnapshots | None = None,
     ) -> tuple[AnnotationFacts, ...]:
         return tuple(
             AnnotationFacts(

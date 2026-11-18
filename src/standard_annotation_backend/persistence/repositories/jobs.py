@@ -230,8 +230,8 @@ class JobRepository:
         *,
         result: dict[str, object],
         now: datetime,
+        warnings: Sequence[str],
         progress: dict[str, object] | None = None,
-        warnings: Sequence[str] | None = None,
     ) -> JobMutation:
         """Finish a running job successfully under a row lock.
 
@@ -239,8 +239,8 @@ class JobRepository:
             job_id: The job to finish.
             result: The result to store.
             now: The completion time.
+            warnings: The warnings to store; they replace any stored earlier.
             progress: Final progress to store with the success, if given.
-            warnings: Final warnings to store with the success, if given.
         """
         record = self._lock(job_id)
         status = record.status
@@ -254,8 +254,7 @@ class JobRepository:
         record.result = result
         if progress is not None:
             record.progress = progress
-        if warnings is not None:
-            record.warnings = list(warnings)
+        record.warnings = list(warnings)
         record.completed_at = now
         record.updated_at = now
         self.session.flush([record])

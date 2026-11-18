@@ -11,6 +11,11 @@ from standard_annotation_backend.domain.semantic_validation.facts import (
     TermFact,
     TermStatus,
 )
+from standard_annotation_backend.domain.snapshots import (
+    EntityCatalogUse,
+    OntologySnapshotUse,
+    ReferenceDataVersions,
+)
 from standard_annotation_backend.domain.term_replacement import (
     STORED_TERM_REPLACEMENT_RESULT,
     TermReplacementResult,
@@ -237,17 +242,22 @@ def test_the_stored_result_round_trips() -> None:
         annotation_replaced_count=1,
         annotation_issue_skip_count=1,
         annotation_stale_skip_count=1,
-        snapshot_ids={"go": (UUID(int=1),), "rules": (UUID(int=2),)},
+        reference_data=(
+            ReferenceDataVersions(
+                ontologies=(OntologySnapshotUse("go", UUID(int=1), None, None),),
+                go_site_revision="abc",
+                entity_catalogs=(EntityCatalogUse("mgi", UUID(int=2)),),
+            ),
+        ),
     )
 
     assert STORED_TERM_REPLACEMENT_RESULT.load(result.to_job_result()) == result
 
 
-def test_a_replacement_already_in_its_list_leaves_one_copy() -> None:
-    """Entries that become equal keep the first one's place; other lists keep repeats."""
+def test_a_replacement_already_in_its_list_is_dropped() -> None:
+    """A replaced entry whose new value the list already holds is removed."""
     annotation = _annotation(
         with_or_from=["CHEBI:0000001", "UniProtKB:Q1", "CHEBI:0000002"],
-        interacting_taxon_id=["NCBITaxon:3", "NCBITaxon:3"],
         annotation_extensions=[
             {"extension_relation": "BFO:0000050", "extension_term": "CL:0000002"},
             {"extension_relation": "BFO:0000050", "extension_term": "CL:0000001"},
@@ -260,16 +270,56 @@ def test_a_replacement_already_in_its_list_leaves_one_copy() -> None:
         "CL:0000002": CURRENT,
         "CHEBI:0000001": _obsolete("CHEBI:0000002"),
         "CHEBI:0000002": CURRENT,
+        "NCBITaxon:1": CURRENT,
+    }
+
+    replaced = replaced_annotation(annotation, terms, ONTOLOGIES)
+
+    assert replaced is not None
+    assert replaced.with_or_from == ["UniProtKB:Q1", "CHEBI:0000002"]
+    assert replaced.annotation_extensions is not None
+    assert [
+        (extension.extension_relation, extension.extension_term)
+        for extension in replaced.annotation_extensions
+    ] == [("BFO:0000050", "CL:0000002"), ("BFO:0000066", "CL:0000002")]
+
+
+def test_repeats_the_client_entered_are_kept() -> None:
+    """Only replaced entries are removed; the client's own repeats stay."""
+    annotation = _annotation(
+        with_or_from=["CHEBI:0000002", "CHEBI:0000002", "CHEBI:0000001"],
+        interacting_taxon_id=["NCBITaxon:3", "NCBITaxon:3"],
+    )
+    terms = {
+        "GO:0000001": CURRENT,
+        "CL:0000001": CURRENT,
+        "CHEBI:0000001": _obsolete("CHEBI:0000002"),
+        "CHEBI:0000002": CURRENT,
         "NCBITaxon:3": CURRENT,
     }
 
     replaced = replaced_annotation(annotation, terms, ONTOLOGIES)
 
     assert replaced is not None
-    assert replaced.with_or_from == ["CHEBI:0000002", "UniProtKB:Q1"]
+    assert replaced.with_or_from == ["CHEBI:0000002", "CHEBI:0000002"]
     assert replaced.interacting_taxon_id == ["NCBITaxon:3", "NCBITaxon:3"]
-    assert replaced.annotation_extensions is not None
-    assert [
-        (extension.extension_relation, extension.extension_term)
-        for extension in replaced.annotation_extensions
-    ] == [("BFO:0000050", "CL:0000002"), ("BFO:0000066", "CL:0000002")]
+
+
+def test_entries_replaced_into_one_value_keep_the_first() -> None:
+    """Two replaced entries that become equal leave one copy, in the first's place."""
+    annotation = _annotation(
+        with_or_from=["CHEBI:0000001", "UniProtKB:Q1", "CHEBI:0000003"]
+    )
+    terms = {
+        "GO:0000001": CURRENT,
+        "CL:0000001": CURRENT,
+        "CHEBI:0000001": _obsolete("CHEBI:0000002"),
+        "CHEBI:0000003": _alternate("CHEBI:0000002"),
+        "CHEBI:0000002": CURRENT,
+        "NCBITaxon:1": CURRENT,
+    }
+
+    replaced = replaced_annotation(annotation, terms, ONTOLOGIES)
+
+    assert replaced is not None
+    assert replaced.with_or_from == ["CHEBI:0000002", "UniProtKB:Q1"]
