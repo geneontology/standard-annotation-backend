@@ -258,7 +258,7 @@ def test_failed_refresh_records_code_and_details_with_truncated_audit(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
 ) -> None:
-    """The job keeps every reported issue; its failure audit event keeps the first 10."""
+    """A failed job keeps every reported issue; its audit event keeps the first 10."""
     service = _service(unit_of_work_factory)
     job_id = _running_refresh(unit_of_work_factory)
     issues = [{"line_number": line} for line in range(12)]
@@ -266,7 +266,7 @@ def test_failed_refresh_records_code_and_details_with_truncated_audit(
     failed = service.fail(
         job_id,
         error="Entity refresh failed",
-        failure_code=JobFailureCode.ROW_VALIDATION,
+        failure_code=JobFailureCode.NO_VALID_ROWS,
         failure_details={"issue_count": 12, "issues": issues},
     )
 
@@ -274,11 +274,11 @@ def test_failed_refresh_records_code_and_details_with_truncated_audit(
     assert failed.error == "Entity refresh failed"
     assert failed.progress == {
         "phase": "failed",
-        "failure_code": "row_validation",
+        "failure_code": "no_valid_rows",
         "failure_details": {"issue_count": 12, "issues": issues},
     }
     [audit] = _failure_audits(session_factory)
-    assert audit.details["failure_code"] == "row_validation"
+    assert audit.details["failure_code"] == "no_valid_rows"
     assert audit.details["failure_details"] == {
         "issue_count": 12,
         "issues": issues[:10],

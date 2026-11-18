@@ -144,12 +144,12 @@ def test_unchanged_file_is_skipped_and_cutover_never_skips(
         (
             gpad_bytes("too\tfew"),
             JobType.ANNOTATION_REFRESH,
-            "no_valid_annotations",
+            "no_valid_rows",
         ),
         (
             gpad_bytes("too\tfew"),
             JobType.ANNOTATION_CUTOVER,
-            "no_valid_annotations",
+            "no_valid_rows",
         ),
         (
             gpad_bytes(gpad_row("UniProtKB:P12345"), "bad"),
@@ -191,7 +191,7 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
     assert job.status is JobStatus.FAILED
     assert job.error == "Annotation refresh failed"
     assert job.progress["failure_code"] == failure_code
-    if failure_code in {"no_valid_annotations", "cutover_rejected"}:
+    if failure_code in {"no_valid_rows", "cutover_rejected"}:
         details = job.progress["failure_details"]
         assert isinstance(details, dict) and details["issue_count"] == 1
     assert _group_annotations(session_factory) == 1

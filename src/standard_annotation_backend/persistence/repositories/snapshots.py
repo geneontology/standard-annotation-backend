@@ -14,7 +14,10 @@ the one place that defines how snapshots behave:
   snapshot per source is active. A refresh skips its source when the active
   snapshot already holds the same content (`SourceContent`): the same source
   type, locator, checksum, and reader version, and for an ontology the same
-  identifier prefixes and closure predicates.
+  identifier prefixes and closure predicates. An entity refresh still reads a
+  document with the same content when the active snapshot's rows were checked
+  with another schema package version or its activation rejected a row as a
+  collision (see `EntitySnapshotDetail.reusable`).
 - What stays readable: `resolve` locks the snapshots it returns with
   PostgreSQL's `FOR KEY SHARE` lock until the transaction ends. Activation does
   not conflict with that lock, so refreshes never wait for readers, but pruning
@@ -186,7 +189,8 @@ class SnapshotRepository:
     ) -> ReferenceSnapshotRecord | None:
         """Return the source's active snapshot if it holds `content`.
 
-        A refresh skips a document when this returns a snapshot.
+        A refresh skips a document when this returns a snapshot. An entity
+        refresh skips it only if `EntitySnapshotDetail.reusable` is also true.
         """
         record = self.active(kind, source_key)
         if record is None:

@@ -878,15 +878,16 @@ annotations current from the sources in `config/sources.yaml`. Every kind follow
 same pattern. A refresh job fetches one source, records its provenance (type, locator,
 resolved revision, checksum, and fetch time), skips the source if its active data
 already holds the same content, and otherwise validates the document before any of it
-becomes active. Annotation refreshes qualify this in two ways. They skip only when the
-group also has no local changes and no schema upgrade since its last import, and an
-ordinary annotation refresh publishes the valid rows while reporting the rejected ones.
-Invalid documents and unreachable sources fail the job with a stable failure code and
-leave the previous data in place; the next scheduled refresh tries again. Jobs start
-from a schedule, a global-admin API request, or the `just refresh` CLI. All three reuse
-an unfinished job for the same source instead of creating another. The [refresh
-infrastructure guide](docs/refresh-infrastructure.md) shows how these pieces fit
-together in the code.
+becomes active. Entity refreshes and ordinary annotation refreshes load the valid rows
+of their file and report the rejected ones, and fail when no row is valid. Both read an
+unchanged file again after a schema package upgrade. An entity refresh also does so
+when its active catalog rejected a row as a collision, and an annotation refresh skips
+only when the group has no local changes since its last import. Invalid documents and
+unreachable sources fail the job with a stable failure code and leave the previous data
+in place; the next scheduled refresh tries again. Jobs start from a schedule, a
+global-admin API request, or the `just refresh` CLI. All three reuse an unfinished job
+for the same source instead of creating another. The [refresh infrastructure
+guide](docs/refresh-infrastructure.md) shows how these pieces fit together in the code.
 
 **Authorization.** The go-site `users.yaml` replaces SABE's users and grants as
 described under Authorization Model.
@@ -909,12 +910,14 @@ tables per kind. `persistence/repositories/snapshots.py` states the contract: a 
 job loads and activates a snapshot in one transaction, together with the job's success;
 a refresh skips a source whose active snapshot already holds the same content (source
 type, locator, checksum, and reader version, plus an ontology's prefixes and
-predicates); readers lock the snapshots they resolve; each source keeps its active
-snapshot and the one it replaced, and every refresh job prunes the rest of its kind. A
-job that stops partway stores nothing and runs again from the start. At most one refresh
-job per source, and one GPAD job per group, is queued or running at a time. Raising a
-kind's reader version in `domain/snapshots.py` makes the next refresh of each of its
-sources read the document again.
+predicates), unless it is an entity snapshot whose rows were checked with another
+schema package version or that rejected a row as a collision; readers lock the
+snapshots they resolve; each source keeps its active snapshot and the one it replaced,
+and every refresh job prunes the rest of its kind. A job that stops partway stores
+nothing and runs again from the start. At most one refresh job per source, and one GPAD
+job per group, is queued or running at a time. Raising a kind's reader version in
+`domain/snapshots.py` makes the next refresh of each of its sources read the document
+again.
 
 **Ontologies.** `config/sources.yaml` lists every ontology SABE loads and says how to
 read each one: the `ontology:` header the file must declare, the identifier prefixes the
@@ -939,14 +942,18 @@ refresh of every ontology retires its snapshot.
 
 **Entities.** An entity is an annotatable subject identified by `db_object_id`. Each
 configured GPI source supplies a complete catalog. An identifier can be active in only
-one source and may appear on only one line of its file. Each entity's taxon and type are
-also stored in their own columns, for validation. An invalid file fails the job, and the
-job records each invalid row's line number and reason. Semantic validation requires an
-active `db_object_id` for client creates and updates; deletes and imports do not need
-one. Replacing or retiring a catalog never modifies existing annotations, and report
-jobs find annotations whose subject was removed. Validation reads entity facts from the
-same resolved catalog snapshots as the other facts. Removing a source from the
-configuration retires its catalog on the next refresh of every entity source.
+one source. A refresh rejects each row that cannot be read, fails schema validation,
+lists an identifier that another row of the file also lists, or lists an identifier
+that another source's active catalog lists, and activates the rest. Its result counts
+every rejected row and lists the first 100 with their line numbers and reasons. A file
+with no valid row fails the job and leaves the previous catalog active. Each entity's
+taxon and type are also stored in their own columns, for validation. Semantic
+validation requires an active `db_object_id` for client creates and updates; deletes
+and imports do not need one. Replacing or retiring a catalog never modifies existing
+annotations, and report jobs find annotations whose subject was removed. Validation
+reads entity facts from the same resolved catalog snapshots as the other facts.
+Removing a source from the configuration retires its catalog on the next refresh of
+every entity source.
 
 **Annotation refreshes.** Each entry in the `annotations` section of the sources file
 names a GPAD 2.0 file and the group (`owning_group_id`) whose annotations it supplies. A
@@ -975,7 +982,7 @@ never overlap. Asking for the type of job that is already unfinished reuses it. 
 for the other type fails with `409 annotation_job_in_progress`, and a refresh of every
 source skips the group. Jobs for different groups run in parallel.
 
-Any refresh, ordinary or cutover, fails with `no_valid_annotations` and publishes
+Any refresh, ordinary or cutover, fails with `no_valid_rows` and publishes
 nothing when no valid annotation remains after staging. A cutover that has at least one
 valid annotation fails with `cutover_rejected` if any record was rejected. A cutover
 never skips as unchanged.

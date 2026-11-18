@@ -16,9 +16,6 @@ These values need neither HTTP nor a database.
 
 from __future__ import annotations
 
-import heapq
-from collections import Counter
-from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated
@@ -29,19 +26,12 @@ from pydantic import Field
 from standard_annotation_backend.domain.errors import ConflictError
 from standard_annotation_backend.domain.jobs import JobFailureCode
 from standard_annotation_backend.domain.refresh import (
+    STORED_REJECTION_REPORT,
+    RejectionReport,
     SourceProvenance,
     TerminalRefreshError,
 )
 from standard_annotation_backend.domain.stored_json import StoredJson
-
-MAX_REPORTED_REJECTIONS = 100
-"""Maximum number of rejected records listed in a report.
-
-The report's counts still include every rejected record.
-"""
-
-MAX_REJECTION_REASON_LENGTH = 200
-"""Maximum length, in characters, of the `reason` stored for one rejected record."""
 
 
 class AnnotationManagementMode(StrEnum):
@@ -54,76 +44,6 @@ class AnnotationManagementMode(StrEnum):
 
     GPAD_IMPORTED = "gpad_imported"
     SABE_MANAGED = "sabe_managed"
-
-
-@dataclass(frozen=True, slots=True)
-class AnnotationRejection:
-    """Describe one GPAD record that was not imported.
-
-    Attributes:
-        line_number: One-based line number in the source file.
-        code: `syntax`, `field-count`, or `validation`.
-        reason: Short explanation, at most 200 characters.
-    """
-
-    line_number: Annotated[int, Field(ge=0)]
-    code: str
-    reason: str
-
-
-@dataclass(frozen=True, slots=True)
-class RejectionReport:
-    """Summarize every record a GPAD refresh rejected.
-
-    Attributes:
-        issue_count: Number of rejected records.
-        by_code: Number of rejected records for each code.
-        issues: The rejected records with the lowest line numbers, at most 100.
-    """
-
-    issue_count: Annotated[int, Field(ge=0)]
-    by_code: Mapping[str, Annotated[int, Field(ge=0)]]
-    issues: tuple[AnnotationRejection, ...]
-
-
-class RejectionReportBuilder:
-    """Build a `RejectionReport` from rejections added one at a time.
-
-    Every rejection is counted, but only the 100 with the lowest line numbers
-    are kept, so a file with millions of bad rows uses little memory.
-
-    Rejections may be added in any line order, and the report still lists the
-    lowest lines. Rejections from the same line keep the order in which they were
-    added.
-    """
-
-    def __init__(self) -> None:
-        self._issue_count = 0
-        self._by_code: Counter[str] = Counter()
-        # The kept rejections, keyed by negated (line number, arrival). `heapq`
-        # is a min-heap, so negating the keys puts the highest line kept (and,
-        # within a line, the latest arrival) at `self._kept[0]`: the entry to
-        # evict when a rejection with a lower line number arrives.
-        self._kept: list[tuple[int, int, AnnotationRejection]] = []
-
-    def add(self, rejection: AnnotationRejection) -> None:
-        """Count one rejection and keep it if it is among the 100 lowest lines."""
-        self._issue_count += 1
-        self._by_code[rejection.code] += 1
-        entry = (-rejection.line_number, -self._issue_count, rejection)
-        if len(self._kept) < MAX_REPORTED_REJECTIONS:
-            heapq.heappush(self._kept, entry)
-        elif entry[:2] > self._kept[0][:2]:
-            heapq.heapreplace(self._kept, entry)
-
-    def build(self) -> RejectionReport:
-        """Return the report of everything added so far."""
-        kept = sorted(self._kept, key=lambda entry: (-entry[0], -entry[1]))
-        return RejectionReport(
-            issue_count=self._issue_count,
-            by_code=dict(sorted(self._by_code.items())),
-            issues=tuple(entry[2] for entry in kept),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +126,6 @@ class AnnotationRefreshUnchanged:
         return STORED_ANNOTATION_UNCHANGED_RESULT.dump(self)
 
 
-STORED_REJECTION_REPORT = StoredJson(RejectionReport, label="rejection report")
 STORED_ANNOTATION_REFRESH_RESULT = StoredJson(
     AnnotationRefreshResult, label="annotation refresh result"
 )
@@ -254,34 +173,25 @@ class AnnotationJobInProgressError(ConflictError):
     message = "The source's group already has an unfinished GPAD refresh or cutover job"
 
 
-class NoValidAnnotationsError(ValueError):
-    """Report a GPAD file with no annotations that can be imported.
+class CutoverRejectedError(TerminalRefreshError):
+    """Report a cutover that rejected at least one row.
 
-    Publishing it would delete the group's annotations and import nothing. That
-    usually means a wrong file, so the refresh fails.
+    A cutover publishes only when every row is imported. Staging raises this
+    when any row of a cutover's file is rejected. The job's failure details are
+    the rejection report.
 
     Attributes:
-        report: The records that were rejected.
+        report: The rows that were rejected.
     """
+
+    failure_code = JobFailureCode.CUTOVER_REJECTED
 
     def __init__(self, report: RejectionReport) -> None:
         self.report = report
-        super().__init__("GPAD file has no valid annotations")
-
-
-class CutoverRejectedError(ValueError):
-    """Report a cutover that rejected at least one record.
-
-    A cutover publishes only when every record is imported. Staging raises this
-    when any record of a cutover's file is rejected.
-
-    Attributes:
-        report: The records that were rejected.
-    """
-
-    def __init__(self, report: RejectionReport) -> None:
-        self.report = report
-        super().__init__("cutover requires zero rejected records")
+        super().__init__(
+            "cutover requires zero rejected rows",
+            failure_details=STORED_REJECTION_REPORT.dump(report),
+        )
 
 
 class AnnotationImportConflictError(TerminalRefreshError):

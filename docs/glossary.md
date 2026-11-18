@@ -20,12 +20,13 @@ an entity catalog. SABE accepts a client-written annotation only when its subjec
 entity in an active catalog; otherwise the annotation has an `unknown_entity` issue.
 See [Two stages](annotation-validation.md#two-stages).
 
-**GPI and GPAD.** GO's file formats for gene product information and for annotations.
-SABE reads GPI 2.0 files as entity catalogs and GPAD 2.0 files as group annotation
-imports. One GPAD row can describe several independent annotations: each
-pipe-separated (`|`) alternative in its with/from or annotation extension column is a
-separate annotation. SABE splits such a row and stores each of those annotations on its
-own, so one row in a GPAD file can become several annotations in SABE.
+**GPI and GPAD.** GO's exchange file formats for gene product information and for
+annotations. SABE reads GPI 2.0 files as entity catalogs and GPAD 2.0 files as group
+annotation imports. One GPAD row can describe several independent annotations: its
+with/from and annotation extension columns can each list pipe-separated (`|`)
+alternatives, and each combination of one alternative from each column is a separate
+annotation. SABE splits such a row and stores each of those annotations on its own, so
+one row in a GPAD file can become several annotations in SABE.
 
 **go-site.** GO's metadata repository on GitHub. SABE reads `metadata/users.yaml` for
 authorization and six other metadata files for rule data.
@@ -113,10 +114,12 @@ a reader that resolved it just before an activation can finish.
 each snapshot and authorization refresh (`READER_VERSIONS` in `domain/snapshots.py`).
 Raising it makes the next refresh read an unchanged document again.
 
-**Unchanged.** A refresh is unchanged when the active snapshot, or for authorization
-the latest refresh, already holds the same content: the same source type, locator,
-checksum, and reader version, and for an ontology the same prefixes and closure
-predicates. A new commit with identical bytes is unchanged. The job result records
+**Unchanged.** A refresh is unchanged when the active snapshot, or for authorization the
+latest refresh, already holds the same content: the same source type, locator, checksum,
+and reader version, and for an ontology the same prefixes and closure predicates. A new
+commit with identical bytes is unchanged. An entity refresh is never unchanged when its
+active snapshot's rows were checked with another schema package version or the
+snapshot's activation rejected a row as a collision. The job result records
 `"unchanged": true`.
 
 **Prune.** Delete the data of snapshots that are neither active nor a predecessor. Every
@@ -156,6 +159,12 @@ valid annotations, then publishes them, replacing the group's annotations, versi
 comments, and change sets. Both happen in the job's transaction. Its progress reports
 the phases `staging` and `publishing`.
 
+**Rejected row.** A GPI or GPAD data row that a refresh did not load: it could not be
+read, failed the schema, or, in a GPI file, lists an identifier that another row also
+lists or that another source's catalog has active. The refresh loads the other rows
+and reports each rejected row's line number, code, and reason. See
+[Rejected rows](refresh-infrastructure.md#rejected-rows).
+
 **Cutover.** A final GPAD import that moves a group to `sabe_managed`. It requires every
 record in the file to be importable, and it starts only through the admin API.
 
@@ -183,7 +192,7 @@ annotation's list of issues in a report. See
 [Reports](annotation-validation.md#reports).
 
 **Failure code.** The machine-readable reason a job failed, such as `invalid_document`
-or `catalog_collision`, stored in the job's progress. Every job type can fail with
+or `no_valid_rows`, stored in the job's progress. Every job type can fail with
 `dispatch_failed`; annotation scan jobs can also fail with `abandoned`. See
 [The job record](jobs.md#the-job-record).
 
