@@ -11,16 +11,21 @@ shared by every kind and need neither HTTP nor a database.
 from __future__ import annotations
 
 import base64
+import heapq
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
+
+from pydantic import Field
 
 from standard_annotation_backend.domain.errors import InvalidInputError
 from standard_annotation_backend.domain.jobs import FollowUpJob, JobFailureCode, JobType
+from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.domain.validation import ValidationIssue
 
 SOURCE_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
@@ -220,7 +225,7 @@ def refresh_failure_message(kind: RefreshKindName | None) -> str:
 
 
 MAX_REPORTED_ISSUES = 100
-"""Maximum number of validation issues stored with one failed refresh job."""
+"""Maximum number of validation issues or rejected rows listed for one refresh job."""
 
 
 def validation_failure_details(issues: Sequence[ValidationIssue]) -> dict[str, object]:
@@ -241,6 +246,115 @@ def validation_failure_details(issues: Sequence[ValidationIssue]) -> dict[str, o
             for issue in issues[:MAX_REPORTED_ISSUES]
         ],
     }
+
+
+MAX_REJECTION_REASON_LENGTH = 1000
+"""Maximum length, in characters, of the `reason` stored for one rejected row.
+
+The message stored for an invalid GPI or GPAD header has the same limit. Both can
+repeat values from the source file, so one oversized field could otherwise put
+megabytes into a job record, its audit event, and every API response that returns
+the job.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class RowRejection:
+    """Describe one data row of a GPI or GPAD file that a refresh did not load.
+
+    Attributes:
+        line_number: One-based line number in the source file.
+        code: Why the row was rejected. `syntax`, `field-count`, and
+            `validation` mean the row could not be read or failed schema
+            validation. A GPI row can also be rejected as `duplicate`, when
+            another row lists the same `db_object_id`, or `collision`, when
+            another source has that `db_object_id` active.
+        reason: Short explanation, at most 1,000 characters.
+    """
+
+    line_number: Annotated[int, Field(ge=0)]
+    code: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class RejectionReport:
+    """Summarize every row a GPI or GPAD refresh rejected.
+
+    Attributes:
+        issue_count: Number of rejected rows.
+        by_code: Number of rejected rows for each code.
+        issues: The rejected rows with the lowest line numbers, at most 100.
+    """
+
+    issue_count: Annotated[int, Field(ge=0)]
+    by_code: Mapping[str, Annotated[int, Field(ge=0)]]
+    issues: tuple[RowRejection, ...]
+
+
+class RejectionReportBuilder:
+    """Build a `RejectionReport` from rejections added one at a time.
+
+    Every rejection is counted, but only the 100 with the lowest line numbers
+    are kept, so a file with millions of bad rows uses little memory.
+
+    Rejections may be added in any line order, and the report still lists the
+    lowest lines. Rejections from the same line keep the order in which they were
+    added.
+    """
+
+    def __init__(self) -> None:
+        self._issue_count = 0
+        self._by_code: Counter[str] = Counter()
+        # The kept rejections, keyed by negated (line number, arrival). `heapq`
+        # is a min-heap, so negating the keys puts the highest line kept (and,
+        # within a line, the latest arrival) at `self._kept[0]`: the entry to
+        # evict when a rejection with a lower line number arrives.
+        self._kept: list[tuple[int, int, RowRejection]] = []
+
+    def add(self, rejection: RowRejection) -> None:
+        """Count one rejection and keep it if it is among the 100 lowest lines."""
+        self._issue_count += 1
+        self._by_code[rejection.code] += 1
+        entry = (-rejection.line_number, -self._issue_count, rejection)
+        if len(self._kept) < MAX_REPORTED_ISSUES:
+            heapq.heappush(self._kept, entry)
+        elif entry[:2] > self._kept[0][:2]:
+            heapq.heapreplace(self._kept, entry)
+
+    def build(self) -> RejectionReport:
+        """Return the report of everything added so far."""
+        kept = sorted(self._kept, key=lambda entry: (-entry[0], -entry[1]))
+        return RejectionReport(
+            issue_count=self._issue_count,
+            by_code=dict(sorted(self._by_code.items())),
+            issues=tuple(entry[2] for entry in kept),
+        )
+
+
+STORED_REJECTION_REPORT = StoredJson(RejectionReport, label="rejection report")
+
+
+class NoValidRowsError(TerminalRefreshError):
+    """Report a GPI or GPAD file with no row that can be loaded.
+
+    Loading it would replace the source's data with nothing, which usually means
+    a wrong or broken file, so the refresh fails and the previous data stays. A
+    file with no data rows at all fails the same way. The job's failure details
+    are the rejection report.
+
+    Attributes:
+        report: The rows that were rejected.
+    """
+
+    failure_code = JobFailureCode.NO_VALID_ROWS
+
+    def __init__(self, report: RejectionReport) -> None:
+        self.report = report
+        super().__init__(
+            "source file has no valid rows",
+            failure_details=STORED_REJECTION_REPORT.dump(report),
+        )
 
 
 def job_source_key(parameters: Mapping[str, object]) -> str:

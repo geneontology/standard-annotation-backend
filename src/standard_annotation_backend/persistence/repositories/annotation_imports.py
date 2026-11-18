@@ -9,26 +9,29 @@ from datetime import UTC, datetime
 from itertools import batched
 from uuid import UUID
 
+from go_standard_annotation_schema.io import Record
 from sqlalchemy import delete, false, insert, literal, null, or_, select
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.annotation_management import (
-    STORED_REJECTION_REPORT,
     AnnotationImportConflictError,
     AnnotationManagementMode,
     GroupSabeManagedError,
-    RejectionReport,
 )
 from standard_annotation_backend.domain.annotations import (
+    Annotation,
     AnnotationOrigin,
     AnnotationStatus,
     ChangeSource,
     new_annotation_id,
 )
-from standard_annotation_backend.domain.refresh import SourceProvenance
-from standard_annotation_backend.gpad.parser import ParsedAnnotation
+from standard_annotation_backend.domain.refresh import (
+    STORED_REJECTION_REPORT,
+    RejectionReport,
+    SourceProvenance,
+)
 from standard_annotation_backend.persistence.annotation_data import (
     prepare_annotation_for_persistence,
 )
@@ -114,7 +117,7 @@ class AnnotationImportRepository:
         )
 
     def stage_annotations(
-        self, job_id: UUID, annotations: Sequence[ParsedAnnotation]
+        self, job_id: UUID, annotations: Sequence[Record[Annotation]]
     ) -> None:
         """Store validated annotations for a job until it publishes.
 
@@ -128,7 +131,7 @@ class AnnotationImportRepository:
         references: list[dict[str, object]] = []
         for parsed in annotations:
             annotation_id = new_annotation_id()
-            data = prepare_annotation_for_persistence(parsed.annotation)
+            data = prepare_annotation_for_persistence(parsed.item)
             keys = {"job_id": job_id, "annotation_id": annotation_id}
             staged.append(
                 {**keys, "line_number": parsed.line_number, **data.column_values()}

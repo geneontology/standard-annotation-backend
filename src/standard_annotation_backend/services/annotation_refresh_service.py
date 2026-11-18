@@ -13,35 +13,33 @@ from datetime import UTC, datetime
 from itertools import batched
 from uuid import UUID
 
+from go_standard_annotation_schema.io import GpadReader, Record
+
 from standard_annotation_backend.domain.annotation_management import (
-    STORED_REJECTION_REPORT,
     AnnotationManagementMode,
     AnnotationRefreshResult,
     AnnotationRefreshUnchanged,
     CutoverRejectedError,
     GroupSabeManagedError,
-    NoValidAnnotationsError,
-    RejectionReportBuilder,
 )
+from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.jobs import (
     FollowUpJob,
-    JobFailureCode,
     JobType,
     ProgressReporter,
 )
 from standard_annotation_backend.domain.refresh import (
+    STORED_REJECTION_REPORT,
+    NoValidRowsError,
     RefreshKindName,
     RefreshOutcome,
+    RejectionReportBuilder,
+    RowRejection,
     SourceDocument,
     SourceProvenance,
-    TerminalRefreshError,
 )
 from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
-from standard_annotation_backend.gpad.parser import (
-    GpadDocument,
-    GpadHeaderError,
-    ParsedAnnotation,
-)
+from standard_annotation_backend.exchange_files import ExchangeDocument
 from standard_annotation_backend.persistence.models import AnnotationImportRecord
 from standard_annotation_backend.persistence.repositories.annotation_imports import (
     AnnotationImportRepository,
@@ -101,8 +99,9 @@ class AnnotationRefreshService:
         Raises:
             GroupSabeManagedError: If the group is SABE-managed.
             SourceError: If the bytes are not valid gzip or UTF-8.
-            TerminalRefreshError: With `header`, `no_valid_annotations`, or
-                `cutover_rejected`.
+            ExchangeHeaderError: If the GPAD header is invalid.
+            NoValidRowsError: If no annotation can be staged.
+            CutoverRejectedError: If the job is a cutover and any row was rejected.
         """
         is_cutover = job.job_type is JobType.ANNOTATION_CUTOVER
         group_key = self._sources.annotation_group(document.source_key)
@@ -120,33 +119,17 @@ class AnnotationRefreshService:
             raise GroupSabeManagedError(group_key)
         text = decode_source_text(document.content)
         report("staging")
-        try:
-            staged = _stage(
-                imports,
-                job_id=job.job_id,
-                source_key=document.source_key,
-                group_key=group_key,
-                is_cutover=is_cutover,
-                provenance=document.provenance,
-                text=text,
-            )
-            report("publishing", {"records_rejected": staged.report.issue_count})
-            record = imports.publish(staged, actor_id=job.requested_by)
-        except GpadHeaderError as error:
-            raise TerminalRefreshError(
-                failure_code=JobFailureCode.HEADER,
-                failure_details={"message": error.message},
-            ) from None
-        except NoValidAnnotationsError as error:
-            raise TerminalRefreshError(
-                failure_code=JobFailureCode.NO_VALID_ANNOTATIONS,
-                failure_details=STORED_REJECTION_REPORT.dump(error.report),
-            ) from None
-        except CutoverRejectedError as error:
-            raise TerminalRefreshError(
-                failure_code=JobFailureCode.CUTOVER_REJECTED,
-                failure_details=STORED_REJECTION_REPORT.dump(error.report),
-            ) from None
+        staged = _stage(
+            imports,
+            job_id=job.job_id,
+            source_key=document.source_key,
+            group_key=group_key,
+            is_cutover=is_cutover,
+            provenance=document.provenance,
+            text=text,
+        )
+        report("publishing", {"records_rejected": staged.report.issue_count})
+        record = imports.publish(staged, actor_id=job.requested_by)
         result = _import_result(record)
         AuditService(unit_of_work.audit).record_annotation_import_published(
             is_cutover=result.is_cutover,
@@ -186,27 +169,27 @@ def _stage(
     """Read a GPAD document and stage its valid annotations for publication.
 
     Raises:
-        GpadHeaderError: If the header is invalid.
-        NoValidAnnotationsError: If no annotation could be staged.
-        CutoverRejectedError: If `is_cutover` and any record was rejected.
+        ExchangeHeaderError: If the header is invalid.
+        NoValidRowsError: If no annotation could be staged.
+        CutoverRejectedError: If `is_cutover` and any row was rejected.
     """
     builder = RejectionReportBuilder()
     staged = 0
-    with GpadDocument(text) as document:
+    with ExchangeDocument(GpadReader, text) as document:
         for batch in batched(document.items(), _STAGING_BATCH_SIZE, strict=False):
-            parsed: list[ParsedAnnotation] = []
+            parsed: list[Record[Annotation]] = []
             for item in batch:
-                if isinstance(item, ParsedAnnotation):
-                    parsed.append(item)
-                else:
+                if isinstance(item, RowRejection):
                     builder.add(item)
+                else:
+                    parsed.append(item)
             imports.stage_annotations(job_id, parsed)
             staged += len(parsed)
         metadata = document.metadata
         data_rows = document.data_rows
     report = builder.build()
     if staged == 0:
-        raise NoValidAnnotationsError(report)
+        raise NoValidRowsError(report)
     if is_cutover and report.issue_count:
         raise CutoverRejectedError(report)
     return StagedImport(

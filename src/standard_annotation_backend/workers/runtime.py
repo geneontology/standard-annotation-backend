@@ -79,7 +79,7 @@ def create_job_executors(
                 kinds=(
                     AuthorizationRefreshService(),
                     RulesRefreshService(ontologies),
-                    EntityRefreshService(sources),
+                    EntityRefreshService(),
                     OntologyRefreshService(sources),
                     AnnotationRefreshService(sources),
                 ),

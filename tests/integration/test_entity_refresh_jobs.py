@@ -20,11 +20,12 @@ from refresh_helpers import (
     FakeFetchers,
     apply_in_transaction,
     build_runner,
+    gpi_bytes,
     sources_with_entities,
     start_job,
 )
 from seeding import create_job
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.audit import AuditAction
@@ -35,15 +36,13 @@ from standard_annotation_backend.domain.refresh import (
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
+    EntitySnapshotDetailRecord,
     ReferenceSnapshotRecord,
     StoredEntityRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh import runner as refresh_runner
 from standard_annotation_backend.refresh.fetchers import SourceError
-from standard_annotation_backend.services import (
-    entity_refresh_service as entity_refresh,
-)
 from standard_annotation_backend.services.entity_refresh_service import (
     EntityRefreshService,
 )
@@ -51,12 +50,20 @@ from standard_annotation_backend.services.job_executors import JobExecutors
 from standard_annotation_backend.services.job_service import JobService
 
 SOURCE_URL = "https://example.org/mgi.gpi"
-SOURCE_TEXT = (
-    "!gpi-version: 2.0\n"
-    "!generated-by: WorkerTest\n"
-    "!date-generated: 2026-09-29\n"
-    "MGI:1\tGene1\tProtein\t\tSO:0001217\tNCBITaxon:9606\t\tMGI:1\t\t\t\n"
+GPI_HEADER = (
+    "!gpi-version: 2.0\n!generated-by: WorkerTest\n!date-generated: 2026-09-29\n"
 )
+
+
+def _row(identifier: str, symbol: str = "Gene") -> str:
+    """Return one GPI data row for `identifier` with the given symbol."""
+    return (
+        f"{identifier}\t{symbol}\tProtein\t\tSO:0001217\tNCBITaxon:9606\t\t"
+        f"{identifier}\t\t\t\n"
+    )
+
+
+SOURCE_TEXT = GPI_HEADER + _row("MGI:1", "Gene1")
 SOURCE_BYTES = SOURCE_TEXT.encode()
 SOURCE_SHA = sha256(SOURCE_BYTES).hexdigest()
 FAILED = "Entity refresh failed"
@@ -160,14 +167,13 @@ def _memberships(session_factory: sessionmaker[Session]) -> list[tuple[str, str]
 
 
 def _record_error_logs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Capture error logs from the runner and the entity kind as rendered text."""
+    """Capture error logs from the refresh runner as rendered text."""
     records: list[str] = []
 
     def record_log(message: str, *args: object) -> None:
         records.append(message % args)
 
     monkeypatch.setattr(refresh_runner.logger, "error", record_log)
-    monkeypatch.setattr(entity_refresh.logger, "error", record_log)
     return records
 
 
@@ -178,9 +184,9 @@ def jobs(unit_of_work_factory: UnitOfWorkFactory) -> JobService:
 
 
 @pytest.fixture
-def entity_service(unit_of_work_factory: UnitOfWorkFactory) -> EntityRefreshService:
+def entity_service() -> EntityRefreshService:
     """Provide the real entity refresh service."""
-    return EntityRefreshService(TEST_SOURCES)
+    return EntityRefreshService()
 
 
 @pytest.fixture
@@ -201,7 +207,7 @@ def test_entity_refresh_job_records_progress_and_result(
     runner_for: Callable[..., JobExecutors],
     integration_api_client: TestClient,
 ) -> None:
-    """A successful refresh records its final progress and result.
+    """A successful refresh records its final progress and every result field.
 
     The job status endpoint returns the same result.
     """
@@ -215,26 +221,36 @@ def test_entity_refresh_job_records_progress_and_result(
     assert stored.parameters == {"source_key": "mgi"}
     assert stored.progress == {
         "phase": "completed",
-        "source_record_count": 1,
-        "active_identifier_count": 1,
+        "data_rows": 1,
+        "entity_count": 1,
+        "records_rejected": 0,
         "added_count": 1,
         "retained_count": 0,
         "removed_count": 0,
-        "warning_count": 0,
         "unchanged": False,
     }
     assert stored.warnings == []
     assert stored.result is not None
-    assert stored.result["unchanged"] is False
-    assert stored.result["source_checksum"] == SOURCE_SHA
-    assert stored.result["source_locator"] == SOURCE_URL
-    assert stored.result["source_key"] == "mgi"
-    assert stored.result["warning_count"] == 0
+    assert stored.result == {
+        "snapshot_id": stored.result["snapshot_id"],
+        "source_key": "mgi",
+        "source_type": "https",
+        "source_locator": SOURCE_URL,
+        "source_revision": None,
+        "source_checksum": SOURCE_SHA,
+        "data_rows": 1,
+        "entity_count": 1,
+        "records_rejected": 0,
+        "added_count": 1,
+        "retained_count": 0,
+        "removed_count": 0,
+        "rejection_report": {"issue_count": 0, "by_code": {}, "issues": []},
+        "unchanged": False,
+    }
     response = integration_api_client.get(f"/admin/jobs/{job_id}")
     assert response.status_code == status.HTTP_200_OK
     assert response.json()["status"] == "succeeded"
     assert response.json()["result"] == stored.result
-    assert response.json()["result"]["warnings"] == []
     assert fetchers.calls == ["mgi"]
 
 
@@ -250,36 +266,30 @@ def test_gzip_compressed_source_stores_the_same_catalog(
 
     stored = _read_job(jobs, job_id)
     assert stored.status == JobStatus.SUCCEEDED
-    assert stored.progress["source_record_count"] == 1
+    assert stored.progress["entity_count"] == 1
     assert stored.result is not None
     assert stored.result["source_checksum"] != SOURCE_SHA
 
 
-@pytest.mark.parametrize(
-    "failure_code", ["timeout", "header", "row_validation", "catalog_collision"]
-)
+@pytest.mark.parametrize("failure_code", ["timeout", "header", "no_valid_rows"])
 def test_entity_refresh_domain_failure_is_terminal_and_stores_nothing(
     unit_of_work_factory: UnitOfWorkFactory,
     monkeypatch: pytest.MonkeyPatch,
     jobs: JobService,
     runner_for: Callable[..., JobExecutors],
     session_factory: sessionmaker[Session],
-    seed_active_subjects: Callable[..., None],
     integration_api_client: TestClient,
     failure_code: str,
 ) -> None:
     """Expected refresh failures fail the job with a generic message and a code.
 
-    The failures are an unreachable source, an empty download, a row containing a
-    NUL character, and an identifier that another source already supplies. The job
-    stores no snapshot, the active catalogs are kept, and the logs omit source
-    details such as identifiers, row content, and checksums.
+    The failures are an unreachable source, an empty download, and a file whose only
+    row contains a NUL character. The job stores no snapshot, the active catalogs
+    are kept, and the logs omit source details such as identifiers, row content,
+    and checksums.
     """
     log_records = _record_error_logs(monkeypatch)
-    if failure_code == "catalog_collision":
-        seed_active_subjects("MGI:1")
-    else:
-        runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
+    runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
     memberships_before = _memberships(session_factory)
     content = SOURCE_BYTES
     fetched: bytes | Exception = content
@@ -287,7 +297,7 @@ def test_entity_refresh_domain_failure_is_terminal_and_stores_nothing(
         fetched = SourceError(JobFailureCode.TIMEOUT)
     elif failure_code == "header":
         fetched = content = b""
-    elif failure_code == "row_validation":
+    elif failure_code == "no_valid_rows":
         fetched = content = SOURCE_TEXT.replace("Protein", "Pro\x00tein").encode()
     job_id = _create_job(unit_of_work_factory)
 
@@ -316,63 +326,225 @@ def test_entity_refresh_domain_failure_is_terminal_and_stores_nothing(
     assert "example.org" not in logs
 
 
-def test_invalid_rows_are_reported_on_the_failed_job(
+def test_invalid_and_repeated_rows_are_rejected_and_the_rest_activated(
     unit_of_work_factory: UnitOfWorkFactory,
-    monkeypatch: pytest.MonkeyPatch,
+    runner_for: Callable[..., JobExecutors],
+    session_factory: sessionmaker[Session],
+    integration_api_client: TestClient,
+) -> None:
+    """A file with rejected rows activates its other rows and reports each rejection.
+
+    An invalid row for an identifier that a valid row also lists does not make the
+    valid row a repeat. A valid identifier on two lines is rejected on both, so
+    neither becomes active. The activated rows replace the previous catalog, and
+    the audit event counts the rejected rows.
+    """
+    runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
+    text = (
+        SOURCE_TEXT
+        + _row("MGI:2")
+        + _row("MGI:2", symbol="A raw rejected symbol")
+        + "MGI:4\tshort\n"
+        + _row("MGI:5")
+        + _row("MGI:5", symbol="Other")
+    )
+    job_id = _create_job(unit_of_work_factory)
+
+    runner_for(_fetchers(text.encode())).run(job_id)
+
+    body = integration_api_client.get(f"/admin/jobs/{job_id}").json()
+    assert body["status"] == "succeeded"
+    assert (body["progress"]["data_rows"], body["progress"]["entity_count"]) == (6, 2)
+    assert body["result"]["records_rejected"] == 4
+    report = body["result"]["rejection_report"]
+    assert report["issue_count"] == 4
+    assert report["by_code"] == {"duplicate": 2, "field-count": 1, "validation": 1}
+    assert [(issue["line_number"], issue["code"]) for issue in report["issues"]] == [
+        (6, "validation"),
+        (7, "field-count"),
+        (8, "duplicate"),
+        (9, "duplicate"),
+    ]
+    assert report["issues"][0]["reason"].startswith("db_object_symbol:")
+    assert report["issues"][1]["reason"] == "expected 11 fields, found 2"
+    assert report["issues"][2]["reason"] == "db_object_id also appears on line 9"
+    assert report["issues"][3]["reason"] == "db_object_id also appears on line 8"
+    assert _memberships(session_factory) == [("MGI:1", "mgi"), ("MGI:2", "mgi")]
+    [audit] = _audit_events(session_factory, AuditAction.ENTITY_REFRESHED, job_id)
+    assert audit.details["records_rejected"] == 4
+
+
+def test_rows_another_source_has_active_are_rejected_as_collisions(
+    unit_of_work_factory: UnitOfWorkFactory,
+    runner_for: Callable[..., JobExecutors],
+    session_factory: sessionmaker[Session],
+    integration_api_client: TestClient,
+) -> None:
+    """A row whose identifier another source has active is rejected; the rest activate.
+
+    The source that activated the identifier first keeps it, and the result names
+    that source in the rejected row's reason.
+    """
+    rgd = _create_job(unit_of_work_factory, source="rgd")
+    runner_for(FakeFetchers({"rgd": gpi_bytes("MGI:1", "RGD:1")})).run(rgd)
+    job_id = _create_job(unit_of_work_factory)
+
+    runner_for(_fetchers((SOURCE_TEXT + _row("MGI:2")).encode())).run(job_id)
+
+    body = integration_api_client.get(f"/admin/jobs/{job_id}").json()
+    assert body["status"] == "succeeded"
+    assert body["progress"]["entity_count"] == 1
+    assert body["progress"]["records_rejected"] == 1
+    assert body["result"]["rejection_report"]["issues"] == [
+        {
+            "line_number": 4,
+            "code": "collision",
+            "reason": "db_object_id is active in source rgd",
+        }
+    ]
+    assert _memberships(session_factory) == [
+        ("MGI:1", "rgd"),
+        ("MGI:2", "mgi"),
+        ("RGD:1", "rgd"),
+    ]
+
+
+def test_a_file_whose_rows_all_collide_fails_and_keeps_its_catalog(
+    unit_of_work_factory: UnitOfWorkFactory,
+    jobs: JobService,
+    runner_for: Callable[..., JobExecutors],
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A file whose every valid row collides fails with `no_valid_rows`.
+
+    The job stores no snapshot, the source keeps its previous catalog, and the
+    failure details report the collision.
+    """
+    runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
+    rgd = _create_job(unit_of_work_factory, source="rgd")
+    runner_for(FakeFetchers({"rgd": gpi_bytes("RGD:1")})).run(rgd)
+    job_id = _create_job(unit_of_work_factory, source="rgd")
+
+    runner_for(FakeFetchers({"rgd": gpi_bytes("MGI:1")})).run(job_id)
+
+    stored = _read_job(jobs, job_id)
+    assert stored.status == JobStatus.FAILED
+    assert stored.progress["failure_code"] == "no_valid_rows"
+    details = cast(dict[str, Any], stored.progress["failure_details"])
+    assert details["by_code"] == {"collision": 1}
+    assert _snapshot_count(session_factory, job_id) == 0
+    assert _memberships(session_factory) == [("MGI:1", "mgi"), ("RGD:1", "rgd")]
+
+
+def test_a_file_that_had_collisions_is_read_again_when_the_other_source_drops_them(
+    unit_of_work_factory: UnitOfWorkFactory,
+    runner_for: Callable[..., JobExecutors],
+    session_factory: sessionmaker[Session],
+    integration_api_client: TestClient,
+) -> None:
+    """A refresh of an unchanged file activates identifiers the other source dropped.
+
+    A collision depends on the other source's catalog rather than on the file, so
+    a file whose active snapshot rejected a row as a collision is never reported
+    as unchanged.
+    """
+    rgd = _create_job(unit_of_work_factory, source="rgd")
+    runner_for(FakeFetchers({"rgd": gpi_bytes("MGI:1", "RGD:1")})).run(rgd)
+    mgi_runner = runner_for(_fetchers((SOURCE_TEXT + _row("MGI:2")).encode()))
+    mgi_runner.run(_create_job(unit_of_work_factory))
+    rgd_again = _create_job(unit_of_work_factory, source="rgd")
+    runner_for(FakeFetchers({"rgd": gpi_bytes("RGD:1")})).run(rgd_again)
+    job_id = _create_job(unit_of_work_factory)
+
+    mgi_runner.run(job_id)
+
+    body = integration_api_client.get(f"/admin/jobs/{job_id}").json()
+    assert body["status"] == "succeeded"
+    assert body["result"]["unchanged"] is False
+    assert body["result"]["records_rejected"] == 0
+    assert _memberships(session_factory) == [
+        ("MGI:1", "mgi"),
+        ("MGI:2", "mgi"),
+        ("RGD:1", "rgd"),
+    ]
+
+
+def test_an_unchanged_file_is_read_again_after_a_schema_package_upgrade(
+    unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., JobExecutors],
     session_factory: sessionmaker[Session],
     integration_api_client: TestClient,
 ) -> None:
-    """A file with invalid rows fails, and the job shows which rows and why.
+    """A file whose rows were checked with another schema version is read again.
 
-    The job's progress lists every invalid row with its line number and reason,
-    the failure audit event lists the first 10, the log names the first 5 rows
-    without their rejected values, and the previous catalog stays active.
+    The installed schema package may accept rows that an older one rejected, so
+    the refresh activates a new snapshot instead of reporting the file unchanged.
+    A refresh after that is unchanged and names the job that read the file again.
     """
-    log_records = _record_error_logs(monkeypatch)
+    runner = runner_for(_fetchers((SOURCE_TEXT + "MGI:9\tshort\n").encode()))
+    first = _create_job(unit_of_work_factory)
+    runner.run(first)
+    first_result = _read_job(jobs, first).result
+    assert first_result is not None
+    # Make the active snapshot look as if an older release had loaded it.
+    with session_factory.begin() as session:
+        session.execute(
+            update(EntitySnapshotDetailRecord)
+            .where(
+                EntitySnapshotDetailRecord.snapshot_id
+                == UUID(str(first_result["snapshot_id"]))
+            )
+            .values(schema_version="0.0.5")
+        )
+    second = _create_job(unit_of_work_factory)
+
+    runner.run(second)
+
+    body = integration_api_client.get(f"/admin/jobs/{second}").json()
+    assert body["status"] == "succeeded"
+    assert body["result"]["unchanged"] is False
+    assert body["result"]["snapshot_id"] != first_result["snapshot_id"]
+    assert body["result"]["records_rejected"] == 1
+    third = _create_job(unit_of_work_factory)
+    runner.run(third)
+    third_result = _read_job(jobs, third).result
+    assert third_result is not None
+    assert third_result["unchanged"] is True
+    assert third_result["snapshot_job_id"] == str(second)
+
+
+def test_a_file_without_valid_rows_reports_them_on_the_failed_job(
+    unit_of_work_factory: UnitOfWorkFactory,
+    runner_for: Callable[..., JobExecutors],
+    session_factory: sessionmaker[Session],
+    integration_api_client: TestClient,
+) -> None:
+    """A file whose every row is rejected fails, and the job lists the rows.
+
+    The failure details count all 12 rejected rows and list them by line, the
+    failure audit event lists the first 10, and the previous catalog stays active.
+    """
     runner_for(_fetchers()).run(_create_job(unit_of_work_factory))
     memberships_before = _memberships(session_factory)
-    bad_rows = (
-        "MGI:99\tA raw rejected symbol\tProtein\t\tSO:0001217\tNCBITaxon:9606\t\t"
-        "MGI:99\t\t\t\n"
-    ) + "".join(f"MGI:{index}\tshort\n" for index in range(100, 111))
+    text = GPI_HEADER + "".join(f"MGI:{index}\tshort\n" for index in range(100, 112))
     job_id = _create_job(unit_of_work_factory)
 
-    runner_for(_fetchers((SOURCE_TEXT + bad_rows).encode())).run(job_id)
+    runner_for(_fetchers(text.encode())).run(job_id)
 
-    response = integration_api_client.get(f"/admin/jobs/{job_id}")
-    assert response.status_code == status.HTTP_200_OK
-    body = response.json()
+    body = integration_api_client.get(f"/admin/jobs/{job_id}").json()
     assert body["status"] == "failed"
     assert body["error"] == FAILED
-    assert body["progress"]["failure_code"] == "row_validation"
+    assert body["progress"]["failure_code"] == "no_valid_rows"
     details = body["progress"]["failure_details"]
     assert details["issue_count"] == 12
-    assert [issue["line_number"] for issue in details["issues"]] == list(range(5, 17))
-    [field] = details["issues"][0]["fields"]
-    assert (field["field"], field["value"]) == (
-        "db_object_symbol",
-        "A raw rejected symbol",
-    )
-    assert details["issues"][1] == {
-        "line_number": 6,
-        "category": "field-count",
-        "message": "expected 11 fields, found 2",
-        "fields": [],
-    }
+    assert details["by_code"] == {"field-count": 12}
+    assert [issue["line_number"] for issue in details["issues"]] == list(range(4, 16))
     [audit] = _audit_events(session_factory, AuditAction.JOB_FAILED, job_id)
-    assert audit.details["failure_code"] == "row_validation"
     audited = cast(dict[str, Any], audit.details["failure_details"])
     assert audited["issue_count"] == 12
     assert audited["issues"] == details["issues"][:10]
     assert _memberships(session_factory) == memberships_before
-    logs = "\n".join(log_records)
-    assert "issue_count=12" in logs
-    assert "line 5 validation: fields db_object_symbol" in logs
-    assert "line 6 field-count: expected 11 fields, found 2" in logs
-    assert "line 10 " not in logs
-    assert "A raw rejected symbol" not in logs
 
 
 @pytest.mark.parametrize(
@@ -401,16 +573,19 @@ def test_undecodable_download_fails_with_its_code(
     assert stored.progress == {"phase": "failed", "failure_code": code}
 
 
-def test_unchanged_source_reports_the_active_snapshot(
+def test_unchanged_source_reports_the_active_snapshot_and_its_job(
     unit_of_work_factory: UnitOfWorkFactory,
     jobs: JobService,
     runner_for: Callable[..., JobExecutors],
+    integration_api_client: TestClient,
 ) -> None:
-    """A source matching the active catalog by locator and content completes unchanged.
+    """A source matching the active catalog completes unchanged.
 
-    The job stores a result naming the active snapshot.
+    The result names the active snapshot and the job that activated it, and that
+    job's result lists the row that the file had rejected.
     """
-    runner = runner_for(_fetchers())
+    content = (SOURCE_TEXT + "MGI:9\tshort\n").encode()
+    runner = runner_for(_fetchers(content))
     first = _create_job(unit_of_work_factory)
     runner.run(first)
     first_result = _read_job(jobs, first).result
@@ -424,10 +599,16 @@ def test_unchanged_source_reports_the_active_snapshot(
     assert stored.result == {
         "source_key": "mgi",
         "snapshot_id": first_result["snapshot_id"],
-        "source_checksum": SOURCE_SHA,
+        "snapshot_job_id": str(first),
+        "source_checksum": sha256(content).hexdigest(),
         "unchanged": True,
     }
     assert stored.progress == {"phase": "completed", "unchanged": True}
+    activating = integration_api_client.get(f"/admin/jobs/{first}").json()
+    issues = activating["result"]["rejection_report"]["issues"]
+    assert [(issue["line_number"], issue["code"]) for issue in issues] == [
+        (5, "field-count")
+    ]
 
 
 @pytest.mark.parametrize("changed", ["url", "content"])

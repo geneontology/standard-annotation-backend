@@ -577,19 +577,22 @@ class RulesSnapshotDetailRecord(Base):
 
 
 class EntitySnapshotDetailRecord(Base):
-    """Store the format, header, and counts of an entity catalog snapshot.
+    """Store how an entity catalog snapshot's file was read and activated.
 
-    Kept after pruning.
+    Each row holds the file's format and header, the `go-standard-annotation-schema`
+    version that checked its rows (`schema_version`), and whether activation
+    rejected any row because another source's active catalog lists its identifier
+    (`rejected_collisions`). A later refresh of the same file reads it again,
+    instead of treating it as unchanged, when the installed schema version differs
+    or a collision was rejected, because either can change which rows are loaded.
+    Rows are kept after pruning. The job that activated the snapshot records its
+    counts and rejected rows.
     """
 
     __tablename__ = "entity_snapshot_detail"
     __table_args__ = (
         CheckConstraint(
             "jsonb_typeof(source_metadata) = 'object'", name="source_metadata_object"
-        ),
-        CheckConstraint(
-            "jsonb_typeof(record_statistics) = 'object'",
-            name="record_statistics_object",
         ),
     )
 
@@ -600,7 +603,8 @@ class EntitySnapshotDetailRecord(Base):
     )
     source_format: Mapped[str] = mapped_column(String(20))
     source_metadata: Mapped[dict[str, object]] = mapped_column(JSONB)
-    record_statistics: Mapped[dict[str, object]] = mapped_column(JSONB)
+    schema_version: Mapped[str] = mapped_column(Text)
+    rejected_collisions: Mapped[bool] = mapped_column(Boolean)
 
 
 class RuleDataRecord(Base):
@@ -629,8 +633,8 @@ class StoredEntityRecord(Base):
     retiring a catalog must be able to remove an identifier while existing
     annotations and their version history stay unchanged; a later QC report
     lists such annotations as `unknown_entity`. An identifier is active in at
-    most one source: activating a catalog fails if another source's active
-    catalog lists one of its identifiers.
+    most one source: before a catalog is activated, its rows whose identifier
+    another source's active catalog lists are removed and reported.
 
     The entity's taxon and type are copied out of `entity` into their own columns,
     so validation can read them without parsing the stored entity. A check keeps

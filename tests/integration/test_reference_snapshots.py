@@ -25,7 +25,6 @@ from refresh_helpers import (
     obo,
     rule_files,
     source_document,
-    sources_with_entities,
     start_job,
 )
 from seeding import SHIPPED_SOURCES, active_snapshot
@@ -192,17 +191,7 @@ def test_a_new_revision_of_an_entity_file_with_identical_bytes_is_unchanged(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
     """A new commit of an entity file with the same bytes is not loaded again."""
-    sources = sources_with_entities(
-        {
-            "mgi": {
-                "type": "github",
-                "repository": "example/entities",
-                "ref": "main",
-                "path": "mgi.gpi",
-            }
-        }
-    )
-    service = EntityRefreshService(sources)
+    service = EntityRefreshService()
     content = gpi_bytes("MGI:MGI:1")
 
     def document(revision: str) -> SourceDocument:
@@ -244,13 +233,14 @@ def test_a_higher_reader_version_loads_the_same_document_again(
 ) -> None:
     """A release with a newer reader for a kind reloads that kind's unchanged file."""
     _run(database_engine, unit_of_work_factory, job_type, source_key, content(1))
+    kind = RefreshKindName(KINDS[job_type].value)
     monkeypatch.setattr(
         snapshot_vocabulary,
         "READER_VERSIONS",
         MappingProxyType(
             {
                 **snapshot_vocabulary.READER_VERSIONS,
-                RefreshKindName(KINDS[job_type].value): 2,
+                kind: snapshot_vocabulary.READER_VERSIONS[kind] + 1,
             }
         ),
     )

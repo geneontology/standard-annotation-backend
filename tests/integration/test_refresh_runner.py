@@ -97,7 +97,7 @@ CASES = {
         source_key="mgi",
         content=(FIXTURES / "gpi" / "minimal.gpi").read_bytes(),
         invalid_content=(FIXTURES / "gpi" / "invalid-row.gpi").read_bytes(),
-        invalid_code=JobFailureCode.ROW_VALIDATION,
+        invalid_code=JobFailureCode.NO_VALID_ROWS,
         applied_action=AuditAction.ENTITY_REFRESHED,
         public_error="Entity refresh failed",
     ),

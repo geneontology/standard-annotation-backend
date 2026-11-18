@@ -3,7 +3,13 @@
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
-from refresh_helpers import TEST_ONTOLOGIES, TEST_SOURCES
+from refresh_helpers import (
+    TEST_ONTOLOGIES,
+    apply_in_transaction,
+    source_document,
+    source_gpi,
+    start_job,
+)
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 from test_change_set_workflows import PROPOSER, REVIEWER
@@ -13,6 +19,7 @@ from standard_annotation_backend.domain.annotations import (
     Annotation,
     InvalidAnnotationPayloadError,
 )
+from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationVersionRecord,
@@ -31,6 +38,11 @@ UNKNOWN_ISSUE = {
     "message": "db_object_id is not an active entity in any entity catalog",
     "type": "unknown_entity",
 }
+OTHER_ID = "UniProtKB:P00001"
+"""Listed instead of the subject when a test removes the subject from its catalog.
+
+A catalog must list at least one valid row, so a refresh cannot empty one.
+"""
 
 pytestmark = pytest.mark.usefixtures("reference_data")
 
@@ -71,7 +83,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
     the same change set be accepted.
     """
     client = integration_api_client
-    imports = EntityRefreshService(TEST_SOURCES)
+    imports = EntityRefreshService()
     refresh_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
     payload = writable_annotation.model_dump(mode="json")
     to_unknown = operation.endswith("_to_unknown")
@@ -113,7 +125,7 @@ def test_unknown_subject_returns_exact_error_without_writes(
         if not to_unknown:
             assert client.post(f"{proposal_path}/preview").json()["can_accept"]
     if not to_unknown:
-        refresh_catalog(imports, unit_of_work_factory)
+        refresh_catalog(imports, unit_of_work_factory, OTHER_ID)
     before = _counts(session_factory)
     if operation == "create":
         response = client.post(
@@ -158,7 +170,7 @@ def test_deletion_succeeds_after_subject_removal(
 
     The deleted annotation keeps its stored data and gains a new version.
     """
-    imports = EntityRefreshService(TEST_SOURCES)
+    imports = EntityRefreshService()
     refresh_catalog(imports, unit_of_work_factory, writable_annotation.db_object_id)
     annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
     created = annotations.create(
@@ -174,7 +186,7 @@ def test_deletion_succeeds_after_subject_removal(
         if proposal_delete
         else None
     )
-    refresh_catalog(imports, unit_of_work_factory)
+    refresh_catalog(imports, unit_of_work_factory, OTHER_ID)
     if proposal is not None:
         assert changes.accept(proposal.change_set_id, context=REVIEWER).is_deleted
     else:
@@ -199,7 +211,7 @@ def test_only_the_exact_active_identifier_is_accepted(
     identifier the catalog lists is accepted.
     """
     refresh_catalog(
-        EntityRefreshService(TEST_SOURCES),
+        EntityRefreshService(),
         unit_of_work_factory,
         writable_annotation.db_object_id,
     )
@@ -218,6 +230,47 @@ def test_only_the_exact_active_identifier_is_accepted(
         )
     assert [issue["type"] for issue in cased.value.errors] == ["unknown_entity"]
     assert _counts(session_factory) == before
+    assert (
+        annotations.create(
+            payload=payload, owning_group_id="other-group", context=PROPOSER
+        ).version
+        == 1
+    )
+
+
+def test_a_subject_whose_gpi_row_was_rejected_cannot_be_annotated(
+    unit_of_work_factory: UnitOfWorkFactory,
+    writable_annotation: Annotation,
+) -> None:
+    """A subject whose GPI row was rejected is unknown until a file lists it validly.
+
+    The refresh activates the file's other row, so a create for the rejected
+    subject fails with only `unknown_entity`. After a refresh with a valid row for
+    the subject, the same create succeeds.
+    """
+    imports = EntityRefreshService()
+    subject = writable_annotation.db_object_id
+    invalid_row = (
+        f"{subject}\tA raw rejected symbol\tProtein\t\tSO:0001217\tNCBITaxon:9606"
+        f"\t\t{subject}\t\t\t\n"
+    )
+    apply_in_transaction(
+        unit_of_work_factory,
+        imports,
+        start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "mgi"),
+        source_document("mgi", (source_gpi(OTHER_ID) + invalid_row).encode()),
+    )
+    annotations = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
+    payload = writable_annotation.model_dump(mode="json")
+
+    with pytest.raises(InvalidAnnotationPayloadError) as rejected:
+        annotations.create(
+            payload=payload, owning_group_id="other-group", context=PROPOSER
+        )
+    assert [issue["type"] for issue in rejected.value.errors] == ["unknown_entity"]
+
+    refresh_catalog(imports, unit_of_work_factory, subject)
+
     assert (
         annotations.create(
             payload=payload, owning_group_id="other-group", context=PROPOSER

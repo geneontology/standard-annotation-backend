@@ -239,12 +239,12 @@ of `apply`.
 
 | Step | Authorization (`AuthorizationRefreshService`) | Rules (`RulesRefreshService`) | Ontology (`OntologyRefreshService`) | Entity (`EntityRefreshService`) | Annotation (`AnnotationRefreshService`) |
 |---|---|---|---|---|---|
-| unchanged check (inside `apply`) | latest `authorization_refresh` row has the same content (type, locator, checksum) and reader version | active `rules` snapshot has the same content and reader version | active `ontology` snapshot has the same content and reader version, and the same prefixes and closure predicates | active `entity` snapshot of the source has the same content and reader version | ordinary refreshes only (a cutover never skips): the group is `gpad_imported`, its last import has the same checksum and schema package version, and the group has no local changes |
-| `apply` | decode UTF-8, validate `users.yaml`, replace users and grants | unpack, decode, and validate the six files, store and activate a snapshot | parse OBO, store and activate a snapshot, queue term replacement | decode, parse GPI, store a snapshot, check no other source's active catalog lists an identifier (under the entity activation lock), activate | refuse a SABE-managed group, decode, parse GPAD, stage, publish (replacing the group's annotations), queue term replacement |
+| unchanged check (inside `apply`) | latest `authorization_refresh` row has the same content (type, locator, checksum) and reader version | active `rules` snapshot has the same content and reader version | active `ontology` snapshot has the same content and reader version, and the same prefixes and closure predicates | active `entity` snapshot of the source has the same content and reader version, its rows were checked with the installed schema package version, and it rejected no row as a collision | ordinary refreshes only (a cutover never skips): the group is `gpad_imported`, its last import has the same checksum and schema package version, and the group has no local changes |
+| `apply` | decode UTF-8, validate `users.yaml`, replace users and grants | unpack, decode, and validate the six files, store and activate a snapshot | parse OBO, store and activate a snapshot, queue term replacement | decode, read GPI rows (rejecting invalid and repeated ones), store a snapshot, reject rows whose identifier another source's active catalog lists (under the entity activation lock), activate | refuse a SABE-managed group, decode, parse GPAD, stage, publish (replacing the group's annotations), queue term replacement |
 | then | — | prune rules snapshots | prune ontology snapshots | prune entity snapshots | — |
 | Tables written | `sabe_user`, `sabe_group`, `authorization_assignment`, `authorization_refresh` | `reference_snapshot`, `rules_snapshot_detail`, `rule_data`, `retracted_publication` | `reference_snapshot`, `ontology_snapshot_detail`, `ontology_term`, `ontology_alt_id`, `ontology_closure` | `reference_snapshot`, `entity_snapshot_detail`, `entity_record` | `annotation_staging` (and child tables), `annotation_import`, `group_annotation_management`, and the group's annotation rows |
 | Audit action | `authorization.refreshed` | `rules.refreshed` | `ontology.refreshed` (`ontology.retired` at refresh-all start) | `entity.refreshed` (`entity.retired` at refresh-all start) | `annotation_refresh.published` or `annotation_cutover.published` |
-| Kind-specific failure codes | `invalid_document` | `invalid_document` | `invalid_document` | `header`, `row_validation`, `catalog_collision` | `header`, `no_valid_annotations`, `cutover_rejected`, `group_sabe_managed` |
+| Kind-specific failure codes | `invalid_document` | `invalid_document` | `invalid_document` | `header`, `no_valid_rows` | `header`, `no_valid_rows`, `cutover_rejected`, `group_sabe_managed` |
 
 The rules, ontology, and entity kinds prune their kind's snapshots whether or not
 they stored a new one. For each source, the active snapshot and the one it replaced
@@ -272,9 +272,11 @@ Some details that matter when debugging:
   web process that still lists a retired ontology therefore returns
   `503 reference_data_unavailable` for writes until it restarts. Restart the web
   and worker processes with the new file first, and refresh all ontologies after.
-- **Entity.** The collision check runs under the entity activation lock, so two
-  sources cannot both activate the same new identifier. Removing a source from the
-  configuration retires its catalog on the next refresh of every entity source.
+- **Entity.** Rows whose identifier another source's active catalog lists are
+  rejected under the entity activation lock, so two sources cannot both activate the
+  same new identifier; the source that activates it first keeps it. Removing a source
+  from the configuration retires its catalog on the next refresh of every entity
+  source.
 - **Annotation.** Publication replaces the target group's annotations, change
   sets, comments, and related audit events, and cannot be undone. Staging and
   publication happen in the job's transaction. Publication takes the exclusive
@@ -283,12 +285,42 @@ Some details that matter when debugging:
   fail structural validation are rejected and reported; an ordinary refresh
   publishes the rest, and a cutover fails on any rejection.
 
+### Rejected rows
+
+Entity refreshes and annotation refreshes, including cutovers, read their file with
+`ExchangeDocument` (`exchange_files.py`), which yields each valid row and a
+`RowRejection` for each row it cannot load. The refresh loads the valid rows and
+records the rejected ones in a `RejectionReport`: `issue_count`, `by_code`, and the
+100 rejected rows with the lowest line numbers, each with its `line_number`, `code`,
+and a `reason` of at most 1,000 characters. A file with no valid row fails with
+`no_valid_rows`, and a cutover that rejected any row fails with `cutover_rejected`.
+The report is the `failure_details` of both failures.
+
+| Code | Kind | Meaning |
+|---|---|---|
+| `syntax` | both | the row cannot be parsed, or it contains a NUL character |
+| `field-count` | both | the row has the wrong number of fields |
+| `validation` | both | a field fails the schema; the reason names each field |
+| `duplicate` | entity | another row of the file lists the same `db_object_id`; every such row is rejected |
+| `collision` | entity | another source's active catalog lists the `db_object_id`; that source keeps it |
+
+An entity refresh stores the report in its job result (`rejection_report`, with
+`records_rejected`). A later refresh of the same file is unchanged, and its result's
+`snapshot_job_id` names the job that activated the snapshot. An annotation refresh
+stores the report in its job result and on its `annotation_import` row.
+
+A collision depends on another source's catalog, not on the file, so an entity
+refresh whose active snapshot rejected a collision is never unchanged: the next
+refresh reads the file again and activates identifiers the other source has since
+dropped. An upgrade of the schema package also makes the next refresh read each
+entity file again, because it can change which rows are rejected.
+
 ## Locks
 
 | Lock | Kind of lock | Held by | Prevents |
 |---|---|---|---|
 | Refresh start lock | transaction advisory lock | `RefreshStartService.start` | two starts both creating a job for the same source |
-| Entity activation lock | transaction advisory lock | entity `apply`, from the collision check through commit | two sources activating the same new identifier |
+| Entity activation lock | transaction advisory lock | entity `apply`, from rejecting collisions through commit | two sources activating the same new identifier |
 | Snapshot read locks | `FOR KEY SHARE` row locks on `reference_snapshot` | `SnapshotRepository.resolve` and `require_readable` | pruning a snapshot a transaction is reading (pruning skips locked snapshots) |
 | Annotation system-update lock | exclusive global annotation-write lock | annotation publication | ordinary annotation writes during group replacement |
 
@@ -314,6 +346,7 @@ The job execution lock and the annotation scan locks are in the
 | Area | Tests |
 |---|---|
 | Sources file and fetchers | `tests/unit/test_sources_file.py`, `tests/unit/test_source_fetchers.py` |
+| Exchange files, rejected rows, and entity catalogs | `tests/unit/test_exchange_files.py`, `tests/unit/test_rejection_reports.py`, `tests/unit/test_entity_catalogs.py` |
 | go-site rule files | `tests/unit/test_go_site_rule_files.py`, `tests/unit/test_rule_data.py` |
 | Shared lifecycle, run for every kind | `tests/integration/test_refresh_runner.py` (the `CASES` table) |
 | Starting, reuse, dispatch, and concurrent starts | `tests/integration/test_refresh_start_service.py` |

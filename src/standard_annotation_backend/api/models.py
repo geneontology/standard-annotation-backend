@@ -308,34 +308,30 @@ class JobResource(BaseModel):
         description=(
             "Type-specific progress. Failed refresh jobs include phase='failed', "
             "a failure_code, and, when available, failure_details describing the "
-            "problem: a message for an invalid header, or issue_count and up to "
-            "100 issues (line number, category, and invalid fields) for invalid "
-            "rows. Completed refresh jobs include unchanged, which is true when "
-            "the source document was already active so nothing was applied. Term "
+            "problem, such as a message for an invalid header, or, for "
+            "no_valid_rows and cutover_rejected, a rejection report with "
+            "issue_count, by_code, and issues, which lists up to 100 rejected rows "
+            "with their line_number, code, and reason. Completed refresh jobs "
+            "include unchanged, which is true when the source document was "
+            "already active so nothing was applied. Term "
             "replacement and QC report jobs include a phase and running counts; "
             "when they fail, they include phase='failed' and a failure_code."
         ),
         examples=[
             {
                 "phase": "failed",
-                "failure_code": "row_validation",
+                "failure_code": "no_valid_rows",
                 "failure_details": {
                     "issue_count": 1,
+                    "by_code": {"validation": 1},
                     "issues": [
                         {
                             "line_number": 412,
-                            "category": "validation",
-                            "message": None,
-                            "fields": [
-                                {
-                                    "field": "db_object_symbol",
-                                    "message": (
-                                        "Value error, Invalid db_object_symbol "
-                                        "format: A raw rejected symbol"
-                                    ),
-                                    "value": "A raw rejected symbol",
-                                }
-                            ],
+                            "code": "validation",
+                            "reason": (
+                                "db_object_symbol: Value error, Invalid "
+                                "db_object_symbol format: A raw rejected symbol"
+                            ),
                         }
                     ],
                 },
@@ -346,10 +342,21 @@ class JobResource(BaseModel):
     result: dict[str, object] | None = Field(
         description=(
             "Type-specific durable result. Successful results of every refresh "
-            "job include unchanged, true when nothing was applied. Entity "
-            "refresh results also include warning_count and warnings."
+            "job include unchanged, true when nothing was applied. Entity and "
+            "annotation refresh results that loaded a file also include "
+            "records_rejected, the number of rows that were not loaded, and "
+            "rejection_report, which lists up to 100 of them. An unchanged "
+            "entity result includes snapshot_job_id, and an unchanged annotation "
+            "result includes import_job_id; each names the job whose result "
+            "holds the rejection report."
         ),
-        examples=[{"unchanged": False, "warning_count": 0, "warnings": []}],
+        examples=[
+            {
+                "unchanged": False,
+                "records_rejected": 0,
+                "rejection_report": {"issue_count": 0, "by_code": {}, "issues": []},
+            }
+        ],
     )
     error: str | None
     created_at: datetime

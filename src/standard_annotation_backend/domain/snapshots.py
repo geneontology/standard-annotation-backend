@@ -36,7 +36,7 @@ READER_VERSIONS: Mapping[RefreshKindName, int] = MappingProxyType(
         RefreshKindName.AUTHORIZATION: 1,
         RefreshKindName.ONTOLOGY: 1,
         RefreshKindName.RULES: 1,
-        RefreshKindName.ENTITY: 1,
+        RefreshKindName.ENTITY: 2,
     }
 )
 """The version of the code that reads each kind's source documents.
@@ -44,8 +44,10 @@ READER_VERSIONS: Mapping[RefreshKindName, int] = MappingProxyType(
 Every refresh records the version it read its document with. Increase a kind's
 version whenever its parser, or the way its parsed data is stored, changes: the
 next refresh of each source of that kind then reads its document again even
-when the document is unchanged. Annotation refreshes compare the installed
-schema package version instead.
+when the document is unchanged. An upgrade of the schema package needs no new
+version: entity refreshes also compare the installed schema package version (see
+`EntitySnapshotDetail.reusable`), and annotation refreshes compare it instead of a
+reader version.
 """
 
 
@@ -64,7 +66,10 @@ class SourceContent:
 
     A refresh skips a document whose content equals that of the current state.
     The source revision is not part of the content, so a new commit with
-    identical bytes is the same content.
+    identical bytes is the same content. An entity refresh still reads a document
+    with the same content when the active snapshot's rows were checked with another
+    schema package version or its activation rejected a row as a collision (see
+    `EntitySnapshotDetail.reusable`).
 
     Attributes:
         source_type: `github` or `https`.

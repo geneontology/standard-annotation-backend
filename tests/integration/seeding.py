@@ -30,6 +30,7 @@ from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.ontology import SUBCLASS_PREDICATE
 from standard_annotation_backend.domain.refresh import RULES_SOURCE_KEY, RefreshKindName
+from standard_annotation_backend.domain.schema_artifacts import SCHEMA_PACKAGE_VERSION
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     STORED_RULE_DATA,
     DatabaseEntry,
@@ -552,7 +553,8 @@ def seed_entity_catalog(
                 snapshot_id=record.snapshot_id,
                 source_format="gpi-2.0",
                 source_metadata={},
-                record_statistics={},
+                schema_version=SCHEMA_PACKAGE_VERSION,
+                rejected_collisions=False,
             )
         )
         session.add_all(

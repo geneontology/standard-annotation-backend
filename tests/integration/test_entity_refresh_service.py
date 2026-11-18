@@ -3,8 +3,8 @@
 from collections.abc import Callable
 from uuid import UUID
 
+import pytest
 from refresh_helpers import (
-    TEST_SOURCES,
     apply_in_transaction,
     source_document,
     source_gpi,
@@ -23,9 +23,10 @@ from standard_annotation_backend.domain.entities import (
     STORED_ENTITY_REFRESH_RESULT,
     EntityRefreshResult,
 )
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.jobs import JobFailureCode, JobType
 from standard_annotation_backend.domain.ontology import GO_ONTOLOGY_KEY, OntologyCatalog
 from standard_annotation_backend.domain.refresh import (
+    NoValidRowsError,
     SourceDocument,
 )
 from standard_annotation_backend.domain.snapshots import SnapshotKind
@@ -108,7 +109,7 @@ def test_replacement_does_not_change_annotations(
     The annotations' current state and full history are the same afterwards,
     including a deleted annotation's.
     """
-    service = EntityRefreshService(TEST_SOURCES)
+    service = EntityRefreshService()
     old = refresh_catalog(service, unit_of_work_factory, "MGI:z", "MGI:a", "MGI:keep")
     old_result = stored_result(unit_of_work_factory, old)
     assert old_result is not None
@@ -171,25 +172,39 @@ def test_replacement_does_not_change_annotations(
         assert list(session.execute(history_query).mappings()) == history_before
 
 
-def test_empty_catalog_removes_only_that_source(
+@pytest.mark.parametrize(
+    ("text", "issue_count"),
+    [
+        pytest.param(source_gpi(), 0, id="header-only"),
+        pytest.param(source_gpi() + "MGI:9\tshort\n", 1, id="all-invalid"),
+        pytest.param(source_gpi("MGI:9", "MGI:9"), 2, id="only-repeats"),
+    ],
+)
+def test_file_without_valid_rows_fails_and_keeps_the_catalogs(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
+    text: str,
+    issue_count: int,
 ) -> None:
-    """Refreshing a source with no entities removes only that source's entities."""
-    service = EntityRefreshService(TEST_SOURCES)
+    """A file with no row that can be loaded fails with `no_valid_rows`.
+
+    That includes a file with no data rows. The failure details count every
+    rejected row, and every active catalog is unchanged.
+    """
+    service = EntityRefreshService()
     for prefix, key in (("MGI", "mgi"), ("RGD", "rgd")):
         refresh_catalog(service, unit_of_work_factory, f"{prefix}:1", source=key)
-    empty = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "mgi")
-    outcome = apply_in_transaction(
-        unit_of_work_factory, service, empty, _document("mgi")
-    )
-    result = STORED_ENTITY_REFRESH_RESULT.load(outcome.result)
-    assert (
-        result.source_record_count,
-        result.active_identifier_count,
-        result.removed_count,
-    ) == (0, 0, 1)
-    assert active_ids(session_factory) == ["RGD:1"]
+    job = start_job(unit_of_work_factory, JobType.ENTITY_REFRESH, "mgi")
+
+    with pytest.raises(NoValidRowsError) as raised:
+        apply_in_transaction(
+            unit_of_work_factory, service, job, source_document("mgi", text.encode())
+        )
+
+    assert raised.value.failure_code is JobFailureCode.NO_VALID_ROWS
+    assert raised.value.failure_details is not None
+    assert raised.value.failure_details["issue_count"] == issue_count
+    assert active_ids(session_factory) == ["MGI:1", "RGD:1"]
 
 
 def test_catalog_spanning_multiple_insert_batches_keeps_every_record(
@@ -197,13 +212,13 @@ def test_catalog_spanning_multiple_insert_batches_keeps_every_record(
     session_factory: sessionmaker[Session],
 ) -> None:
     """A catalog larger than one insert batch is stored with every record."""
-    service = EntityRefreshService(TEST_SOURCES)
+    service = EntityRefreshService()
     job = refresh_catalog(
         service, unit_of_work_factory, *(f"MGI:{index}" for index in range(5001))
     )
     result = stored_result(unit_of_work_factory, job)
     assert result is not None
-    assert result.source_record_count == result.active_identifier_count == 5001
+    assert (result.data_rows, result.entity_count) == (5001, 5001)
     assert len(active_ids(session_factory)) == 5001
 
 
@@ -212,7 +227,7 @@ def test_validation_reads_each_active_entity_taxon_and_type(
     reference_data: Callable[..., None],
 ) -> None:
     """Validation reads the taxon and type each entity's GPI line gives."""
-    service = EntityRefreshService(TEST_SOURCES)
+    service = EntityRefreshService()
     text = (
         "!gpi-version: 2.0\n!generated-by: TestDB\n!date-generated: 2026-09-29\n"
         "MGI:1\tA\tProtein\t\tPR:000000001\tNCBITaxon:10090\t\tMGI:1\t\t\t\n"
