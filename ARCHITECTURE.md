@@ -936,9 +936,10 @@ annotations and does not block annotation writes, and it queues a term replaceme
 for all groups, which replaces obsolete terms and alternative IDs wherever the result
 passes semantic validation. A closure row records the subject term, predicate, object
 term, and depth, where the subject is the more specific term and the object is the
-broader queried term. Removing an ontology from `config/sources.yaml` stops its prefix
-from being checked once SABE's processes reload their configuration, and the next
-refresh of every ontology retires its snapshot.
+broader queried term. The next refresh of every ontology retires the snapshot of an
+ontology removed from `config/sources.yaml`; the
+[refresh guide](docs/refresh-infrastructure.md#starting-a-refresh) says when to restart
+SABE's processes.
 
 **Entities.** An entity is an annotatable subject identified by `db_object_id`. Each
 configured GPI source supplies a complete catalog. An identifier can be active in only
@@ -951,9 +952,10 @@ taxon and type are also stored in their own columns, for validation. Semantic
 validation requires an active `db_object_id` for client creates and updates; deletes
 and imports do not need one. Replacing or retiring a catalog never modifies existing
 annotations, and report jobs find annotations whose subject was removed. Validation
-reads entity facts from the same resolved catalog snapshots as the other facts.
-Removing a source from the configuration retires its catalog on the next refresh of
-every entity source.
+reads entity facts from the same resolved catalog snapshots as the other facts. The
+next refresh of every entity source retires the catalog of a source removed from the
+configuration; see the
+[refresh guide](docs/refresh-infrastructure.md#starting-a-refresh).
 
 **Annotation refreshes.** Each entry in the `annotations` section of the sources file
 names a GPAD 2.0 file and the group (`owning_group_id`) whose annotations it supplies. A
@@ -982,10 +984,10 @@ never overlap. Asking for the type of job that is already unfinished reuses it. 
 for the other type fails with `409 annotation_job_in_progress`, and a refresh of every
 source skips the group. Jobs for different groups run in parallel.
 
-Any refresh, ordinary or cutover, fails with `no_valid_rows` and publishes
-nothing when no valid annotation remains after staging. A cutover that has at least one
-valid annotation fails with `cutover_rejected` if any record was rejected. A cutover
-never skips as unchanged.
+Any refresh, ordinary or cutover, fails with `no_valid_rows` and publishes nothing when
+no valid annotation remains after staging. A cutover that has at least one valid
+annotation fails with `cutover_rejected` if any record was rejected. A cutover never
+skips as unchanged.
 
 An ordinary refresh skips as unchanged only when the file checksum matches the group's
 last published import, that import was validated with the running version of the

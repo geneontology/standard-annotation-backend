@@ -92,8 +92,9 @@ def reject_repeated_identifiers(
     that lists the identifier.
 
     Args:
-        records: Valid records in line order. Rows rejected for other reasons are
-            not included, so they never make a valid row a repeat.
+        records: Valid records in line order, one per line, so no two share a
+            `line_number`. Rows rejected for other reasons are not included, so
+            they never make a valid row a repeat.
 
     Returns:
         The records whose identifier appears once, in their original order, and a
@@ -224,6 +225,9 @@ class EntityRefreshUnchangedResult:
 STORED_ENTITY_REFRESH_RESULT = StoredJson(
     EntityRefreshResult, label="entity refresh result"
 )
+"""The stored form of the result of a GPI refresh that activated a catalog."""
+
 STORED_ENTITY_UNCHANGED_RESULT = StoredJson(
     EntityRefreshUnchangedResult, label="unchanged entity refresh result"
 )
+"""The stored form of the result of a GPI refresh skipped as unchanged."""

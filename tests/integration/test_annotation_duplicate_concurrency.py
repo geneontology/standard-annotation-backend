@@ -1,7 +1,7 @@
 """Test duplicate detection when separate database transactions run concurrently.
 
-A mutation whose prepared write has duplicate peers stops, as a validated write
-would. The signature locks make the second of two conflicting writes wait for the
+A create or update whose annotation has duplicate peers stops, as a validated
+write would. The signature locks make the second of two conflicting writes wait for the
 first and then find it as a peer.
 """
 

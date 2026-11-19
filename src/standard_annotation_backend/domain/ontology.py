@@ -374,6 +374,7 @@ class StoredOntologyRefresh:
 STORED_ONTOLOGY_REFRESH_RESULT = StoredJson(
     StoredOntologyRefresh, label="ontology refresh result"
 )
+"""The stored form of an ontology refresh job's result."""
 
 
 def compute_closure(snapshot: OntologySnapshot) -> Iterator[OntologyClosureRow]:

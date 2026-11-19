@@ -123,7 +123,9 @@ cannot start before the trigger's change is visible.
    deletes rows from an earlier attempt of the same job).
 5. Runs the scan. If a configured ontology or the go-site rule data has no active
    snapshot, or the active rule data was stored by an earlier release, the job
-   fails with `reference_data_unavailable`.
+   fails with `reference_data_unavailable`. A later job can succeed once that
+   reference data is refreshed; for rule data from an earlier release, a rules
+   refresh is enough.
 6. In one transaction: records success with the result and final progress, and
    lets the scan finish (a QC report deletes older reports' findings).
 
