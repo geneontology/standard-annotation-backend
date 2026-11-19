@@ -3,12 +3,13 @@
 `just refresh KIND [SOURCE]` runs this module. It starts jobs through the same
 `RefreshStartService` as the admin API and the schedule, so jobs and audit events
 are recorded the same way. Instead of sending each job to a Celery worker, it
-runs the job in this process and waits for it. This is the supported way to load
-authorization into a new database, before anyone holds a token for the admin API.
-Annotation cutovers are available only through the admin API. After the
-refreshes, any term replacement jobs they queued also run in this process. One
-whose groups another job of its type is already covering is deferred: it stays
-queued until the next ontology activation or annotation publication sends it.
+runs the jobs in this process, one at a time, after they are sent, and waits for
+them. This is the supported way to load authorization into a new database,
+before anyone holds a token for the admin API. Annotation cutovers are available
+only through the admin API. After the refreshes, any term replacement jobs they
+queued also run in this process. One whose groups another job of its type is
+already covering is deferred: it stays queued until the next ontology activation
+or annotation publication sends it.
 """
 
 import argparse
@@ -57,6 +58,10 @@ def run_refreshes(
 ) -> tuple[tuple[Job, ...], tuple[str, ...]]:
     """Start refreshes of one kind and run each job in this process.
 
+    Each job runs after `RefreshStartService.start` returns, not while it is
+    being sent: `JobService.send` holds the job's row lock while it sends, and a
+    job run then would wait on that lock forever.
+
     Args:
         runtime: Services, runner, and settings for this process.
         kind: Kind of reference data to refresh.
@@ -69,10 +74,13 @@ def run_refreshes(
     Raises:
         UnknownSourceError: If `source_key` is not configured for `kind`.
     """
-
-    def run_in_process(job: Job) -> None:
-        # The start service calls this after committing the jobs, where the API
-        # and the schedule would send the job to Celery instead.
+    # The start service sends each job here after committing it, where the API
+    # and the schedule would send it to Celery instead.
+    sent: list[Job] = []
+    started = RefreshStartService(
+        runtime.unit_of_work_factory, runtime.settings.sources, sent.append
+    ).start(kind, context=system_context("cli"), source_key=source_key)
+    for job in sent:
         try:
             runtime.executors.run(job.job_id)
         except Exception as error:
@@ -85,10 +93,6 @@ def run_refreshes(
                 job.job_id,
                 type(error).__name__,
             )
-
-    started = RefreshStartService(
-        runtime.unit_of_work_factory, runtime.settings.sources, run_in_process
-    ).start(kind, context=system_context("cli"), source_key=source_key)
     # `start` returns each job as it was before it ran; read the outcome.
     return (
         tuple(runtime.jobs.find(job.job_id) for job in started.jobs),

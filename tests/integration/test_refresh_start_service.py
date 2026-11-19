@@ -121,9 +121,9 @@ def test_dispatch_failure_fails_only_new_jobs_with_kind_message(
 def test_dispatch_failure_keeps_a_reused_job_unfinished(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
-    """A reused job stays queued when sending it again fails.
+    """A reused job that an earlier start sent stays queued when resending fails.
 
-    An earlier dispatch may already have placed the job in the broker.
+    The earlier dispatch put the job in the broker, so a worker will still run it.
     """
     created = _service(unit_of_work_factory, []).start(
         RefreshKindName.ENTITY, context=system_context("admin"), source_key="mgi"

@@ -1,13 +1,14 @@
 """Verify job state changes and their audit events."""
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 from uuid import UUID
 
 import pytest
 from seeding import create_job
-from sqlalchemy import func, select
+from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
+from test_entity_refresh_concurrency import TIMEOUT, wait_for_lock
 
 from standard_annotation_backend.domain.audit import AuditAction
 from standard_annotation_backend.domain.jobs import JobFailureCode, JobStatus, JobType
@@ -15,6 +16,7 @@ from standard_annotation_backend.persistence.models import AuditEventRecord, Job
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
     UnitOfWorkFactory,
+    create_unit_of_work_factory,
 )
 from standard_annotation_backend.services.job_service import (
     InvalidJobTransitionError,
@@ -374,25 +376,130 @@ def test_success_recorded_in_a_callers_transaction_commits_only_with_it(
     assert _audit_actions(session_factory).count("job.succeeded") == 1
 
 
-def test_a_new_job_a_worker_already_started_is_not_failed_when_sending_errors(
+def _qc_report(factory: UnitOfWorkFactory) -> Job:
+    return create_job(factory, job_type=JobType.ANNOTATION_QC_REPORT, parameters={})
+
+
+def _broken(_job: Job) -> None:
+    raise ConnectionError("broker down")
+
+
+def test_a_failed_send_fails_a_job_no_send_has_reached(
     unit_of_work_factory: UnitOfWorkFactory,
 ) -> None:
-    """A send error reported after a worker started the job leaves it running.
+    """A job no send has reached fails with `dispatch_failed` when sending fails."""
+    service = _service(unit_of_work_factory)
+    job = _qc_report(unit_of_work_factory)
 
-    A broker can raise after it has accepted the message, for example when a
-    publish confirmation times out. Only a job that is still queued is failed
-    with `dispatch_failed`.
+    returned = service.send(job, dispatch=_broken)
+
+    assert returned.status is JobStatus.FAILED
+    assert returned.error == "QC report could not be dispatched"
+    assert returned.progress == {"phase": "failed", "failure_code": "dispatch_failed"}
+    assert service.find(job.job_id) == returned
+
+
+def test_a_failed_send_leaves_queued_a_job_another_send_reached(
+    unit_of_work_factory: UnitOfWorkFactory,
+) -> None:
+    """After one successful send, a later failed send leaves the job queued.
+
+    The earlier send's message may already be in the broker, and a worker that
+    receives it must find the job queued.
     """
     service = _service(unit_of_work_factory)
-    job = create_job(
-        unit_of_work_factory, job_type=JobType.ANNOTATION_QC_REPORT, parameters={}
-    )
+    job = _qc_report(unit_of_work_factory)
+    service.send(job, dispatch=lambda _job: None)
 
-    def delivered_then_raised(sent: Job) -> None:
-        service.start(sent.job_id)
-        raise TimeoutError("publish confirmation timed out")
+    returned = service.send(job, dispatch=_broken)
 
-    returned = service.send(job, created=True, dispatch=delivered_then_raised)
+    assert returned.status is JobStatus.QUEUED
+    assert service.find(job.job_id).status is JobStatus.QUEUED
+
+
+def test_a_job_another_send_failed_is_not_sent_again(
+    unit_of_work_factory: UnitOfWorkFactory,
+) -> None:
+    """A send of a job that already failed returns it without sending it."""
+    service = _service(unit_of_work_factory)
+    job = _qc_report(unit_of_work_factory)
+    service.send(job, dispatch=_broken)
+    sent: list[Job] = []
+
+    returned = service.send(job, dispatch=sent.append)
+
+    assert returned.status is JobStatus.FAILED
+    assert sent == []
+
+
+def test_a_job_a_worker_started_is_not_failed_when_sending_errors(
+    unit_of_work_factory: UnitOfWorkFactory,
+) -> None:
+    """A send error for a job a worker already started leaves it running.
+
+    A broker can raise after it has accepted the message, for example when a
+    publish confirmation times out, so only a queued job is failed with
+    `dispatch_failed`.
+    """
+    service = _service(unit_of_work_factory)
+    job = _qc_report(unit_of_work_factory)
+    service.start(job.job_id)
+
+    returned = service.send(job, dispatch=_broken)
 
     assert returned.status is JobStatus.RUNNING
     assert service.find(job.job_id).status is JobStatus.RUNNING
+
+
+def test_a_send_waits_for_a_send_in_progress_and_sees_that_it_succeeded(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+) -> None:
+    """A send that fails while another send of the job is in progress leaves it queued.
+
+    The second send, on its own connection, waits on the job's row lock until the
+    first has recorded its successful send, and only then tries to send.
+    """
+    job = _qc_report(unit_of_work_factory)
+    dispatching = Event()
+    release = Event()
+    second_ready = Event()
+    second_pid: list[int] = []
+    order: list[str] = []
+
+    def first_dispatch(_job: Job) -> None:
+        dispatching.set()
+        assert release.wait(TIMEOUT)
+        order.append("first")
+
+    def second_dispatch(_job: Job) -> None:
+        order.append("second")
+        raise ConnectionError("broker down")
+
+    def first() -> Job:
+        return _service(unit_of_work_factory).send(job, dispatch=first_dispatch)
+
+    def second() -> Job:
+        assert dispatching.wait(TIMEOUT)
+        with session_factory() as session:
+            pid = session.scalar(text("SELECT pg_backend_pid()"))
+            assert pid is not None
+            second_pid.append(pid)
+            second_ready.set()
+            service = JobService(create_unit_of_work_factory(lambda: session))
+            return service.send(job, dispatch=second_dispatch)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_send = pool.submit(first)
+        second_send = pool.submit(second)
+        assert second_ready.wait(TIMEOUT)
+        try:
+            wait_for_lock(database_engine, second_pid[0])
+        finally:
+            release.set()
+        results = (first_send.result(TIMEOUT), second_send.result(TIMEOUT))
+
+    assert order == ["first", "second"]
+    assert [result.status for result in results] == [JobStatus.QUEUED] * 2
+    assert _service(unit_of_work_factory).find(job.job_id).status is JobStatus.QUEUED

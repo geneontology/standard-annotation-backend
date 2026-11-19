@@ -18,10 +18,7 @@ from standard_annotation_backend.domain.auth import (
     PermissionAction,
     authorize_role,
 )
-from standard_annotation_backend.domain.jobs import (
-    ACTIVE_JOB_STATUSES,
-    JobType,
-)
+from standard_annotation_backend.domain.jobs import JobType
 from standard_annotation_backend.domain.refresh import (
     REFRESH_JOB_TYPES,
     RefreshKindName,
@@ -38,14 +35,6 @@ from standard_annotation_backend.services.job_service import (
     JobService,
     job_from_record,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _StartedJob:
-    """Pair a started job with whether this call created it."""
-
-    job: Job
-    created: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,8 +99,9 @@ class RefreshStartService:
 
         If a queued or running job of the same type already exists for a source,
         that job is returned and dispatched again instead of creating another.
-        If dispatching fails, only a job created by this call is marked failed,
-        with failure code `dispatch_failed`.
+        If dispatching fails, a job is marked failed, with failure code
+        `dispatch_failed`, only when no send of it has succeeded and no worker
+        has started it.
 
         Args:
             kind: Kind of reference data to refresh.
@@ -177,7 +167,7 @@ class RefreshStartService:
         if source_key is not None:
             self._sources.source(kind, source_key)
 
-        started: list[_StartedJob] = []
+        started: list[Job] = []
         with self._unit_of_work_factory() as uow:
             # Serialize job creation across every request, scheduler run, and
             # CLI invocation; see `JobRepository.lock_refresh_starts`. The lock
@@ -194,7 +184,6 @@ class RefreshStartService:
                 # creating a duplicate. A running job may have lost its worker,
                 # so it is dispatched again below and resumes.
                 record = uow.jobs.find_active(job_type=job_type, source_key=key)
-                created = record is None
                 if record is None:
                     # New jobs store only the source key. Workers look the
                     # source up in the sources file when they run, so a job
@@ -208,13 +197,14 @@ class RefreshStartService:
                     AuditService(uow.audit).record_job_lifecycle(
                         action=AuditAction.JOB_QUEUED, record=record
                     )
-                started.append(_StartedJob(job_from_record(record), created))
+                started.append(job_from_record(record))
             # Commit before dispatching: a worker that receives the message must
             # be able to read the job. Dispatching first could deliver a job ID
             # that does not exist yet.
             uow.commit()
+        jobs = JobService(self._unit_of_work_factory)
         return RefreshStart(
-            jobs=tuple(self._dispatch_started(item) for item in started),
+            jobs=tuple(jobs.send(job, dispatch=self._dispatch) for job in started),
             retired=retired,
         )
 
@@ -319,17 +309,3 @@ class RefreshStartService:
             if self._sources.annotation_group(key) not in managed
             and uow.jobs.find_active(job_type=other_type, source_key=key) is None
         ]
-
-    def _dispatch_started(self, item: _StartedJob) -> Job:
-        """Send an unfinished job through `JobService.send`.
-
-        If sending fails, the job is failed with `dispatch_failed` only when this
-        call created it and no worker has started it.
-        """
-        # `find_active` only returns queued or running jobs, and new jobs are
-        # queued, so this guard is defensive.
-        if item.job.status not in ACTIVE_JOB_STATUSES:
-            return item.job
-        return JobService(self._unit_of_work_factory).send(
-            item.job, created=item.created, dispatch=self._dispatch
-        )

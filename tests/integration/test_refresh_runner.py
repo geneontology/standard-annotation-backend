@@ -610,20 +610,30 @@ def test_a_new_follow_up_that_cannot_be_sent_fails_and_the_refresh_succeeds(
     }
 
 
-def test_a_joined_follow_up_that_cannot_be_sent_stays_queued(
-    database_engine: Engine,
-    unit_of_work_factory: UnitOfWorkFactory,
-    session_factory: sessionmaker[Session],
-) -> None:
-    """A replacement job queued before the refresh joined it is left queued."""
+def _queue_replacement(unit_of_work_factory: UnitOfWorkFactory) -> Job:
+    """Queue an all-groups term replacement job before any refresh runs."""
     with unit_of_work_factory() as uow:
-        earlier = queue_or_join(
+        job = queue_or_join(
             uow,
             job_type=JobType.TERM_REPLACEMENT,
             group_key=None,
             requested_by="cli",
-        ).job
+        )
         uow.commit()
+    return job
+
+
+def test_a_joined_follow_up_another_trigger_sent_stays_queued(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A replacement job an earlier trigger sent is left queued when resending fails.
+
+    The earlier message may already be in the broker.
+    """
+    earlier = _queue_replacement(unit_of_work_factory)
+    JobService(unit_of_work_factory).send(earlier, dispatch=lambda _job: None)
 
     refresh = _activate_go(database_engine, unit_of_work_factory, _broken)
 
@@ -631,6 +641,30 @@ def test_a_joined_follow_up_that_cannot_be_sent_stays_queued(
     (replacement,) = _replacement_jobs(session_factory)
     assert replacement.job_id == earlier.job_id
     assert replacement.status is JobStatus.QUEUED
+
+
+def test_a_joined_follow_up_no_trigger_sent_fails_when_sending_fails(
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A replacement job the refresh joined but nobody sent fails with `dispatch_failed`.
+
+    The next trigger then queues a new job instead of joining one no worker will
+    receive.
+    """
+    earlier = _queue_replacement(unit_of_work_factory)
+
+    refresh = _activate_go(database_engine, unit_of_work_factory, _broken)
+
+    assert refresh.status is JobStatus.SUCCEEDED
+    (replacement,) = _replacement_jobs(session_factory)
+    assert replacement.job_id == earlier.job_id
+    assert replacement.status is JobStatus.FAILED
+    assert replacement.progress == {
+        "phase": "failed",
+        "failure_code": "dispatch_failed",
+    }
 
 
 def test_a_follow_up_whose_failure_cannot_be_recorded_stays_queued(

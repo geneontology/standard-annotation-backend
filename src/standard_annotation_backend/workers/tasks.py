@@ -149,7 +149,8 @@ def schedule_qc_report(task: Task) -> None:
 
     Celery Beat runs this task on `qc_report_cron`. If an all-groups report is
     already queued, that report is sent again instead of a new one being
-    created; if a new report cannot be sent, it fails with `dispatch_failed`.
+    created. If the report cannot be sent and no earlier send of it succeeded,
+    it fails with `dispatch_failed`.
     Unexpected errors are retried after 30 seconds.
     """
     failure_type: str | None = None

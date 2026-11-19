@@ -237,7 +237,7 @@ def test_pruning_a_retired_ontology_keeps_what_an_older_qc_report_lists(
             job_type=JobType.ANNOTATION_QC_REPORT,
             group_key=None,
             requested_by="scheduler",
-        ).job
+        )
         uow.commit()
     build_scan_runner(
         database_engine,

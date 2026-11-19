@@ -64,27 +64,13 @@ logger = logging.getLogger(__name__)
 _GENERIC_FAILURE_MESSAGE = "Job failed"
 
 
-@dataclass(frozen=True, slots=True)
-class QueuedJob:
-    """Describe the job `queue_or_join` returns and whether it created it.
-
-    Attributes:
-        job: The queued job.
-        created: Whether this call created the job, rather than joining one that
-            was already queued.
-    """
-
-    job: Job
-    created: bool
-
-
 def queue_or_join(
     unit_of_work: SqlAlchemyUnitOfWork,
     *,
     job_type: JobType,
     group_key: str | None,
     requested_by: str,
-) -> QueuedJob:
+) -> Job:
     """Return the queued job of a type and owning group, creating one if needed.
 
     A lock held until the caller's transaction ends lets only one caller at a
@@ -102,13 +88,13 @@ def queue_or_join(
         requested_by: The actor recorded as the requester of a new job.
 
     Returns:
-        The queued job and whether this call created it.
+        The queued job.
     """
     unit_of_work.jobs.lock_annotation_scan_starts()
     parameters = scan_group_parameters(group_key)
     record = unit_of_work.jobs.find_queued(job_type=job_type, parameters=parameters)
     if record is not None:
-        return QueuedJob(job_from_record(record), created=False)
+        return job_from_record(record)
     record = unit_of_work.jobs.create(
         job_type=job_type,
         requested_by=requested_by,
@@ -118,7 +104,7 @@ def queue_or_join(
     AuditService(unit_of_work.audit).record_job_lifecycle(
         action=AuditAction.JOB_QUEUED, record=record
     )
-    return QueuedJob(job_from_record(record), created=True)
+    return job_from_record(record)
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,7 +311,9 @@ class AnnotationScanRunner:
         """Start the job, fail other running jobs like it, and run `prepare`.
 
         Other running jobs of the same type covering the same groups are failed
-        with `abandoned`. All of it commits in one transaction.
+        with `abandoned`. A job that finishes while this one is starting keeps
+        its outcome: finding the running jobs waits for it to commit. All of it
+        commits in one transaction.
 
         Returns:
             The started job, or `None`, with nothing committed, if the job is no

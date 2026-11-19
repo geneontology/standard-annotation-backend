@@ -11,7 +11,6 @@ prunes ontology snapshots that are no longer kept (see
 from dataclasses import replace
 
 from standard_annotation_backend.domain.jobs import (
-    FollowUpJob,
     JobFailureCode,
     JobType,
     ProgressReporter,
@@ -152,7 +151,7 @@ class OntologyRefreshService:
         )
         return replace(
             _stored(result.to_stored()),
-            follow_ups=(FollowUpJob(replacement.job.job_id, replacement.created),),
+            follow_ups=(replacement.job_id,),
         )
 
 

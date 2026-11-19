@@ -15,6 +15,7 @@ from standard_annotation_backend.domain.auth import (
     authorize_role,
 )
 from standard_annotation_backend.domain.jobs import (
+    TERMINAL_JOB_STATUSES,
     JobFailureCode,
     JobNotFoundError,
     JobStatus,
@@ -129,58 +130,68 @@ class JobService:
             )
         return job_from_record(mutation.record)
 
-    def send(self, job: Job, *, created: bool, dispatch: Callable[[Job], None]) -> Job:
-        """Send a committed job to a worker, failing it if it is new and sending fails.
+    def send(self, job: Job, *, dispatch: Callable[[Job], None]) -> Job:
+        """Send a committed job to a worker, failing it if no send of it has succeeded.
 
-        Sending a job twice is harmless: a worker that cannot take the job's
-        execution lock returns at once. If `dispatch` raises, only the job ID and
-        exception type are logged, because broker errors can include connection
-        URLs with credentials. A job this caller created is then failed with
-        `dispatch_failed`, so the record says it will not run and the next trigger
-        creates a new job. A joined or reused job is left as it is, because an
-        earlier send may already have put it in the broker. A broker can also
-        raise after it accepted the message, so a created job that a worker has
-        already started is left running too; the check and the failure happen
-        under the job's row lock, so a worker cannot start it in between.
+        The job's row lock is held while `dispatch` runs and until the outcome
+        is recorded, so sends of one job happen one at a time and each sees what
+        the sends before it did. A successful send records `sent_at`. Sending a
+        job twice is harmless: a worker that cannot take the job's execution
+        lock returns at once. A job that has already finished is returned
+        without being sent.
+
+        If `dispatch` raises, only the job ID and exception type are logged,
+        because broker errors can include connection URLs with credentials. The
+        job is then failed with `dispatch_failed` if it is still queued and no
+        send of it has succeeded, so the record says it will not run and the
+        next trigger creates a new job. Otherwise it is left as it is: an
+        earlier send put it in the broker, or a worker already started it. A
+        broker can also raise after it accepted the message; a worker that later
+        receives it finds the job failed and does nothing.
+
+        `dispatch` must not wait for the job to start, or change its row on
+        another connection, as running the job inline or Celery's eager mode
+        would: that waits on the row lock this call holds, forever.
 
         Args:
             job: The committed job.
-            created: Whether the caller created the job.
             dispatch: Sends the job to a worker.
 
         Returns:
             The job's state after sending.
 
         Raises:
-            Exception: Any error from recording `dispatch_failed`.
+            JobNotFoundError: If the job does not exist.
+            Exception: Any error from recording the send or `dispatch_failed`.
         """
-        try:
-            dispatch(job)
-        except Exception as error:
-            logger.error(
-                "Job dispatch failed: job_id=%s job_type=%s failure_type=%s",
-                job.job_id,
-                job.job_type.value,
-                type(error).__name__,
-            )
-            if created:
-                return self._fail_unsent(job)
-        return job
-
-    def _fail_unsent(self, job: Job) -> Job:
-        """Fail a job with `dispatch_failed` if no worker has started it."""
         with self._unit_of_work_factory() as unit_of_work:
             record = unit_of_work.jobs.lock(job.job_id)
-            if record.status is not JobStatus.QUEUED:
+            if record.status in TERMINAL_JOB_STATUSES:
                 return job_from_record(record)
-            failed = self.record_failure(
-                unit_of_work,
-                job.job_id,
-                error=dispatch_failure_message(job.job_type),
-                failure_code=JobFailureCode.DISPATCH_FAILED,
+            try:
+                dispatch(job)
+            except Exception as error:
+                logger.error(
+                    "Job dispatch failed: job_id=%s job_type=%s failure_type=%s",
+                    job.job_id,
+                    job.job_type.value,
+                    type(error).__name__,
+                )
+                if record.status is not JobStatus.QUEUED or record.sent_at is not None:
+                    return job_from_record(record)
+                failed = self.record_failure(
+                    unit_of_work,
+                    job.job_id,
+                    error=dispatch_failure_message(job.job_type),
+                    failure_code=JobFailureCode.DISPATCH_FAILED,
+                )
+                unit_of_work.commit()
+                return failed
+            sent = job_from_record(
+                unit_of_work.jobs.record_sent(job.job_id, now=datetime.now(UTC))
             )
             unit_of_work.commit()
-        return failed
+        return sent
 
     def update_progress(
         self,

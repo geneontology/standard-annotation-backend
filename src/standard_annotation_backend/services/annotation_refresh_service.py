@@ -24,7 +24,6 @@ from standard_annotation_backend.domain.annotation_management import (
 )
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.jobs import (
-    FollowUpJob,
     JobType,
     ProgressReporter,
 )
@@ -152,7 +151,7 @@ class AnnotationRefreshService:
         return RefreshOutcome(
             result=result.to_job_result(),
             counts=result.to_progress(),
-            follow_ups=(FollowUpJob(replacement.job.job_id, replacement.created),),
+            follow_ups=(replacement.job_id,),
         )
 
 

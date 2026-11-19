@@ -47,14 +47,22 @@ it. Messages carry only the job ID; Redis holds no job state. One Celery task,
 replacement and QC report jobs. `JobExecutors` refuses to start unless every
 `JobType` has exactly one runner.
 
-Every caller sends a job through `JobService.send`. If sending raises, only the
-job ID and exception type are logged (`Job dispatch failed`), because broker
+Every caller sends a job through `JobService.send`. It holds the job's row lock
+while it sends and records the outcome, so sends of one job happen one at a time
+and each sees what the earlier ones did. A successful send records the job's
+`sent_at`. A job that has already finished is not sent. If sending raises, only
+the job ID and exception type are logged (`Job dispatch failed`), because broker
 errors can contain credentials. Then:
 
-- A job the caller created is failed with `dispatch_failed`, and the next trigger
-  creates a new job.
-- A job the caller joined or reused is left as it is: an earlier send may already
-  have put it in the broker, and sending a job twice is harmless.
+- A job that is still queued and that no send has reached is failed with
+  `dispatch_failed`, whichever caller created it, and the next trigger creates a
+  new job.
+- Any other job is left as it is: an earlier send put it in the broker, or a
+  worker already started it, and sending a job twice is harmless.
+
+Because the row lock is held while the job is sent, the code that sends it must
+not wait for the job to run. The refresh CLI, which runs jobs in its own process,
+runs each one after it has been sent.
 
 The admin refresh routes and `POST /reports/annotation-qc` return the failed job
 in their `202` response.

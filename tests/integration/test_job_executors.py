@@ -52,7 +52,7 @@ def test_the_task_runs_annotation_scan_jobs(
     with unit_of_work_factory() as uow:
         job = queue_or_join(
             uow, job_type=job_type, group_key=None, requested_by="curator"
-        ).job
+        )
         uow.commit()
 
     tasks.run_job.run(str(job.job_id))

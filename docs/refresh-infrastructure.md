@@ -141,9 +141,16 @@ sequenceDiagram
     end
     S->>DB: commit (releases the lock)
     loop each queued or running job
-        S->>D: dispatch(job)
-        alt dispatch raises and this call created the job
-            S->>DB: fail job: dispatch_failed
+        S->>DB: lock job row (held until the outcome commits)
+        alt job already finished
+            S->>S: skip it
+        else
+            S->>D: dispatch(job)
+            alt dispatch succeeds
+                S->>DB: record sent_at
+            else dispatch raises, job still queued, and no send recorded
+                S->>DB: fail job: dispatch_failed
+            end
         end
     end
     S-->>T: RefreshStart(jobs, retired)
@@ -155,9 +162,9 @@ Points worth knowing when something looks wrong:
   It returns the existing one and dispatches it again. That is how a job whose
   worker disappeared runs again: any later start sends it again.
 - **Commit before dispatch.** A worker must be able to read the job it is sent.
-- **Dispatch failures.** Sent through `JobService.send`: only a job created by
-  this call is marked failed (`dispatch_failed`). A reused job may already be in
-  the broker, so it is left as it is. See
+- **Dispatch failures.** Sent through `JobService.send`: a job is marked failed
+  (`dispatch_failed`) only if no send of it has succeeded and no worker has
+  started it. A reused job that an earlier start sent is left as it is. See
   [Sending jobs to workers](jobs.md#sending-jobs-to-workers).
 - **Routing.** `tasks.dispatch_job` sends every job to `sabe.job.run`. Celery
   messages carry only the job ID.

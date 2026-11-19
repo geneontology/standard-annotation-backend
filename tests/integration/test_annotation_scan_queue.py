@@ -38,7 +38,7 @@ def _queue(
     with unit_of_work_factory() as uow:
         job = queue_or_join(
             uow, job_type=job_type, group_key=group_key, requested_by=actor
-        ).job
+        )
         uow.commit()
     return job
 
@@ -110,7 +110,7 @@ def test_concurrent_triggers_on_independent_connections_share_one_job(
                     job_type=JobType.TERM_REPLACEMENT,
                     group_key=None,
                     requested_by=actor,
-                ).job
+                )
                 if first:
                     queued.set()
                     assert release.wait(TIMEOUT)
@@ -163,7 +163,7 @@ def test_a_job_cannot_start_until_a_trigger_that_joined_it_commits(
                     job_type=JobType.TERM_REPLACEMENT,
                     group_key=None,
                     requested_by="b",
-                ).job
+                )
                 joined.set()
                 assert release.wait(TIMEOUT)
                 uow.commit()

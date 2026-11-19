@@ -87,8 +87,8 @@ def _only_query_parameters(model: type[BaseModel]) -> Callable[[Request], None]:
         "Requires the admin role: a global admin reports on one group or, with "
         "{}, on all groups, and a group admin reports on its own group. If a "
         "report of the same scope is already queued, that report is returned "
-        "instead of a new one. If the report cannot be sent to a worker, a report "
-        "this request created is returned failed with failure code "
+        "instead of a new one. If the report cannot be sent to a worker and no "
+        "earlier send of it succeeded, it is returned failed with failure code "
         "`dispatch_failed`."
     ),
     response_description="The created or reused report job",

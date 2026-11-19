@@ -5,11 +5,14 @@ report jobs; tests of the shared runner alone use one of them. Redelivery of a
 running job is covered by `test_qc_report_runner.py`.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from refresh_helpers import build_scan_runner
 from seeding import create_job, deactivate_reference_data
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from test_entity_refresh_concurrency import TIMEOUT, wait_for_lock
 
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.snapshots import SnapshotKind
@@ -45,7 +48,7 @@ def _queue(
     with unit_of_work_factory() as uow:
         job = queue_or_join(
             uow, job_type=job_type, group_key=group_key, requested_by="curator"
-        ).job
+        )
         uow.commit()
     return job
 
@@ -186,6 +189,32 @@ def test_a_job_left_running_is_abandoned_when_the_next_job_of_its_groups_starts(
     assert abandoned.status is JobStatus.FAILED
     assert abandoned.error == FAILURE_MESSAGES[job_type]
     assert abandoned.progress == {"phase": "failed", "failure_code": "abandoned"}
+
+
+def test_a_job_that_finishes_while_the_next_job_starts_keeps_its_success(
+    unit_of_work_factory: UnitOfWorkFactory, database_engine: Engine
+) -> None:
+    """An older job whose success commits while the next job starts is not abandoned.
+
+    The next job waits for the older job's transaction, sees that it succeeded,
+    and runs.
+    """
+    jobs = JobService(unit_of_work_factory)
+    stuck = _left_running(unit_of_work_factory, JobType.ANNOTATION_QC_REPORT)
+    job = _queue(unit_of_work_factory, JobType.ANNOTATION_QC_REPORT)
+
+    with unit_of_work_factory() as uow:
+        jobs.record_success(
+            uow, stuck.job_id, result={"done": True}, progress={"phase": "completed"}
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(_run, unit_of_work_factory, database_engine, job)
+            wait_for_lock(database_engine)
+            uow.commit()
+            finished = running.result(TIMEOUT)
+
+    assert finished.status is JobStatus.SUCCEEDED
+    assert jobs.find(stuck.job_id).status is JobStatus.SUCCEEDED
 
 
 def test_only_running_jobs_of_the_same_type_and_groups_are_abandoned(

@@ -185,9 +185,10 @@ lists its peers; reports do not group duplicates further.
 - **Starting.** `POST /reports/annotation-qc` with an optional `owning_group_id`
   returns `202` and the job. It requires the admin role: a global admin reports on one
   group or on all groups, and a group admin on its own group. A queued report of the
-  same scope is reused. If the report cannot be sent to a worker, a report the
-  request created is returned failed with `dispatch_failed`. An all-groups report
-  also runs nightly, on `SABE_QC_REPORT_CRON` (default `0 6 * * *` UTC).
+  same scope is reused. If the report cannot be sent to a worker and no earlier
+  send of it succeeded, it is returned failed with `dispatch_failed`. An
+  all-groups report also runs nightly, on `SABE_QC_REPORT_CRON` (default
+  `0 6 * * *` UTC).
 - **Reading.** `GET /reports/annotation-qc` lists reports newest first, optionally by
   `status`, and says whether each report's findings can still be read. A global reader
   sees every report, and other readers see all-groups reports and their own group's.
