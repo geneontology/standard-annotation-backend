@@ -89,9 +89,15 @@ class AuthorizationRefreshSummary:
 STORED_AUTHORIZATION_SUMMARY = StoredJson(
     AuthorizationRefreshSummary, label="authorization refresh summary"
 )
+"""The stored form of the counts kept on each authorization refresh record.
+
+An unchanged refresh reads them back to report the counts of the state it kept.
+"""
+
 STORED_AUTHORIZATION_REFRESH_RESULT = StoredJson(
     AuthorizationRefreshResult, label="authorization refresh result"
 )
+"""The stored form of an authorization refresh job's result."""
 
 
 class AuthorizationRefreshService:

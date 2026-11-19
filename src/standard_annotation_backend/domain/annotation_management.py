@@ -129,9 +129,16 @@ class AnnotationRefreshUnchanged:
 STORED_ANNOTATION_REFRESH_RESULT = StoredJson(
     AnnotationRefreshResult, label="annotation refresh result"
 )
+"""The stored form of the result of a GPAD refresh or cutover that published.
+
+`AnnotationRefreshResult.to_job_result` then moves the provenance fields to the
+top level of the job's result, so this form is never loaded back.
+"""
+
 STORED_ANNOTATION_UNCHANGED_RESULT = StoredJson(
     AnnotationRefreshUnchanged, label="unchanged annotation refresh result"
 )
+"""The stored form of the result of a GPAD refresh skipped as unchanged."""
 
 
 class GroupSabeManagedError(ConflictError, TerminalRefreshError):

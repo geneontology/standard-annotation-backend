@@ -338,6 +338,7 @@ class RejectionReportBuilder:
 
 
 STORED_REJECTION_REPORT = StoredJson(RejectionReport, label="rejection report")
+"""The stored form of a GPI or GPAD refresh's rejected rows."""
 
 
 class NoValidRowsError(TerminalRefreshError):

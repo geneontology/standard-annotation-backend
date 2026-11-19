@@ -157,6 +157,8 @@ class QcReportRepository:
             job_id: The report that just succeeded.
             parameters: Its job parameters, which name its scope.
         """
+        # `this` is one row: the new report's sort key. Joining it on `TRUE` pairs
+        # that row with every candidate job, so each can be compared against it.
         this = (
             select(JobRecord.completed_at, JobRecord.job_id)
             .where(JobRecord.job_id == job_id)
@@ -169,6 +171,8 @@ class QcReportRepository:
                 JobRecord.job_type == JobType.ANNOTATION_QC_REPORT,
                 JobRecord.status == JobStatus.SUCCEEDED,
                 JobRecord.parameters == cast(parameters, JSONB),
+                # A row-value comparison: an earlier `completed_at`, or the same
+                # `completed_at` and a smaller `job_id`.
                 tuple_(JobRecord.completed_at, JobRecord.job_id)
                 < tuple_(this.c.completed_at, this.c.job_id),
             )

@@ -91,6 +91,7 @@ class RulesRefreshResult:
 STORED_RULES_REFRESH_RESULT = StoredJson(
     RulesRefreshResult, label="rules refresh result"
 )
+"""The stored form of a rules refresh job's result."""
 
 
 class RulesRefreshService:

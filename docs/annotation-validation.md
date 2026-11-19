@@ -203,10 +203,9 @@ lists its peers; reports do not group duplicates further.
   the most recent completed report of each scope, so an older report's findings
   return `410 report_findings_expired`. The findings of a report that has not
   succeeded return `409 report_not_completed`.
-- **Missing reference data.** If a configured ontology or the go-site metadata has no
-  active snapshot, the report fails with `reference_data_unavailable`. It fails the same
-  way when the stored rule data came from an earlier release and this release cannot
-  read it; a rules refresh fixes that.
+- **Missing reference data.** A report fails with `reference_data_unavailable` when a
+  configured ontology or the go-site rule data is missing or unreadable. See
+  [Annotation scan jobs](jobs.md#annotation-scan-jobs).
 
 ## Errors
 

@@ -130,7 +130,8 @@ loaded.
 
 **Retire.** Deactivate the snapshot of a source removed from the sources file. Refreshing
 every source of the ontology or entity kind retires removed sources; the kind's next
-refresh job prunes their data.
+refresh job prunes their data. See
+[Starting a refresh](refresh-infrastructure.md#starting-a-refresh).
 
 **Reference data unavailable.** The `503 reference_data_unavailable` error. Creates,
 updates, and change-set previews and acceptances return it, and QC report and term
@@ -178,7 +179,10 @@ job. See
 
 **Replacement chain.** The sequence of replacements that term replacement follows from
 an obsolete term or alternative ID: from an alternative ID to its primary term, or from
-an obsolete term to its only `replaced_by` term, until it reaches a current term. See
+an obsolete term to its only `replaced_by` term, until it reaches a current term. No
+replacement is made when the chain reaches a term that is unknown or cannot be
+replaced, names a term of another ontology, or returns to an identifier it already
+visited. See
 [Automatic term replacement](annotation-validation.md#automatic-term-replacement).
 
 **Follow-up job.** A job that a refresh queues in its own transaction, such as a term

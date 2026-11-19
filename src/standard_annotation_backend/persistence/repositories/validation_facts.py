@@ -52,6 +52,10 @@ _QUERY_BATCH_SIZE = 5_000
 class ValidationFactsRepository:
     """Read validation facts in the caller's transaction.
 
+    Semantic validation reads every fact about an annotation through `gather`.
+    Term replacement reads term facts through `terms`, which
+    `replacement_chain_terms` calls once for each step of the replacement chains.
+
     Args:
         session: Session owned by the calling unit of work.
     """
@@ -213,6 +217,12 @@ class ValidationFactsRepository:
                 owns.
             snapshots: Snapshots resolved with `SnapshotRepository.resolve` in this
                 transaction, so they are still locked against pruning.
+
+        Returns:
+            The fact for each identifier whose prefix a configured ontology owns,
+            keyed by identifier. Every such identifier has an entry, even one no
+            snapshot lists, so a missing key always means no configured ontology
+            owns the prefix.
         """
         wanted: dict[UUID, set[str]] = {}
         for identifier in identifiers:

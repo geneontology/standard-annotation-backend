@@ -157,8 +157,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         nargs="?",
         help=(
             "Refresh one ontology, entity, or annotation source. Omit it to refresh "
-            "every configured source. Authorization and rules each have a single "
-            "source and take none."
+            "every configured source; for ontologies and entities, this also "
+            "retires the sources that config/sources.yaml no longer lists. "
+            "Authorization and rules each have a single source and take none."
         ),
     )
     arguments = parser.parse_args(argv)

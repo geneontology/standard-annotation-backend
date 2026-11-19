@@ -380,7 +380,9 @@ class RefreshRequest(BaseModel):
         Field(
             description=(
                 "Key of a source configured in config/sources.yaml. Omit it to "
-                "refresh every configured source of this kind."
+                "refresh every configured source of this kind. Refreshing every "
+                "ontology or entity source also retires the sources that "
+                "config/sources.yaml no longer lists."
             ),
         ),
     ] = None
