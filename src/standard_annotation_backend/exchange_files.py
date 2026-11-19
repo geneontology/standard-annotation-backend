@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from io import StringIO
 from types import TracebackType
-from typing import Protocol
+from typing import Literal, Protocol, TextIO
 
 from go_standard_annotation_schema.io import (
     FileMetadata,
@@ -118,6 +118,23 @@ class _SchemaReader[ModelT: BaseModel](Protocol):
     def records(self) -> Iterator[Record[ModelT]]: ...
 
 
+class _ReaderFactory[ModelT: BaseModel](Protocol):
+    """Construct a schema reader the way `ExchangeDocument` does.
+
+    `ExchangeDocument` passes the decoded text as a stream, skips invalid rows, and
+    collects each skipped row's issue. `GpiReader` and `GpadReader` match.
+    """
+
+    def __call__(
+        self,
+        stream: TextIO,
+        /,
+        *,
+        errors: Literal["skip"],
+        on_error: Callable[[RowIssue], None],
+    ) -> _SchemaReader[ModelT]: ...
+
+
 class ExchangeDocument[ModelT: BaseModel]:
     """Read one decoded GPI or GPAD document as records and rejected rows.
 
@@ -142,9 +159,7 @@ class ExchangeDocument[ModelT: BaseModel]:
             key-value pair.
     """
 
-    def __init__(
-        self, reader_type: Callable[..., _SchemaReader[ModelT]], text: str
-    ) -> None:
+    def __init__(self, reader_type: _ReaderFactory[ModelT], text: str) -> None:
         self._reader_type = reader_type
         self._text = text
         self._issues: deque[RowIssue] = deque()

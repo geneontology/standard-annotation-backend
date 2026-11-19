@@ -38,8 +38,8 @@ from standard_annotation_backend.domain.refresh import (
     TerminalRefreshError,
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
-    TermFact,
-    TermStatus,
+    AlternateId,
+    CurrentTerm,
 )
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import AuditEventRecord
@@ -265,11 +265,12 @@ id: GO:0000002
                 OntologyCatalog({GO_ONTOLOGY_KEY: ("GO",)}),
             )
         )
-    assert tagged["GO:0000001"].subsets == frozenset({"gocheck_do_not_annotate"})
-    assert plain["GO:0000002"].subsets == frozenset()
-    assert alternative["GO:0000009"] == TermFact(
-        TermStatus.ALTERNATE, primary_id="GO:0000001"
-    )
+    tagged_term, plain_term = tagged["GO:0000001"], plain["GO:0000002"]
+    assert isinstance(tagged_term, CurrentTerm)
+    assert isinstance(plain_term, CurrentTerm)
+    assert tagged_term.subsets == frozenset({"gocheck_do_not_annotate"})
+    assert plain_term.subsets == frozenset()
+    assert alternative["GO:0000009"] == AlternateId(primary_id="GO:0000001")
 
 
 def test_a_go_file_without_the_rule_subsets_is_refused(

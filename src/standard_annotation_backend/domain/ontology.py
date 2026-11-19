@@ -14,7 +14,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
-from typing import Annotated
+from typing import Annotated, ClassVar
 from uuid import UUID
 
 from pydantic import Field
@@ -72,7 +72,7 @@ class OntologyCatalog:
     Identifiers whose prefix no configured ontology owns are not looked up. The
     catalog is built from `config/sources.yaml`, so a change to the file takes
     effect when a process next reads its settings, even before the changed
-    ontology is refreshed.
+    ontology is refreshed. The catalog is not hashable.
 
     Args:
         prefixes_by_key: The identifier prefixes each ontology owns, keyed by
@@ -90,6 +90,9 @@ class OntologyCatalog:
 
     prefixes_by_key: Mapping[str, tuple[str, ...]]
     _key_by_prefix: Mapping[str, str] = field(init=False, repr=False, compare=False)
+
+    # Hashing would fail on the read-only mappings; say so plainly instead.
+    __hash__: ClassVar[None] = None
 
     def __post_init__(self) -> None:
         prefixes_by_key = {

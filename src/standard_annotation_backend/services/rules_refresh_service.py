@@ -179,7 +179,9 @@ class RulesRefreshService:
         """
         if record.activated_at is None:
             raise RuntimeError("a rules snapshot was read before it was activated")
-        data = unit_of_work.rules.rule_data(record.snapshot_id)
+        data = unit_of_work.snapshots.rule_data(
+            record.snapshot_id, record.reader_version
+        ).data
         namespaces = unrecognized_extension_namespaces(data, self._ontologies.prefixes)
         result = RulesRefreshResult(
             snapshot_id=record.snapshot_id,

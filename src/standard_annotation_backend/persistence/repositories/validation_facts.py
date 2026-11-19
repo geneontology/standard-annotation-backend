@@ -23,10 +23,13 @@ from standard_annotation_backend.domain.semantic_validation.checked_ancestors im
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
     ActiveSnapshots,
+    AlternateId,
     AnnotationFacts,
+    CurrentTerm,
     EntityFact,
+    ObsoleteTerm,
     TermFact,
-    TermStatus,
+    UnknownId,
 )
 from standard_annotation_backend.domain.semantic_validation.identifiers import (
     split_identifier,
@@ -73,7 +76,8 @@ class ValidationFactsRepository:
         activates while it runs. Queries are batched, so one call can handle one
         annotation or thousands.
 
-        Besides each identifier's status, the facts include the subsets of each
+        Besides whether each identifier is a current term, an obsolete term, an
+        alternative ID, or unknown, the facts include the subsets of each current
         term, the checked ancestors of each current GO term and of the entity's
         type, the rule data, and the references listed as retracted. Checked
         ancestors are the GO terms, such as the three GO roots, for which some rule
@@ -129,7 +133,7 @@ class ValidationFactsRepository:
         current_go_terms = {
             identifier
             for identifier, fact in terms.items()
-            if fact.status is TermStatus.CURRENT
+            if isinstance(fact, CurrentTerm)
             and split_identifier(identifier)[0] in go_prefixes
         }
         go_types = {
@@ -148,7 +152,7 @@ class ValidationFactsRepository:
                     fact,
                     checked_ancestors=checked_ancestors.get(identifier, frozenset()),
                 )
-                if identifier in current_go_terms
+                if isinstance(fact, CurrentTerm) and identifier in current_go_terms
                 else fact
             )
             for identifier, fact in terms.items()
@@ -198,8 +202,9 @@ class ValidationFactsRepository:
         """Return a fact for each identifier whose prefix a configured ontology owns.
 
         Each identifier is read from the snapshot, in `snapshots`, of the ontology
-        that owns its prefix. Its status is `current` or `obsolete` if it names a
-        term, `alternate` if it is an alternative ID, and `unknown` otherwise.
+        that owns its prefix. Its fact is a `CurrentTerm` or `ObsoleteTerm` if it
+        names a term, an `AlternateId` if it is an alternative ID, and an
+        `UnknownId` otherwise.
         Identifiers that no configured ontology owns are left out.
 
         Args:
@@ -221,9 +226,9 @@ class ValidationFactsRepository:
     def _term_facts(self, wanted: dict[UUID, set[str]]) -> dict[str, TermFact]:
         """Return a fact for each wanted identifier from its ontology's snapshot.
 
-        An identifier that names a term gets the status `current` or `obsolete`.
-        One that is an alternative identifier gets `alternate`, and any other gets
-        `unknown`.
+        An identifier that names a term gets a `CurrentTerm` or `ObsoleteTerm`.
+        One that is an alternative identifier gets an `AlternateId`, and any other
+        gets an `UnknownId`.
 
         Args:
             wanted: The identifiers to look up, keyed by the ID of the snapshot
@@ -246,11 +251,12 @@ class ValidationFactsRepository:
                     )
                 )
                 for term_id, obsolete, replaced_by, consider, subsets in rows:
-                    facts[term_id] = TermFact(
-                        TermStatus.OBSOLETE if obsolete else TermStatus.CURRENT,
-                        replaced_by=tuple(replaced_by),
-                        consider=tuple(consider),
-                        subsets=frozenset(subsets),
+                    facts[term_id] = (
+                        ObsoleteTerm(
+                            replaced_by=tuple(replaced_by), consider=tuple(consider)
+                        )
+                        if obsolete
+                        else CurrentTerm(subsets=frozenset(subsets))
                     )
             remaining = [
                 identifier for identifier in ordered if identifier not in facts
@@ -265,9 +271,9 @@ class ValidationFactsRepository:
                     )
                 )
                 for alt_id, term_id in rows:
-                    facts[alt_id] = TermFact(TermStatus.ALTERNATE, primary_id=term_id)
+                    facts[alt_id] = AlternateId(primary_id=term_id)
             for identifier in remaining:
-                facts.setdefault(identifier, TermFact(TermStatus.UNKNOWN))
+                facts.setdefault(identifier, UnknownId())
         return facts
 
     def _entity_facts(

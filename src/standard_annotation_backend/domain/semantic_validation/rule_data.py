@@ -15,7 +15,8 @@ import re
 from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, Self
+from types import MappingProxyType
+from typing import ClassVar, Literal, Self
 
 from standard_annotation_backend.domain.stored_json import StoredJson
 
@@ -179,6 +180,10 @@ class RuleDataIndex:
     built and the patterns compiled once, when a snapshot's rule data is first
     read, instead of for each annotation. Build one with `RuleDataIndex.of`.
 
+    One index is cached per process and shared by every validation that reads the
+    same snapshot, so its lookups are read-only: writing to one raises
+    `TypeError`. The index is not hashable.
+
     Attributes:
         data: The rule data the index was built from.
         databases: Each database entry, by its `database` prefix.
@@ -201,6 +206,9 @@ class RuleDataIndex:
     extension_constraints: Mapping[str, tuple[ExtensionConstraint, ...]]
     patterns: Mapping[str, re.Pattern[str]]
 
+    # Hashing would fail on the read-only mappings; say so plainly instead.
+    __hash__: ClassVar[None] = None
+
     @classmethod
     def of(cls, data: RuleData) -> Self:
         """Return the index of `data`.
@@ -216,22 +224,32 @@ class RuleDataIndex:
             )
         return cls(
             data=data,
-            databases={entry.database: entry for entry in data.databases},
+            databases=MappingProxyType(
+                {entry.database: entry for entry in data.databases}
+            ),
             group_shorthands=frozenset(data.group_shorthands),
-            go_refs={entry.go_ref_id: entry for entry in data.go_refs},
-            primary_go_ref_ids={
-                alt_id: entry.go_ref_id
-                for entry in data.go_refs
-                for alt_id in entry.alt_ids
-            },
-            eco_usage_constraints={
-                entry.eco_id: entry for entry in data.eco_usage_constraints
-            },
-            extension_constraints={
-                relation_id: tuple(constraints)
-                for relation_id, constraints in extension_constraints.items()
-            },
-            patterns={pattern: re.compile(pattern) for pattern in _patterns(data)},
+            go_refs=MappingProxyType(
+                {entry.go_ref_id: entry for entry in data.go_refs}
+            ),
+            primary_go_ref_ids=MappingProxyType(
+                {
+                    alt_id: entry.go_ref_id
+                    for entry in data.go_refs
+                    for alt_id in entry.alt_ids
+                }
+            ),
+            eco_usage_constraints=MappingProxyType(
+                {entry.eco_id: entry for entry in data.eco_usage_constraints}
+            ),
+            extension_constraints=MappingProxyType(
+                {
+                    relation_id: tuple(constraints)
+                    for relation_id, constraints in extension_constraints.items()
+                }
+            ),
+            patterns=MappingProxyType(
+                {pattern: re.compile(pattern) for pattern in _patterns(data)}
+            ),
         )
 
     def fullmatch(self, pattern: str, value: str) -> bool:

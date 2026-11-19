@@ -87,6 +87,7 @@ __all__ = [
     "insert_annotation",
     "seed_entity_catalog",
     "seed_reference_data",
+    "seeded_snapshot",
     "set_rule_data",
     "snapshot_count",
     "unvalidated_create",
@@ -308,7 +309,7 @@ def _succeeded_job(session: Session, job_type: str, source_key: str) -> UUID:
     return job.job_id
 
 
-def _seeded_snapshot(
+def seeded_snapshot(
     session: Session, kind: SnapshotKind, source_key: str, job_type: str
 ) -> ReferenceSnapshotRecord:
     """Add an active snapshot of a source, owned by a new succeeded job."""
@@ -394,7 +395,7 @@ def seed_reference_data(
                 )
             )
             if snapshot is None:
-                snapshot = _seeded_snapshot(
+                snapshot = seeded_snapshot(
                     session, SnapshotKind.ONTOLOGY, key, "ontology_refresh"
                 )
                 session.add(
@@ -459,7 +460,7 @@ def seed_reference_data(
             )
         )
         if rules is None:
-            rules = _seeded_snapshot(
+            rules = seeded_snapshot(
                 session, SnapshotKind.RULES, RULES_SOURCE_KEY, "rules_refresh"
             )
             # Read from go-site at a commit, as a rules refresh records it.
@@ -508,7 +509,7 @@ def set_rule_data(
         previous.active = False
         # Flushed first: the partial unique index allows one active snapshot.
         session.flush([previous])
-        snapshot = _seeded_snapshot(
+        snapshot = seeded_snapshot(
             session, SnapshotKind.RULES, RULES_SOURCE_KEY, "rules_refresh"
         )
         snapshot.source_type = previous.source_type
@@ -547,7 +548,7 @@ def seed_entity_catalog(
     """
     key = source_key or f"seed-{uuid4().hex}"
     with session_factory.begin() as session:
-        record = _seeded_snapshot(session, SnapshotKind.ENTITY, key, "entity_refresh")
+        record = seeded_snapshot(session, SnapshotKind.ENTITY, key, "entity_refresh")
         session.add(
             EntitySnapshotDetailRecord(
                 snapshot_id=record.snapshot_id,

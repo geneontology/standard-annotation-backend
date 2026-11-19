@@ -3,6 +3,7 @@
 `SnapshotRepository` creates, activates, prunes, and retires snapshots. This
 repository stores what a rules snapshot holds: five go-site files as validated
 `RuleData` JSON, and the PMIDs that `retracted-publications.txt` lists.
+`SnapshotRepository.rule_data` reads the JSON back.
 """
 
 from collections.abc import Collection
@@ -12,10 +13,6 @@ from uuid import UUID
 from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
-from standard_annotation_backend.domain.semantic_validation.rule_data import (
-    STORED_RULE_DATA,
-    RuleData,
-)
 from standard_annotation_backend.persistence.models import (
     RetractedPublicationRecord,
     RuleDataRecord,
@@ -68,18 +65,6 @@ class RulesRepository:
         )
         for batch in batched(rows, _INSERT_BATCH_SIZE, strict=False):
             self.session.execute(insert(RetractedPublicationRecord), batch)
-
-    def rule_data(self, snapshot_id: UUID) -> RuleData:
-        """Return a rules snapshot's decoded rule data.
-
-        Raises:
-            SnapshotPrunedError: If the snapshot's rule data was pruned.
-            StoredDataError: If the stored rule data cannot be decoded.
-        """
-        stored = self.session.get(RuleDataRecord, snapshot_id)
-        if stored is None:
-            raise SnapshotPrunedError((snapshot_id,))
-        return STORED_RULE_DATA.load(stored.data)
 
     def retracted_publication_count(self, snapshot_id: UUID) -> int:
         """Return how many PMIDs a rules snapshot lists as retracted.

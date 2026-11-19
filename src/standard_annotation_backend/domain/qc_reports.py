@@ -19,6 +19,9 @@ from standard_annotation_backend.domain.errors import (
     GoneError,
     NotFoundError,
 )
+from standard_annotation_backend.domain.semantic_validation.details import (
+    DetailsShape,
+)
 from standard_annotation_backend.domain.semantic_validation.rules import RULES
 from standard_annotation_backend.domain.snapshots import ReferenceDataVersions
 from standard_annotation_backend.domain.stored_json import StoredJson
@@ -42,18 +45,26 @@ class IssueTypeEntry:
         title: A stable, human-readable title.
         link: The go-site page of a GO Rule; `None` for other types.
         details: The `TypedDict` the issues' `details` follow, if any.
+        partial_details: Which issues have details, when only some do.
     """
 
     issue_type: str
     title: str
     link: str | None = None
-    details: type | None = None
+    details: DetailsShape | None = None
+    partial_details: str | None = None
 
 
 ISSUE_TYPES: tuple[IssueTypeEntry, ...] = (
     IssueTypeEntry(STRUCTURAL, "Annotation fails the Standard Annotation schema"),
     *(
-        IssueTypeEntry(rule.issue_type, rule.title, rule.link, rule.details)
+        IssueTypeEntry(
+            rule.issue_type,
+            rule.title,
+            rule.link,
+            rule.details,
+            rule.partial_details,
+        )
         for rule in RULES
     ),
 )

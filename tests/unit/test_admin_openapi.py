@@ -67,7 +67,7 @@ def test_refresh_request_forbids_extra_fields_and_constrains_keys(schema: dict) 
     assert request["additionalProperties"] is False
     assert request.get("required", []) == []
     key = request["properties"]["source_key"]
-    assert "^[a-z0-9][a-z0-9_-]*$" in str(key)
+    assert "^[a-z0-9][a-z0-9_-]{0,63}$" in str(key)
 
 
 def test_job_resource_documents_exact_fields_and_vocabulary(schema: dict) -> None:

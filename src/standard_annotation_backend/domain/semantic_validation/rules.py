@@ -24,6 +24,7 @@ from standard_annotation_backend.domain.semantic_validation.checks import (
 )
 from standard_annotation_backend.domain.semantic_validation.details import (
     AllowedRelationsDetails,
+    DetailsShape,
     DuplicatePeersDetails,
     ObsoleteTermDetails,
     PrimaryIdDetails,
@@ -84,23 +85,40 @@ class Rule:
             SABE checks; the go-site page at `link` has the rule's full text.
         check: Returns the rule's issues. Every issue has `issue_type` as its type.
         details: The `TypedDict` from `semantic_validation.details` that the
-            issues' `details` follow, or `None` when they never have details. A
-            rule may send details for only some of its issues.
+            issues' `details` follow, or `None` when they never have details.
+        partial_details: Which issues have details, when only some do, such as
+            `only for an alternative GO_REF`; `None` when every issue has them.
         blocks_writes: Whether an annotation with this issue cannot be written.
             A rule that does not block writes runs only in QC reports.
         link: The go-site page of a GO Rule; `None` for other rules.
+
+    Raises:
+        ValueError: If `partial_details` is set without `details`, because the
+            API describes partial details only alongside their shape.
     """
 
     issue_type: str
     title: str
     check: SemanticCheck
-    details: type | None = None
+    details: DetailsShape | None = None
+    partial_details: str | None = None
     blocks_writes: bool = True
     link: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.partial_details is not None and self.details is None:
+            raise ValueError(
+                f"{self.issue_type} sets partial_details without a details shape"
+            )
+
 
 def _go_rule(
-    number: int, title: str, check: SemanticCheck, details: type | None = None
+    number: int,
+    title: str,
+    check: SemanticCheck,
+    details: DetailsShape | None = None,
+    *,
+    partial_details: str | None = None,
 ) -> Rule:
     """Return the rule for a GO Rule, named and linked by its number."""
     return Rule(
@@ -108,6 +126,7 @@ def _go_rule(
         title=title,
         check=check,
         details=details,
+        partial_details=partial_details,
         link=_GO_RULE_URL.format(number=number),
     )
 
@@ -163,7 +182,13 @@ RULES: tuple[Rule, ...] = (
     _go_rule(
         27, "Identifiers and assigned_by must match go-site metadata", gorule_0000027
     ),
-    _go_rule(30, "Only valid GO_REFs are allowed", gorule_0000030, PrimaryIdDetails),
+    _go_rule(
+        30,
+        "Only valid GO_REFs are allowed",
+        gorule_0000030,
+        PrimaryIdDetails,
+        partial_details="only for an alternative GO_REF",
+    ),
     _go_rule(33, "Only public reference IDs (PMID, DOI, GO_REF)", gorule_0000033),
     _go_rule(37, "IBA only assigned_by GO_Central with GO_REF:0000033", gorule_0000037),
     _go_rule(

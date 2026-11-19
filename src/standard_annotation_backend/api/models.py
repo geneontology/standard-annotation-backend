@@ -767,16 +767,12 @@ class QcReportRequest(BaseModel):
     ] = None
 
 
-_PARTIAL_DETAILS = {"gorule_0000030": "only for an alternative GO_REF"}
-"""Issue types that send details for only some of their issues."""
-
-
 def _issue_type_description(entry: IssueTypeEntry) -> str:
     """Return an issue type's title, GO Rule link, and details shape, if any."""
     notes = [] if entry.link is None else [entry.link]
     if entry.details is not None:
         shape = f"details: {entry.details.__name__}"
-        when = _PARTIAL_DETAILS.get(entry.issue_type)
+        when = entry.partial_details
         notes.append(shape if when is None else f"{shape}, {when}")
     return entry.title if not notes else f"{entry.title} ({'; '.join(notes)})"
 

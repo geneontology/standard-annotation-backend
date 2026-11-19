@@ -8,7 +8,6 @@ values, so every check runs without a database.
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
 from uuid import UUID
 
 from standard_annotation_backend.domain.errors import UnavailableError
@@ -20,37 +19,56 @@ RULES_REFERENCE_DATA = "rules"
 """The name `ReferenceDataUnavailableError` uses for the go-site rule data."""
 
 
-class TermStatus(StrEnum):
-    """Classify an identifier in the ontology that owns its prefix."""
-
-    CURRENT = "current"
-    OBSOLETE = "obsolete"
-    ALTERNATE = "alternate"
-    UNKNOWN = "unknown"
-
-
 @dataclass(frozen=True, slots=True)
-class TermFact:
-    """Describe one identifier in the active snapshot of its ontology.
+class CurrentTerm:
+    """Describe an identifier that is a current term of its ontology.
 
     Attributes:
-        status: Whether the identifier is a current term, an obsolete term, an
-            alternative identifier of a term, or none of these.
-        replaced_by: The terms the ontology names as replacements.
-        consider: The terms the ontology suggests considering instead.
-        primary_id: For an alternative identifier, its primary term.
         subsets: The subsets the term belongs to.
         checked_ancestors: The checked ancestors (see the `checked_ancestors`
             module) the term is, or descends from by `rdfs:subClassOf`. Filled
-            in only for current GO terms.
+            in only for GO terms.
     """
 
-    status: TermStatus
-    replaced_by: tuple[str, ...] = ()
-    consider: tuple[str, ...] = ()
-    primary_id: str | None = None
     subsets: frozenset[str] = frozenset()
     checked_ancestors: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class ObsoleteTerm:
+    """Describe an identifier that is an obsolete term of its ontology.
+
+    Attributes:
+        replaced_by: The terms the ontology names as replacements.
+        consider: The terms the ontology suggests considering instead.
+    """
+
+    replaced_by: tuple[str, ...] = ()
+    consider: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AlternateId:
+    """Describe an identifier that is an alternative ID of a term.
+
+    Attributes:
+        primary_id: The term the identifier is an alternative ID of.
+    """
+
+    primary_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnknownId:
+    """Describe an identifier that is neither a term nor an alternative ID."""
+
+
+type TermFact = CurrentTerm | ObsoleteTerm | AlternateId | UnknownId
+"""What the active snapshot of an identifier's ontology says about it.
+
+The class says whether the identifier is a current term, an obsolete term, an
+alternative ID, or none of these, and carries only the facts that apply.
+"""
 
 
 @dataclass(frozen=True, slots=True)

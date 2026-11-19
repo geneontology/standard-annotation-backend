@@ -28,8 +28,13 @@ from standard_annotation_backend.domain.jobs import FollowUpJob, JobFailureCode,
 from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.domain.validation import ValidationIssue
 
-SOURCE_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
-"""Pattern for every configured source key, also enforced in SQL checks."""
+SOURCE_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
+"""Pattern for every configured source key, also enforced in SQL checks.
+
+A key is at most 64 characters. Rejection reasons, such as an entity collision's,
+name the source key and are cut at `MAX_REJECTION_REASON_LENGTH`, so the limit
+keeps a key from being cut mid-name.
+"""
 
 AUTHORIZATION_SOURCE_KEY = "go-site"
 """Fixed key of the single authorization source."""

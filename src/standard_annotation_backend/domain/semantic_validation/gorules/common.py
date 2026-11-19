@@ -15,8 +15,7 @@ from standard_annotation_backend.domain.semantic_validation.evidence import (
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
-    TermFact,
-    TermStatus,
+    CurrentTerm,
 )
 from standard_annotation_backend.domain.validation import (
     ANNOTATION_ROOT,
@@ -60,9 +59,9 @@ def evidence_code(annotation: Annotation) -> str:
     return go_evidence_code(annotation.evidence_type)
 
 
-def annotated_term(annotation: Annotation, facts: AnnotationFacts) -> TermFact | None:
+def annotated_term(
+    annotation: Annotation, facts: AnnotationFacts
+) -> CurrentTerm | None:
     """Return the fact about `ontology_class_id` when it is a current term."""
     fact = facts.terms.get(annotation.ontology_class_id)
-    if fact is None or fact.status is not TermStatus.CURRENT:
-        return None
-    return fact
+    return fact if isinstance(fact, CurrentTerm) else None

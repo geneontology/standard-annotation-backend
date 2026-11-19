@@ -87,7 +87,9 @@ the [refresh guide](refresh-infrastructure.md).
 
 **Source and source key.** A source is one configured place SABE fetches data from,
 such as a GitHub file or an HTTPS URL. Each has a source key, such as `go` or `mgi`,
-that names it in `config/sources.yaml`, in jobs, and in stored snapshots.
+that names it in `config/sources.yaml`, in jobs, and in stored snapshots. A key is
+at most 64 lowercase letters, digits, `_`, and `-` (`SOURCE_KEY_PATTERN` in
+`domain/refresh.py`).
 
 **Sources file.** `config/sources.yaml`, which lists every source of every refresh
 kind. Each SABE process reads it once, at startup.
