@@ -356,6 +356,12 @@ def test_invalid_and_repeated_rows_are_rejected_and_the_rest_activated(
     assert body["status"] == "succeeded"
     assert (body["progress"]["data_rows"], body["progress"]["entity_count"]) == (6, 2)
     assert body["result"]["records_rejected"] == 4
+    progress = body["progress"]
+    assert (
+        progress["added_count"],
+        progress["retained_count"],
+        progress["removed_count"],
+    ) == (1, 1, 0)
     report = body["result"]["rejection_report"]
     assert report["issue_count"] == 4
     assert report["by_code"] == {"duplicate": 2, "field-count": 1, "validation": 1}
@@ -393,8 +399,15 @@ def test_rows_another_source_has_active_are_rejected_as_collisions(
 
     body = integration_api_client.get(f"/admin/jobs/{job_id}").json()
     assert body["status"] == "succeeded"
-    assert body["progress"]["entity_count"] == 1
-    assert body["progress"]["records_rejected"] == 1
+    progress = body["progress"]
+    assert progress["data_rows"] == 2
+    assert progress["entity_count"] == 1
+    assert progress["records_rejected"] == 1
+    assert (
+        progress["added_count"],
+        progress["retained_count"],
+        progress["removed_count"],
+    ) == (1, 0, 0)
     assert body["result"]["rejection_report"]["issues"] == [
         {
             "line_number": 4,
@@ -402,6 +415,17 @@ def test_rows_another_source_has_active_are_rejected_as_collisions(
             "reason": "db_object_id is active in source rgd",
         }
     ]
+    [audit] = _audit_events(session_factory, AuditAction.ENTITY_REFRESHED, job_id)
+    assert audit.details == {
+        "snapshot_id": body["result"]["snapshot_id"],
+        "source_key": "mgi",
+        "data_rows": 2,
+        "entity_count": 1,
+        "records_rejected": 1,
+        "added_count": 1,
+        "retained_count": 0,
+        "removed_count": 0,
+    }
     assert _memberships(session_factory) == [
         ("MGI:1", "rgd"),
         ("MGI:2", "mgi"),

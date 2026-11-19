@@ -11,6 +11,7 @@ from seeding import create_job
 from sqlalchemy import Engine
 
 from standard_annotation_backend.domain.jobs import JobType, ProgressReporter
+from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.refresh import (
     RefreshOutcome,
     SourceDocument,
@@ -210,6 +211,7 @@ def build_scan_runner(
     unit_of_work_factory: UnitOfWorkFactory,
     *,
     scan_unit_of_work_factory: UnitOfWorkFactory | None = None,
+    ontologies: OntologyCatalog = TEST_ONTOLOGIES,
 ) -> AnnotationScanRunner:
     """Build the production annotation scan runner and scans for the test ontologies.
 
@@ -218,6 +220,8 @@ def build_scan_runner(
         unit_of_work_factory: Opens the runner's transactions.
         scan_unit_of_work_factory: Opens the scans' own transactions, if they
             should differ from the runner's, such as a `refreshing_factory`.
+        ontologies: The ontologies the scans validate against, if not the test
+            sources' GO alone.
     """
     scan_factory = scan_unit_of_work_factory or unit_of_work_factory
     return AnnotationScanRunner(
@@ -225,8 +229,8 @@ def build_scan_runner(
         jobs=JobService(unit_of_work_factory),
         unit_of_work_factory=unit_of_work_factory,
         scans=(
-            TermReplacementScan(scan_factory, TEST_ONTOLOGIES),
-            QcReportScan(scan_factory, TEST_ONTOLOGIES),
+            TermReplacementScan(scan_factory, ontologies),
+            QcReportScan(scan_factory, ontologies),
         ),
     )
 

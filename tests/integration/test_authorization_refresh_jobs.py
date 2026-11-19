@@ -19,10 +19,10 @@ from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.models import (
     AuditEventRecord,
     AuthorizationRefreshRecord,
-    JobRecord,
 )
 from standard_annotation_backend.persistence.repositories.auth import AuthRepository
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.job_service import JobService
 from standard_annotation_backend.workers import tasks
 
 VALID_SOURCE = """
@@ -54,14 +54,6 @@ def _create_job(factory: UnitOfWorkFactory) -> UUID:
         requested_by="scheduler",
         parameters={"source_key": "go-site"},
     ).job_id
-
-
-def _load_job(factory: UnitOfWorkFactory, job_id: UUID) -> JobRecord:
-    with factory() as unit_of_work:
-        record = unit_of_work.jobs.get(job_id)
-        assert record is not None
-        unit_of_work.jobs.session.expunge(record)
-        return record
 
 
 def _install_github(
@@ -109,8 +101,8 @@ def test_authorization_refresh_job_succeeds_with_durable_result(
 
     tasks.run_job.run(str(job_id))
 
-    job = _load_job(unit_of_work_factory, job_id)
-    assert job.status == JobStatus.SUCCEEDED.value
+    job = JobService(unit_of_work_factory).find(job_id)
+    assert job.status is JobStatus.SUCCEEDED
     assert job.result is not None
     UUID(str(job.result["refresh_id"]))
     assert job.result == {
@@ -158,8 +150,8 @@ def test_authorization_refresh_failure_is_safe_and_preserves_prior_state(
 
     tasks.run_job.run(str(job_id))
 
-    job = _load_job(unit_of_work_factory, job_id)
-    assert job.status == JobStatus.FAILED.value
+    job = JobService(unit_of_work_factory).find(job_id)
+    assert job.status is JobStatus.FAILED
     assert job.error == "Authorization refresh failed"
     assert "secret" not in job.error
     assert job.progress["failure_code"] == failure_code
@@ -191,7 +183,7 @@ def test_infrastructure_failure_requests_retry(
     with pytest.raises(Retry):
         tasks.run_job.run(str(job_id))
 
-    assert _load_job(unit_of_work_factory, job_id).status == JobStatus.RUNNING.value
+    assert JobService(unit_of_work_factory).find(job_id).status is JobStatus.RUNNING
 
 
 def test_redelivery_after_success_does_not_repeat_audit_work(
@@ -232,8 +224,8 @@ def test_scheduler_creates_job_before_dispatch_and_records_dispatch_failure(
     tasks.schedule_refresh.run("authorization")
 
     assert len(dispatched) == 1
-    job = _load_job(unit_of_work_factory, UUID(dispatched[0]))
+    job = JobService(unit_of_work_factory).find(UUID(dispatched[0]))
     assert job.requested_by == "scheduler"
     assert job.parameters == {"source_key": "go-site"}
-    assert job.status == JobStatus.FAILED.value
+    assert job.status is JobStatus.FAILED
     assert job.error == "Authorization refresh could not be dispatched"

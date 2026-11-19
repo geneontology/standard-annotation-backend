@@ -21,6 +21,7 @@ from standard_annotation_backend.domain.qc_reports import STORED_QC_REPORT_RESUL
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import AnnotationRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services import qc_report_service
 from standard_annotation_backend.services.annotation_scan import queue_or_join
 from standard_annotation_backend.services.job_service import Job, JobService
 
@@ -324,3 +325,79 @@ def test_an_abandoned_report_keeps_no_findings_or_counts(
     assert _findings(unit_of_work_factory, stuck.job_id) == {}
     with unit_of_work_factory() as uow:
         assert uow.qc_reports.group_counts(stuck.job_id, None) == {}
+
+
+def test_a_report_that_fails_after_a_batch_committed_leaves_no_findings(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A report that fails on its second batch removes the first batch's findings."""
+    monkeypatch.setattr(qc_report_service, "_BATCH_SIZE", 1)
+    for reference in ("PMID:1", "PMID:2"):
+        _insert(
+            session_factory,
+            _annotation(db_object_id="UniProtKB:NOPE", references=[reference]),
+        )
+    job = _queue(unit_of_work_factory, None)
+    stored_before_failure: list[int] = []
+
+    def lose_go() -> None:
+        stored_before_failure.append(len(_findings(unit_of_work_factory, job.job_id)))
+        deactivate_reference_data(session_factory, SnapshotKind.ONTOLOGY, "go")
+
+    # The scan's first transaction checks reference data, and the second records the
+    # first batch, so GO is gone when the third reads the second batch.
+    build_scan_runner(
+        database_engine,
+        unit_of_work_factory,
+        scan_unit_of_work_factory=refreshing_factory(
+            unit_of_work_factory, before_call=3, refresh=lose_go
+        ),
+    ).run(job.job_id)
+
+    finished = JobService(unit_of_work_factory).find(job.job_id)
+    assert stored_before_failure == [1]
+    assert finished.status is JobStatus.FAILED
+    assert finished.progress["failure_code"] == "reference_data_unavailable"
+    assert _findings(unit_of_work_factory, job.job_id) == {}
+    with unit_of_work_factory() as uow:
+        assert uow.qc_reports.group_counts(job.job_id, None) == {}
+        assert uow.qc_reports.issue_counts(job.job_id, None) == {}
+
+
+def test_one_report_holds_structural_and_semantic_findings(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    database_engine: Engine,
+) -> None:
+    """A report lists a schema failure and a rule failure side by side."""
+    unknown = _insert(session_factory, _annotation(db_object_id="UniProtKB:NOPE"))
+    broken = _insert(session_factory, _annotation(references=["PMID:2"]))
+    with session_factory.begin() as session:
+        record = session.get(AnnotationRecord, broken)
+        assert record is not None
+        record.annotation_data = {**record.annotation_data, "evidence_type": "nonsense"}
+
+    job = _run(unit_of_work_factory, database_engine)
+
+    assert job.status is JobStatus.SUCCEEDED
+    with unit_of_work_factory() as uow:
+        assert uow.qc_reports.issue_counts(job.job_id, None) == {
+            "structural": 1,
+            "unknown_entity": 1,
+        }
+        for issue_type, annotation_id in (
+            ("structural", broken),
+            ("unknown_entity", unknown),
+        ):
+            page = uow.qc_reports.findings_page(
+                job.job_id,
+                owning_group_id=None,
+                created_by=None,
+                issue_type=issue_type,
+                limit=10,
+                offset=0,
+            )
+            assert [finding.annotation_id for finding in page.items] == [annotation_id]

@@ -1,10 +1,12 @@
 """Verify that term replacement jobs replace only what passes validation."""
 
-from collections.abc import Callable, Collection
-from uuid import UUID
+from collections.abc import Callable
+from typing import Literal
+from uuid import UUID, uuid4
 
 import pytest
 from refresh_helpers import (
+    TEST_ONTOLOGIES,
     OboTerm,
     build_scan_runner,
     obo,
@@ -17,16 +19,20 @@ from seeding import (
     deactivate_reference_data,
     insert_annotation,
 )
-from sqlalchemy import Engine, select, update
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from standard_annotation_backend.domain.annotations import Annotation, ChangeSource
-from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.domain.ontology import OntologyCatalog
-from standard_annotation_backend.domain.semantic_validation.facts import (
-    ActiveSnapshots,
-    TermFact,
+from standard_annotation_backend.domain.annotations import (
+    Annotation,
+    AnnotationStatus,
+    ChangeSource,
 )
+from standard_annotation_backend.domain.auth import (
+    AuthorizationRole,
+    AuthorizationScope,
+    RequestContext,
+)
+from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.domain.term_replacement import (
     STORED_TERM_REPLACEMENT_RESULT,
@@ -35,16 +41,23 @@ from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AuditEventRecord,
 )
-from standard_annotation_backend.persistence.repositories import (
-    ValidationFactsRepository,
-)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_scan import queue_or_join
+from standard_annotation_backend.services.annotation_service import AnnotationService
 from standard_annotation_backend.services.job_service import Job, JobService
 
 OBSOLETE = "GO:0000003"
 ALTERNATIVE = "GO:0000099"
 CURRENT = "GO:0006915"
+CURATOR = RequestContext(
+    actor_id="concurrent-curator",
+    token_id=uuid4(),
+    token_name="Concurrent curator",
+    role=AuthorizationRole.ADMIN,
+    scope=AuthorizationScope.GLOBAL,
+    group_id=None,
+)
+"""A client who edits annotations while a job runs."""
 
 
 @pytest.fixture(autouse=True)
@@ -108,6 +121,24 @@ def _record(
         assert record is not None
         session.expunge(record)
         return record
+
+
+def _edit(
+    unit_of_work_factory: UnitOfWorkFactory,
+    annotation_id: UUID,
+    edit: Literal["update", "delete"],
+) -> None:
+    """Update or delete version 1 of an annotation as a client would."""
+    service = AnnotationService(unit_of_work_factory, TEST_ONTOLOGIES)
+    if edit == "update":
+        service.patch(
+            annotation_id,
+            changes={"ontology_class_id": "GO:0000002"},
+            expected_version=1,
+            context=CURATOR,
+        )
+    else:
+        service.delete(annotation_id, expected_version=1, context=CURATOR)
 
 
 def test_obsolete_terms_and_alternative_ids_are_replaced_by_the_requester(
@@ -215,37 +246,35 @@ def test_a_result_with_issues_is_not_written(
         assert (record.ontology_class_id, record.current_version) == (OBSOLETE, 1)
 
 
+@pytest.mark.parametrize("edit", ["update", "delete"])
 def test_an_annotation_changed_after_it_was_read_is_skipped_as_stale(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
+    edit: Literal["update", "delete"],
 ) -> None:
-    """A concurrent edit on another connection wins, and the job counts it stale."""
+    """A client's update or deletion made after the job read the annotation is kept.
+
+    The job counts the annotation as stale and replaces nothing.
+    """
     annotation_id = _insert(session_factory, _annotation(OBSOLETE))
-    original = ValidationFactsRepository.terms
 
-    def edit_then_read(
-        self: ValidationFactsRepository,
-        identifiers: Collection[str],
-        ontologies: OntologyCatalog,
-        snapshots: ActiveSnapshots,
-    ) -> dict[str, TermFact]:
-        with session_factory.begin() as other:
-            other.execute(
-                update(AnnotationRecord)
-                .where(AnnotationRecord.annotation_id == annotation_id)
-                .values(current_version=AnnotationRecord.current_version + 1)
-            )
-        return original(self, identifiers, ontologies, snapshots)
-
-    monkeypatch.setattr(ValidationFactsRepository, "terms", edit_then_read)
-    job = _run(unit_of_work_factory, database_engine)
+    job = _run_with_work_before(
+        unit_of_work_factory,
+        database_engine,
+        3,
+        lambda: _edit(unit_of_work_factory, annotation_id, edit),
+    )
 
     assert job.result is not None
     assert job.result["annotation_stale_skip_count"] == 1
     assert job.result["annotation_replaced_count"] == 0
-    assert _record(session_factory, annotation_id).ontology_class_id == OBSOLETE
+    record = _record(session_factory, annotation_id)
+    assert record.current_version == 2
+    if edit == "update":
+        assert record.ontology_class_id == "GO:0000002"
+    else:
+        assert record.status == AnnotationStatus.DELETED
 
 
 def test_a_stored_annotation_that_cannot_be_read_is_skipped(
@@ -342,15 +371,20 @@ def _go_version_ids(job: Job) -> list[list[UUID]]:
     ]
 
 
-def _run_refreshing_go_before(
+def _run_with_work_before(
     unit_of_work_factory: UnitOfWorkFactory,
     database_engine: Engine,
     before_call: int,
+    work: Callable[[], object],
 ) -> Job:
-    """Run a job whose scan sees a new GO snapshot from one transaction on.
+    """Run a job that does `work` before one of its scan's transactions.
 
-    `before_call` counts the scan's transactions from 1. The scan's first transaction checks reference data is available, its second
-    reads the first batch, and its third writes the first replacement.
+    The work is something that happens while the job runs, such as a client's
+    edit or a GO refresh.
+
+    `before_call` counts the scan's transactions from 1. The scan's first
+    transaction checks reference data is available, its second reads the first
+    batch, and its third writes the first replacement.
     """
     with unit_of_work_factory() as uow:
         job = queue_or_join(
@@ -361,16 +395,7 @@ def _run_refreshing_go_before(
         ).job
         uow.commit()
     scan_factory = refreshing_factory(
-        unit_of_work_factory,
-        before_call=before_call,
-        refresh=lambda: refresh_go(
-            database_engine,
-            unit_of_work_factory,
-            obo(
-                OboTerm(CURRENT),
-                OboTerm(OBSOLETE, obsolete=True, replaced_by=(CURRENT,)),
-            ),
-        ),
+        unit_of_work_factory, before_call=before_call, refresh=work
     )
     build_scan_runner(
         database_engine,
@@ -378,6 +403,38 @@ def _run_refreshing_go_before(
         scan_unit_of_work_factory=scan_factory,
     ).run(job.job_id)
     return JobService(unit_of_work_factory).find(job.job_id)
+
+
+def _refresh_go_with_replacement(
+    database_engine: Engine, unit_of_work_factory: UnitOfWorkFactory
+) -> Job:
+    """Activate a new GO snapshot in which `OBSOLETE` is replaced by `CURRENT`."""
+    return refresh_go(
+        database_engine,
+        unit_of_work_factory,
+        obo(
+            OboTerm(CURRENT),
+            OboTerm(OBSOLETE, obsolete=True, replaced_by=(CURRENT,)),
+        ),
+    )
+
+
+def _run_refreshing_go_before(
+    unit_of_work_factory: UnitOfWorkFactory,
+    database_engine: Engine,
+    before_call: int,
+) -> Job:
+    """Run a job whose scan sees a new GO snapshot from one transaction on.
+
+    `before_call` counts the scan's transactions as `_run_with_work_before`
+    describes.
+    """
+    return _run_with_work_before(
+        unit_of_work_factory,
+        database_engine,
+        before_call,
+        lambda: _refresh_go_with_replacement(database_engine, unit_of_work_factory),
+    )
 
 
 def test_a_job_with_nothing_in_scope_records_no_reference_data(
@@ -413,28 +470,17 @@ def test_a_stale_write_adds_no_reference_data(
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     database_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A write skipped as stale was never validated, so its set is not listed."""
     annotation_id = _insert(session_factory, _annotation(OBSOLETE))
-    original = ValidationFactsRepository.terms
 
-    def edit_then_read(
-        self: ValidationFactsRepository,
-        identifiers: Collection[str],
-        ontologies: OntologyCatalog,
-        snapshots: ActiveSnapshots,
-    ) -> dict[str, TermFact]:
-        with session_factory.begin() as other:
-            other.execute(
-                update(AnnotationRecord)
-                .where(AnnotationRecord.annotation_id == annotation_id)
-                .values(current_version=AnnotationRecord.current_version + 1)
-            )
-        return original(self, identifiers, ontologies, snapshots)
+    def edit_and_refresh_go() -> None:
+        _edit(unit_of_work_factory, annotation_id, "update")
+        _refresh_go_with_replacement(database_engine, unit_of_work_factory)
 
-    monkeypatch.setattr(ValidationFactsRepository, "terms", edit_then_read)
-    job = _run_refreshing_go_before(unit_of_work_factory, database_engine, 3)
+    job = _run_with_work_before(
+        unit_of_work_factory, database_engine, 3, edit_and_refresh_go
+    )
 
     assert job.result is not None
     assert job.result["annotation_stale_skip_count"] == 1

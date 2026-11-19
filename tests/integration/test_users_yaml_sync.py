@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from uuid import UUID
 
 import pytest
@@ -15,8 +16,10 @@ from source_provenance import github_provenance
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from standard_annotation_backend.domain import snapshots as snapshot_vocabulary
 from standard_annotation_backend.domain.jobs import JobFailureCode, JobType
 from standard_annotation_backend.domain.refresh import (
+    RefreshKindName,
     SourceProvenance,
     TerminalRefreshError,
 )
@@ -340,6 +343,39 @@ def _provenance(revision: str, checksum: str) -> SourceProvenance:
         source_checksum=checksum,
         fetched_at=datetime(2026, 10, 1, tzinfo=UTC),
     )
+
+
+def test_a_newer_authorization_reader_applies_the_same_document_again(
+    unit_of_work_factory: UnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release with a newer users.yaml reader applies an unchanged document once.
+
+    Refreshing the same document again after that changes nothing.
+    """
+    provenance = github_provenance("a" * 40)
+    first = apply_users_yaml(unit_of_work_factory, INITIAL, provenance)
+    kind = RefreshKindName.AUTHORIZATION
+    monkeypatch.setattr(
+        snapshot_vocabulary,
+        "READER_VERSIONS",
+        MappingProxyType(
+            {
+                **snapshot_vocabulary.READER_VERSIONS,
+                kind: snapshot_vocabulary.READER_VERSIONS[kind] + 1,
+            }
+        ),
+    )
+
+    second = apply_users_yaml(unit_of_work_factory, INITIAL, provenance)
+    third = apply_users_yaml(unit_of_work_factory, INITIAL, provenance)
+
+    assert (first.unchanged, second.unchanged, third.unchanged) == (
+        False,
+        False,
+        True,
+    )
+    assert second.result["refresh_id"] != first.result["refresh_id"]
+    assert third.result["refresh_id"] == second.result["refresh_id"]
 
 
 def test_returning_to_an_earlier_document_applies_it_again(

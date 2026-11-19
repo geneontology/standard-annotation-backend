@@ -170,14 +170,6 @@ def _job(factory: UnitOfWorkFactory, case: KindCase, **parameters: object) -> UU
     ).job_id
 
 
-def _read(factory: UnitOfWorkFactory, job_id: UUID) -> JobRecord:
-    with factory() as uow:
-        record = uow.jobs.get(job_id)
-        assert record is not None
-        uow.jobs.session.expunge(record)
-        return record
-
-
 def _count(session_factory: sessionmaker[Session], action: AuditAction) -> int:
     with session_factory() as session:
         return int(
@@ -211,11 +203,11 @@ def test_refresh_applies_once_then_reports_unchanged(
     runner.run(second)
 
     for job_id in (first, second):
-        record = _read(unit_of_work_factory, job_id)
-        assert record.status == JobStatus.SUCCEEDED
+        record = JobService(unit_of_work_factory).find(job_id)
+        assert record.status is JobStatus.SUCCEEDED
         assert record.progress["phase"] == "completed"
-    first_record = _read(unit_of_work_factory, first)
-    second_record = _read(unit_of_work_factory, second)
+    first_record = JobService(unit_of_work_factory).find(first)
+    second_record = JobService(unit_of_work_factory).find(second)
     # Every kind reports "nothing applied" the same way, in progress and result.
     assert first_record.progress["unchanged"] is False
     assert first_record.result is not None
@@ -267,8 +259,8 @@ def test_source_failure_is_terminal_with_its_code(
 
     runner.run(job_id)
 
-    record = _read(unit_of_work_factory, job_id)
-    assert record.status == JobStatus.FAILED
+    record = JobService(unit_of_work_factory).find(job_id)
+    assert record.status is JobStatus.FAILED
     assert record.error == case.public_error
     assert record.progress == {"phase": "failed", "failure_code": code.value}
 
@@ -289,8 +281,8 @@ def test_invalid_document_is_terminal_with_the_kind_code(
 
     runner.run(job_id)
 
-    record = _read(unit_of_work_factory, job_id)
-    assert record.status == JobStatus.FAILED
+    record = JobService(unit_of_work_factory).find(job_id)
+    assert record.status is JobStatus.FAILED
     assert record.progress["failure_code"] == case.invalid_code.value
     assert "failure_details" in record.progress
     assert _count(session_factory, case.applied_action) == 0
@@ -308,8 +300,8 @@ def test_unconfigured_source_fails_without_fetching(
 
     runner.run(job_id)
 
-    record = _read(unit_of_work_factory, job_id)
-    assert record.status == JobStatus.FAILED
+    record = JobService(unit_of_work_factory).find(job_id)
+    assert record.status is JobStatus.FAILED
     assert record.error == case.public_error
     assert record.progress["failure_code"] == "unknown_source"
     assert fetchers.calls == []
@@ -356,8 +348,8 @@ def test_invalid_parameters_fail_without_fetching(
 
     runner.run(job_id)
 
-    record = _read(unit_of_work_factory, job_id)
-    assert record.status == JobStatus.FAILED
+    record = JobService(unit_of_work_factory).find(job_id)
+    assert record.status is JobStatus.FAILED
     assert record.error == case.public_error
     assert record.progress == {"phase": "failed", "failure_code": "invalid_parameters"}
     assert fetchers.calls == []
@@ -385,13 +377,13 @@ def test_infrastructure_error_leaves_job_running_for_retry(
     with pytest.raises(ConnectionResetError):
         broken.run(job_id)
 
-    assert _read(unit_of_work_factory, job_id).status == JobStatus.RUNNING
+    assert JobService(unit_of_work_factory).find(job_id).status is JobStatus.RUNNING
     build_runner(
         database_engine,
         unit_of_work_factory,
         FakeFetchers({case.source_key: case.content}),
     ).run(job_id)
-    assert _read(unit_of_work_factory, job_id).status == JobStatus.SUCCEEDED
+    assert JobService(unit_of_work_factory).find(job_id).status is JobStatus.SUCCEEDED
 
 
 def test_invalid_users_yaml_reports_issues_without_values(
@@ -410,7 +402,8 @@ def test_invalid_users_yaml_reports_issues_without_values(
     runner.run(job_id)
 
     details = cast(
-        dict[str, Any], _read(unit_of_work_factory, job_id).progress["failure_details"]
+        dict[str, Any],
+        JobService(unit_of_work_factory).find(job_id).progress["failure_details"],
     )
     assert details["issue_count"] >= 1
     assert {"location", "message", "type"} == set(details["issues"][0])
@@ -521,14 +514,14 @@ def test_what_a_refresh_stores_commits_only_with_its_success(
     with pytest.raises(RuntimeError, match="connection lost"):
         runner.run(job_id)
 
-    assert _read(unit_of_work_factory, job_id).status == JobStatus.RUNNING
+    assert JobService(unit_of_work_factory).find(job_id).status is JobStatus.RUNNING
     assert _count(session_factory, applied.applied_action) == 0
     assert _row_count(session_factory, stored) == 0
 
     runner.run(job_id)
 
-    finished = _read(unit_of_work_factory, job_id)
-    assert finished.status == JobStatus.SUCCEEDED
+    finished = JobService(unit_of_work_factory).find(job_id)
+    assert finished.status is JobStatus.SUCCEEDED
     assert finished.result is not None and finished.result["unchanged"] is False
     assert _count(session_factory, applied.applied_action) == 1
     assert _row_count(session_factory, stored) == 1
@@ -747,4 +740,4 @@ def test_snapshot_kinds_report_storing_then_activating_for_a_new_snapshot(
     ).run(job_id)
 
     assert seen == ["storing", "activating"]
-    assert _read(unit_of_work_factory, job_id).status is JobStatus.SUCCEEDED
+    assert JobService(unit_of_work_factory).find(job_id).status is JobStatus.SUCCEEDED

@@ -28,12 +28,12 @@ from standard_annotation_backend.go_site.rule_files import (
     RETRACTED_PUBLICATIONS_PATH,
 )
 from standard_annotation_backend.persistence.models import (
-    JobRecord,
     ReferenceSnapshotRecord,
     RetractedPublicationRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.refresh.sources import RefreshSources
+from standard_annotation_backend.services.job_service import Job, JobService
 from standard_annotation_backend.services.rules_refresh_service import (
     RulesRefreshService,
 )
@@ -68,7 +68,7 @@ def _run(
     content: bytes,
     *,
     sources: RefreshSources = TEST_SOURCES,
-) -> JobRecord:
+) -> Job:
     """Run one rules refresh job over packed `content` and return the finished job."""
     job_id = create_job(
         factory,
@@ -78,14 +78,10 @@ def _run(
     ).job_id
     fetchers = FakeFetchers({"go-site": content})
     build_runner(engine, factory, fetchers, sources=sources).run(job_id)
-    with factory() as uow:
-        record = uow.jobs.get(job_id)
-        assert record is not None
-        uow.jobs.session.expunge(record)
-        return record
+    return JobService(factory).find(job_id)
 
 
-def _snapshot_id(job: JobRecord) -> UUID:
+def _snapshot_id(job: Job) -> UUID:
     """Return the snapshot named in a succeeded job's result."""
     assert job.result is not None
     return UUID(str(job.result["snapshot_id"]))
@@ -153,7 +149,7 @@ def test_refresh_activates_the_six_files_as_one_snapshot(
         "unchanged": False,
         "unrecognized_extension_namespaces": [],
     }
-    assert job.warnings == []
+    assert job.warnings == ()
     assert _stored(session_factory) == {_snapshot_id(job): (True, FIXTURE_PMIDS)}
 
 
@@ -249,7 +245,7 @@ def test_extension_namespaces_unknown_to_sabe_are_reported_as_warnings(
     assert job.result is not None
     assert job.result["unrecognized_extension_namespaces"] == ["XAO"]
     assert job.progress["unrecognized_extension_namespace_count"] == 1
-    assert job.warnings == [XAO_WARNING]
+    assert job.warnings == (XAO_WARNING,)
 
 
 def test_the_warning_reflects_the_ontologies_configured_now(
@@ -272,8 +268,8 @@ def test_the_warning_reflects_the_ontologies_configured_now(
         sources=sources_with(ontologies={"zfa": zfa, "xao": _ontology("XAO")}),
     )
 
-    assert before.warnings == [XAO_WARNING]
+    assert before.warnings == (XAO_WARNING,)
     assert after.result is not None
     assert after.result["unchanged"] is True
     assert after.result["unrecognized_extension_namespaces"] == []
-    assert after.warnings == []
+    assert after.warnings == ()
