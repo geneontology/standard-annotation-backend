@@ -126,6 +126,14 @@ def test_nul_in_any_gpi_column_rejects_the_row(column: int) -> None:
     assert _gpi_items(GPI_HEADER + "\t".join(fields) + "\n") == [NUL_REJECTION]
 
 
+def test_a_header_message_is_cut_to_1000_characters() -> None:
+    """A header error keeps at most 1,000 characters of its message."""
+    error = ExchangeHeaderError("x" * 1500)
+
+    assert error.message == "x" * 1000
+    assert error.failure_details == {"message": "x" * 1000}
+
+
 @pytest.mark.parametrize("fmt", FORMATS)
 def test_a_header_line_with_nul_fails_the_document(fmt: Format) -> None:
     """A NUL character in a header line fails the whole document with `header`."""

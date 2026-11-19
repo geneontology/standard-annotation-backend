@@ -58,7 +58,8 @@ def test_cross_source_race_leaves_a_shared_identifier_with_one_source(
 
     Both jobs store their catalogs and hold their transactions open before either
     activates. Both succeed: the first to activate keeps the shared identifier, and
-    the other rejects it as a collision and activates its own identifier.
+    the other rejects it as a collision that names the first source and activates
+    its own identifier.
     """
     service = EntityRefreshService()
     prefixes = {"mgi": "MGI", "rgd": "RGD"}
@@ -114,6 +115,13 @@ def test_cross_source_race_leaves_a_shared_identifier_with_one_source(
     assert loser_result is not None
     report = cast(dict[str, Any], loser_result["rejection_report"])
     assert report["by_code"] == {"collision": 1}
+    assert report["issues"] == [
+        {
+            "line_number": 4,
+            "code": "collision",
+            "reason": f"db_object_id is active in source {winner}",
+        }
+    ]
     assert active_ids(session_factory) == sorted(
         [f"{prefixes[winner]}:new", f"{prefixes[loser]}:new", "SHARED:1"]
     )

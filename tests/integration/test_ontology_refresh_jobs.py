@@ -12,8 +12,8 @@ from seeding import create_job
 
 from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
-from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.job_service import JobService
 from standard_annotation_backend.workers import tasks
 
 SHA = "a" * 40
@@ -75,14 +75,6 @@ def _create_job(factory: UnitOfWorkFactory) -> UUID:
     ).job_id
 
 
-def _load_job(factory: UnitOfWorkFactory, job_id: UUID) -> JobRecord:
-    with factory() as uow:
-        record = uow.jobs.get(job_id)
-        assert record is not None
-        uow.jobs.session.expunge(record)
-        return record
-
-
 def _install_source(
     monkeypatch: pytest.MonkeyPatch,
     responses: list[httpx2.Response],
@@ -138,10 +130,10 @@ consider: GO:9999999
 
     tasks.run_job.run(str(job_id))
 
-    job = _load_job(unit_of_work_factory, job_id)
-    assert job.status == JobStatus.SUCCEEDED.value
+    job = JobService(unit_of_work_factory).find(job_id)
+    assert job.status is JobStatus.SUCCEEDED
     assert job.progress["ontology_warning_count"] == 1
-    assert job.warnings == ["Ontology refresh completed with 1 ontology warning"]
+    assert job.warnings == ("Ontology refresh completed with 1 ontology warning",)
     assert job.result is not None
     assert job.result["ontology_warnings"] == [
         {
@@ -177,8 +169,8 @@ def test_source_and_parse_failures_store_only_public_error(
 
     tasks.run_job.run(str(job_id))
 
-    job = _load_job(unit_of_work_factory, job_id)
-    assert job.status == JobStatus.FAILED.value
+    job = JobService(unit_of_work_factory).find(job_id)
+    assert job.status is JobStatus.FAILED
     assert job.error == "Ontology refresh failed"
     assert "secret" not in job.error
     assert job.progress["failure_code"] == failure_code
@@ -209,8 +201,8 @@ def test_scheduler_persists_only_key_and_records_dispatch_failure(
     tasks.schedule_refresh.run("ontology")
 
     assert len(dispatched) == 1
-    job = _load_job(unit_of_work_factory, UUID(dispatched[0]))
+    job = JobService(unit_of_work_factory).find(UUID(dispatched[0]))
     assert job.requested_by == "scheduler"
     assert job.parameters == {"source_key": "go"}
-    assert job.status == JobStatus.FAILED.value
+    assert job.status is JobStatus.FAILED
     assert job.error == "Ontology refresh could not be dispatched"

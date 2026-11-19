@@ -3,12 +3,17 @@
 from collections.abc import Callable
 from uuid import UUID
 
+from fastapi import status
+from fastapi.testclient import TestClient
 from refresh_helpers import (
     TEST_ONTOLOGIES,
     TEST_SOURCES,
     FakeFetchers,
+    OboTerm,
     build_runner,
+    build_scan_runner,
     gpi_bytes,
+    obo,
 )
 from seeding import (
     SHIPPED_SOURCES,
@@ -28,10 +33,13 @@ from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AuditEventRecord,
+    OntologySnapshotDetailRecord,
+    OntologyTermRecord,
     ReferenceSnapshotRecord,
     StoredEntityRecord,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
+from standard_annotation_backend.services.annotation_scan import queue_or_join
 from standard_annotation_backend.services.annotation_validator import (
     AnnotationValidator,
     Candidate,
@@ -78,7 +86,7 @@ def _issue_types(
 ) -> list[str]:
     """Validate a stored annotation as it stands and return its issue types."""
     with unit_of_work_factory() as uow:
-        record = uow.annotations.session.get(AnnotationRecord, annotation_id)
+        record = uow.annotations.get(annotation_id)
         assert record is not None
         [checked] = AnnotationValidator(TEST_ONTOLOGIES).check(
             uow, [Candidate(record.annotation_data, annotation_id)]
@@ -198,6 +206,81 @@ def test_a_removed_source_with_an_unfinished_job_is_retired_later(
     second = _start(unit_of_work_factory, RefreshKindName.ENTITY, None)
 
     assert second.retired == ("zfin",)
+
+
+def test_pruning_a_retired_ontology_keeps_what_an_older_qc_report_lists(
+    active_annotation_subjects: None,
+    seed_annotation: Callable[[str], UUID],
+    integration_api_client: TestClient,
+    database_engine: Engine,
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A retired ontology's terms are pruned, but a QC report still lists its version.
+
+    The snapshot's detail row is kept, so the report's record of the ontology
+    version it used stays accurate after the terms are gone.
+    """
+    seed_annotation("UniProtKB:P12345")
+    # The shipped ontology that owns the seeded `CHEBI:` terms. The test sources
+    # configure only GO, so refreshing every ontology retires it.
+    retired_key = next(
+        key
+        for key, prefixes in SHIPPED_SOURCES.ontology_catalog().prefixes_by_key.items()
+        if "CHEBI" in prefixes
+    )
+    used = active_snapshot(session_factory, SnapshotKind.ONTOLOGY, retired_key)
+    assert used is not None
+    with unit_of_work_factory() as uow:
+        report = queue_or_join(
+            uow,
+            job_type=JobType.ANNOTATION_QC_REPORT,
+            group_key=None,
+            requested_by="scheduler",
+        ).job
+        uow.commit()
+    build_scan_runner(
+        database_engine,
+        unit_of_work_factory,
+        ontologies=SHIPPED_SOURCES.ontology_catalog(),
+    ).run(report.job_id)
+
+    started = _start(unit_of_work_factory, RefreshKindName.ONTOLOGY, None)
+    go = next(job for job in started.jobs if job.parameters["source_key"] == "go")
+    build_runner(
+        database_engine,
+        unit_of_work_factory,
+        FakeFetchers({"go": obo(OboTerm("GO:0000001"))}),
+    ).run(go.job_id)
+
+    with session_factory() as session:
+        retired = session.get(ReferenceSnapshotRecord, used.snapshot_id)
+        assert retired is not None
+        assert retired.retired_at is not None and retired.pruned_at is not None
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(OntologyTermRecord)
+                .where(OntologyTermRecord.snapshot_id == used.snapshot_id)
+            )
+            == 0
+        )
+        assert session.get(OntologySnapshotDetailRecord, used.snapshot_id) is not None
+    response = integration_api_client.get(f"/reports/annotation-qc/{report.job_id}")
+    assert response.status_code == status.HTTP_200_OK
+    assert [
+        ontology
+        for versions in response.json()["reference_data"]
+        for ontology in versions["ontologies"]
+        if ontology["ontology_key"] == retired_key
+    ] == [
+        {
+            "ontology_key": retired_key,
+            "version_id": str(used.snapshot_id),
+            "document_version": None,
+            "source_revision": None,
+        }
+    ]
 
 
 def test_refreshing_one_source_retires_nothing(

@@ -21,6 +21,9 @@ from standard_annotation_backend.persistence.models import (
     AnnotationRecord,
     AnnotationStagingRecord,
 )
+from standard_annotation_backend.persistence.repositories.annotation_imports import (
+    AnnotationImportRepository,
+)
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.job_executors import JobExecutors
 from standard_annotation_backend.services.job_service import JobService
@@ -210,6 +213,58 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
             == 0
         )
         assert session.get(AnnotationImportRecord, job_id) is None
+
+
+def test_an_error_left_for_retry_leaves_no_staged_annotations(
+    jobs: JobService,
+    runner_for: Callable[..., JobExecutors],
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected error after staging leaves the job running with nothing staged.
+
+    Running the job again publishes the file.
+    """
+    original = AnnotationImportRepository.publish
+    staged: list[int] = []
+
+    def lose_connection(
+        self: AnnotationImportRepository, *args: object, **kwargs: object
+    ) -> AnnotationImportRecord:
+        staged.append(
+            int(
+                self.session.scalar(
+                    select(func.count()).select_from(AnnotationStagingRecord)
+                )
+                or 0
+            )
+        )
+        raise RuntimeError("connection lost")
+
+    monkeypatch.setattr(AnnotationImportRepository, "publish", lose_connection)
+    job_id = _job(unit_of_work_factory)
+
+    with pytest.raises(RuntimeError, match="connection lost"):
+        runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)
+
+    assert staged == [1]
+    assert jobs.find(job_id).status is JobStatus.RUNNING
+    # Staging rows have no effect any client can see; counting them is the only
+    # way to check that the failed attempt left none behind.
+    with session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(AnnotationStagingRecord)
+                .where(AnnotationStagingRecord.job_id == job_id)
+            )
+            == 0
+        )
+    monkeypatch.setattr(AnnotationImportRepository, "publish", original)
+    runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)
+    assert jobs.find(job_id).status is JobStatus.SUCCEEDED
+    assert _group_annotations(session_factory) == 1
 
 
 def test_job_for_a_sabe_managed_group_fails_with_group_sabe_managed(

@@ -1,6 +1,6 @@
 """Verify starting QC reports and reading them within each reader's scope."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,7 +18,7 @@ from standard_annotation_backend.domain.auth import (
     AuthorizationScope,
     RequestContext,
 )
-from standard_annotation_backend.domain.jobs import JobType
+from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.main import app
 from standard_annotation_backend.persistence.models import JobRecord
 from standard_annotation_backend.persistence.repositories import QcReportRepository
@@ -326,6 +326,8 @@ def test_findings_reject_unknown_query_parameters_and_issue_types(
     assert unknown.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert unknown.json()["error"]["code"] == "unknown_query_parameter"
     assert bad_type.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert bad_type.json()["error"]["code"] == "request_validation_error"
+    assert bad_type.json()["error"]["details"][0]["location"] == ["query", "issue_type"]
 
 
 def test_a_newer_report_expires_older_findings_of_its_scope_only(
@@ -464,6 +466,40 @@ def test_reports_are_listed_newest_first_with_findings_availability(
     older_findings = integration_api_client.get(f"{PATH}/{older}/findings")
     assert newer_findings.status_code == status.HTTP_200_OK
     assert older_findings.status_code == status.HTTP_410_GONE
+
+
+def test_reports_created_at_the_same_time_are_listed_by_id(
+    integration_api_client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    """Reports created at the same moment are listed larger ID first.
+
+    The order is the same on every request, so pages do not overlap or skip a
+    report.
+    """
+    created = datetime(2026, 1, 1, tzinfo=UTC)
+    with session_factory.begin() as session:
+        for number, parameters in ((1, {}), (2, {"group_key": "MGI"})):
+            session.add(
+                JobRecord(
+                    job_id=UUID(int=number),
+                    job_type=JobType.ANNOTATION_QC_REPORT,
+                    status=JobStatus.QUEUED,
+                    requested_by="scheduler",
+                    parameters=parameters,
+                    progress={},
+                    warnings=[],
+                    created_at=created,
+                    updated_at=created,
+                )
+            )
+
+    response = integration_api_client.get(PATH)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert [item["report_id"] for item in response.json()["items"]] == [
+        str(UUID(int=2)),
+        str(UUID(int=1)),
+    ]
 
 
 @pytest.mark.parametrize("scope", ["self", "group"])

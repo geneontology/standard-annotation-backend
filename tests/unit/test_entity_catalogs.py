@@ -37,3 +37,32 @@ def test_every_line_of_a_repeated_identifier_is_rejected() -> None:
         RowRejection(9, "duplicate", "db_object_id also appears on line 5"),
         RowRejection(12, "duplicate", "db_object_id also appears on line 5"),
     )
+
+
+def test_an_empty_catalog_keeps_and_rejects_nothing() -> None:
+    """A catalog without records keeps nothing and rejects nothing."""
+    assert reject_repeated_identifiers(()) == ((), ())
+
+
+def test_repeats_interleaved_with_other_identifiers_are_each_rejected() -> None:
+    """Repeats of several identifiers, mixed with others, are each matched correctly.
+
+    Each rejected line names another line of its own identifier, and the one
+    identifier listed once is kept.
+    """
+    records = tuple(
+        _record(line_number, identifier)
+        for line_number, identifier in enumerate(
+            ("MGI:1", "MGI:2", "MGI:1", "MGI:3", "MGI:2"), start=4
+        )
+    )
+
+    kept, rejections = reject_repeated_identifiers(records)
+
+    assert kept == (records[3],)
+    assert rejections == (
+        RowRejection(4, "duplicate", "db_object_id also appears on line 6"),
+        RowRejection(5, "duplicate", "db_object_id also appears on line 8"),
+        RowRejection(6, "duplicate", "db_object_id also appears on line 4"),
+        RowRejection(8, "duplicate", "db_object_id also appears on line 5"),
+    )

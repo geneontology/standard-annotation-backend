@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from standard_annotation_backend.domain.ontology import OntologyDefinition
+from standard_annotation_backend.domain.ontology import (
+    GO_ONTOLOGY_KEY,
+    OntologyDefinition,
+)
 from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     UnknownSourceError,
@@ -60,9 +63,10 @@ def _file(**sections: object) -> dict[str, object]:
 
 
 def test_shipped_sources_file_is_valid() -> None:
-    """The committed sources file loads with the go-site and ontology sources it ships.
+    """The committed sources file loads, and GO is read as GO Rules expect.
 
-    GO is read with its expected `ontology: go` header.
+    GO is read with its expected `ontology: go` header and owns the `GO` prefix.
+    Loading the file already enforces the rest of what GO Rules need from GO.
     """
     sources = RefreshSources(load_sources_file(SHIPPED_FILE))
 
@@ -71,22 +75,9 @@ def test_shipped_sources_file_is_valid() -> None:
     assert sources.source(RefreshKindName.RULES, "go-site") == GitHubRulesSource(
         type="github", repository="geneontology/go-site", ref="master"
     )
-    assert sources.keys(RefreshKindName.ONTOLOGY) == (
-        "chebi",
-        "cl",
-        "emapa",
-        "fbbt",
-        "go",
-        "ncbitaxon",
-        "pr",
-        "so",
-        "uberon",
-        "wbbt",
-        "wbls",
-        "xao",
-        "zfa",
-    )
-    assert sources.ontology_definition("go").document_ontology_id == "go"
+    go = sources.ontology_definition(GO_ONTOLOGY_KEY)
+    assert go.document_ontology_id == "go"
+    assert "GO" in go.identifier_prefixes
 
 
 def test_any_kind_may_use_either_source_type() -> None:
