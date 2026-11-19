@@ -29,7 +29,6 @@ from uuid import UUID
 
 from standard_annotation_backend.domain.jobs import (
     TERMINAL_JOB_STATUSES,
-    FollowUpJob,
     JobFailureCode,
     JobType,
     ProgressReporter,
@@ -206,11 +205,12 @@ class RefreshRunner:
 
     def _execute(
         self, kind: RefreshKind, job: Job, source_key: str
-    ) -> tuple[FollowUpJob, ...]:
+    ) -> tuple[UUID, ...]:
         """Fetch, apply, and record success in one transaction.
 
         Returns:
-            The jobs `apply` queued, to send once the transaction has committed.
+            The IDs of the jobs `apply` queued, to send once the transaction
+            has committed.
         """
         # Look the source up now rather than when the job was created: the
         # sources file may have changed since, and a removed source must not be
@@ -245,27 +245,23 @@ class RefreshRunner:
             unit_of_work.commit()
         return outcome.follow_ups
 
-    def _send_follow_up(self, follow_up: FollowUpJob) -> None:
+    def _send_follow_up(self, job_id: UUID) -> None:
         """Send a queued follow-up job after the refresh has committed.
 
-        A job the refresh created is failed with `dispatch_failed` if sending it
-        fails. If even that cannot be recorded, the error is logged and the job
-        stays queued until the next refresh that queues the same job joins it
-        and sends it. Nothing here can fail the refresh, which has already
-        succeeded.
+        If sending fails, the job is failed with `dispatch_failed` unless an
+        earlier send of it succeeded or a worker has started it. If even that
+        cannot be recorded, the error is logged and the job stays queued until
+        the next refresh that queues the same job joins it and sends it. Nothing
+        here can fail the refresh, which has already succeeded.
         """
         if self._dispatch_follow_up is None:
             return
         try:
-            self._jobs.send(
-                self._jobs.find(follow_up.job_id),
-                created=follow_up.created,
-                dispatch=self._dispatch_follow_up,
-            )
+            self._jobs.send(self._jobs.find(job_id), dispatch=self._dispatch_follow_up)
         except Exception as error:
             logger.error(
                 "Follow-up job could not be sent: job_id=%s failure_type=%s",
-                follow_up.job_id,
+                job_id,
                 type(error).__name__,
             )
 

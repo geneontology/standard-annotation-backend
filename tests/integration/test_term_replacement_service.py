@@ -107,7 +107,7 @@ def _run(
             job_type=JobType.TERM_REPLACEMENT,
             group_key=group_key,
             requested_by="curator",
-        ).job
+        )
         uow.commit()
     build_scan_runner(database_engine, unit_of_work_factory).run(job.job_id)
     return JobService(unit_of_work_factory).find(job.job_id)
@@ -392,7 +392,7 @@ def _run_with_work_before(
             job_type=JobType.TERM_REPLACEMENT,
             group_key=None,
             requested_by="curator",
-        ).job
+        )
         uow.commit()
     scan_factory = refreshing_factory(
         unit_of_work_factory, before_call=before_call, refresh=work

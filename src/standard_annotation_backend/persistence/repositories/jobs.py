@@ -160,7 +160,12 @@ class JobRepository:
         parameters: dict[str, object],
         excluding: UUID,
     ) -> list[JobRecord]:
-        """Return running jobs with this type and these parameters, oldest first.
+        """Lock and return the running jobs with a type and parameters, oldest first.
+
+        The rows take the same lock as `lock_job_record` and stay locked until
+        the transaction ends. A job that another transaction is finishing is
+        waited for, and PostgreSQL then checks its status again, so a job whose
+        success or failure committed in the meantime is not returned.
 
         Args:
             job_type: The job type to match.
@@ -177,6 +182,8 @@ class JobRepository:
                     JobRecord.job_id != excluding,
                 )
                 .order_by(JobRecord.created_at, JobRecord.job_id)
+                .with_for_update(key_share=True)
+                .execution_options(populate_existing=True)
             )
         )
 
@@ -203,6 +210,21 @@ class JobRepository:
         record.updated_at = now
         self.session.flush([record])
         return JobMutation(record, True)
+
+    def record_sent(self, job_id: UUID, *, now: datetime) -> JobRecord:
+        """Record under a row lock that a send of the job succeeded.
+
+        Only the first successful send's time is kept. `updated_at` is left
+        alone, because sending does not change the job's state.
+
+        Raises:
+            JobNotFoundError: If the job does not exist.
+        """
+        record = self._lock(job_id)
+        if record.sent_at is None:
+            record.sent_at = now
+            self.session.flush([record])
+        return record
 
     def update_progress(
         self,

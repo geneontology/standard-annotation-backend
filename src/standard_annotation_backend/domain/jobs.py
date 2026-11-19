@@ -1,7 +1,6 @@
 """Define supported asynchronous job types, lifecycle states, and job errors."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
@@ -139,21 +138,6 @@ def scan_groups(parameters: Mapping[str, object]) -> str | None:
     ):
         raise ValueError("scan group parameters must be {} or {group_key}")
     return group_key
-
-
-@dataclass(frozen=True, slots=True)
-class FollowUpJob:
-    """Identify a job that a refresh queued, to be sent after the refresh commits.
-
-    Attributes:
-        job_id: The queued job.
-        created: Whether the refresh created the job, rather than joining one
-            that was already queued. Only a created job is failed when sending it
-            fails.
-    """
-
-    job_id: UUID
-    created: bool
 
 
 class JobNotFoundError(NotFoundError):

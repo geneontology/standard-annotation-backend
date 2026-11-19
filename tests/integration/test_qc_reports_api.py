@@ -595,9 +595,9 @@ def test_a_joined_report_that_cannot_be_sent_stays_queued(
     sent: list[UUID],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A report another start created is left queued when sending it again fails.
+    """A report an earlier start sent is left queued when sending it again fails.
 
-    The earlier send may already have put it in the broker.
+    The earlier send put it in the broker, so a worker will still run it.
     """
     first = integration_api_client.post(PATH, json={})
 

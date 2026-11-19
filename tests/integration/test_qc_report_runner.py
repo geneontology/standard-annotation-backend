@@ -62,7 +62,7 @@ def _queue(unit_of_work_factory: UnitOfWorkFactory, group_key: str | None) -> Jo
             job_type=JobType.ANNOTATION_QC_REPORT,
             group_key=group_key,
             requested_by="scheduler",
-        ).job
+        )
         uow.commit()
     return job
 

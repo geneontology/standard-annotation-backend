@@ -20,11 +20,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import Field
 
 from standard_annotation_backend.domain.errors import InvalidInputError
-from standard_annotation_backend.domain.jobs import FollowUpJob, JobFailureCode, JobType
+from standard_annotation_backend.domain.jobs import JobFailureCode, JobType
 from standard_annotation_backend.domain.stored_json import StoredJson
 from standard_annotation_backend.domain.validation import ValidationIssue
 
@@ -189,16 +190,16 @@ class RefreshOutcome:
         warnings: Short messages stored on the job.
         unchanged: Whether the document was already active, so nothing was
             applied.
-        follow_ups: Jobs that `apply` queued, such as a term replacement job
-            after an ontology activation. The runner sends them to workers after
-            the transaction commits.
+        follow_ups: IDs of the jobs that `apply` queued, such as a term
+            replacement job after an ontology activation. The runner sends them
+            to workers after the transaction commits.
     """
 
     result: dict[str, object]
     counts: Mapping[str, int] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
     unchanged: bool = False
-    follow_ups: tuple[FollowUpJob, ...] = ()
+    follow_ups: tuple[UUID, ...] = ()
 
 
 REFRESH_JOB_TYPES: Mapping[RefreshKindName, JobType] = {

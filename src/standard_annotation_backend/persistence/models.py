@@ -398,6 +398,8 @@ class JobRecord(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set by the first successful send; see `JobService.send`.
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class QcReportFindingRecord(Base):

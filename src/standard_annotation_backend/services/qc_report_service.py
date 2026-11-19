@@ -274,8 +274,9 @@ class QcReportService:
 
         A global admin reports on one group or, without `owning_group_id`, on all
         groups. An admin limited to one group always reports on that group. If
-        sending the report to a worker fails, a report this call created is
-        returned failed with `dispatch_failed`; a reused report is left queued.
+        sending the report to a worker fails and no earlier send of it
+        succeeded, it is returned failed with `dispatch_failed`; otherwise it is
+        left queued.
 
         Args:
             context: The caller's authorization.
@@ -307,7 +308,7 @@ class QcReportService:
             )
             unit_of_work.commit()
         return JobService(self._unit_of_work_factory).send(
-            queued.job, created=queued.created, dispatch=self._dispatch
+            queued, dispatch=self._dispatch
         )
 
     def list(

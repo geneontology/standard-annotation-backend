@@ -25,12 +25,13 @@ from standard_annotation_backend.services.job_service import JobService
 TIMEOUT = 10
 
 
-def wait_for_lock(engine: Engine, backend_pid: int) -> None:
+def wait_for_lock(engine: Engine, backend_pid: int | None = None) -> None:
     """Wait until PostgreSQL reports that a backend process is waiting on a lock.
 
     Args:
         engine: Engine used to query `pg_stat_activity` on a separate connection.
-        backend_pid: Process ID of the connection expected to be waiting.
+        backend_pid: Process ID of the connection expected to be waiting, or
+            `None` to wait for any connection to the test database.
 
     Raises:
         AssertionError: If no lock wait is seen before the timeout.
@@ -38,12 +39,19 @@ def wait_for_lock(engine: Engine, backend_pid: int) -> None:
     deadline = monotonic() + TIMEOUT
     with engine.connect() as connection:
         while monotonic() < deadline:
-            if connection.scalar(
+            waiting = connection.scalar(
                 text(
-                    "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                    "SELECT count(*) > 0 FROM pg_stat_activity "
+                    "WHERE datname = current_database() "
+                    "AND wait_event_type = 'Lock' "
+                    "AND (CAST(:pid AS integer) IS NULL OR pid = :pid)"
                 ),
                 {"pid": backend_pid},
-            ):
+            )
+            # PostgreSQL keeps one `pg_stat_activity` snapshot per transaction,
+            # so end it to see waits that begin after the first poll.
+            connection.rollback()
+            if waiting:
                 return
     raise AssertionError("second connection did not wait on a PostgreSQL lock")
 
