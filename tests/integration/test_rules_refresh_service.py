@@ -206,7 +206,8 @@ def test_the_same_files_from_a_newer_commit_are_not_stored_again(
 ) -> None:
     """A go-site commit that leaves the six files alone creates no snapshot.
 
-    The snapshot keeps the commit it was first read from.
+    The snapshot keeps the commit it was first read from, and the job reports the
+    same counts as the refresh that stored it.
     """
     service = RulesRefreshService(TEST_ONTOLOGIES)
     first = apply_in_transaction(
@@ -225,6 +226,8 @@ def test_the_same_files_from_a_newer_commit_are_not_stored_again(
     assert (first.unchanged, second.unchanged) == (False, True)
     assert second.result["snapshot_id"] == first.result["snapshot_id"]
     assert second.result["source_revision"] == "a" * 40
+    assert first.counts["database_count"] > 0
+    assert second.counts == first.counts
 
 
 def test_extension_namespaces_unknown_to_sabe_are_reported_as_warnings(

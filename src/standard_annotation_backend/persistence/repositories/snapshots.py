@@ -24,8 +24,9 @@ the one place that defines how snapshots behave:
   does, so a transaction never loses data it is reading. A reader given snapshot
   IDs from another transaction calls `require_readable`, which takes the same
   lock and raises `SnapshotPrunedError` instead of reading nothing.
-- Decoded rule data: `resolve` indexes a rules snapshot's rule data once per
-  process and caches it by snapshot ID. Stored snapshot data never changes and
+- Decoded rule data: `rule_data`, which `resolve` and the rules refresh call,
+  indexes a rules snapshot's rule data once per process and caches it by
+  snapshot ID. Stored snapshot data never changes and
   snapshot IDs are never reused, so a cached entry is always current for its
   snapshot.
 - Retention: For each source with an active snapshot, the active snapshot and
@@ -57,6 +58,7 @@ from sqlalchemy.orm import Session
 
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.refresh import (
+    RULES_SOURCE_KEY,
     RefreshKindName,
     SourceProvenance,
 )
@@ -266,9 +268,10 @@ class SnapshotRepository:
         """Return and lock the active snapshots that validation reads.
 
         These are the active snapshots of each configured ontology, of the
-        go-site rule data, and of every entity catalog. One query finds them and
-        locks each with `FOR KEY SHARE` until the transaction ends, so pruning
-        cannot delete their data while the caller reads it. Refreshes can still
+        go-site rule data (source key `RULES_SOURCE_KEY`; the partial unique index
+        on active snapshots allows only one), and of every entity catalog. One
+        query finds them and locks each with `FOR KEY SHARE` until the transaction
+        ends, so pruning cannot delete their data while the caller reads it. Refreshes can still
         activate newer snapshots meanwhile; the caller keeps reading these. The
         rule data's index is cached by snapshot ID, so later calls that find the
         same active rules snapshot skip decoding it.
@@ -294,9 +297,11 @@ class SnapshotRepository:
                         ReferenceSnapshotRecord.kind == SnapshotKind.ONTOLOGY,
                         ReferenceSnapshotRecord.source_key.in_(ontologies.keys),
                     ),
-                    ReferenceSnapshotRecord.kind.in_(
-                        (SnapshotKind.RULES, SnapshotKind.ENTITY)
+                    and_(
+                        ReferenceSnapshotRecord.kind == SnapshotKind.RULES,
+                        ReferenceSnapshotRecord.source_key == RULES_SOURCE_KEY,
                     ),
+                    ReferenceSnapshotRecord.kind == SnapshotKind.ENTITY,
                 ),
             )
             .order_by(ReferenceSnapshotRecord.kind, ReferenceSnapshotRecord.source_key)
@@ -322,7 +327,7 @@ class SnapshotRepository:
         return ActiveSnapshots(
             ontology_versions=ontology_versions,
             rules_snapshot_id=rules_row.snapshot_id,
-            rule_data=self._rule_data(rules_row.snapshot_id, rules_row.reader_version),
+            rule_data=self.rule_data(rules_row.snapshot_id, rules_row.reader_version),
             entity_catalogs=entity_catalogs,
         )
 
@@ -477,14 +482,19 @@ class SnapshotRepository:
         self.session.flush(records)
         return tuple(records)
 
-    def _rule_data(self, snapshot_id: UUID, reader_version: int) -> RuleDataIndex:
+    def rule_data(self, snapshot_id: UUID, reader_version: int) -> RuleDataIndex:
         """Return a rules snapshot's rule data, indexed for the GO Rules.
 
-        The index is cached by snapshot ID, so each snapshot's data is normally
-        decoded once per process; concurrent first reads may each decode it.
-        Failures are not cached. A cached snapshot's data is
-        not read again; `resolve` has locked the active snapshot, and an active
-        snapshot's data is never pruned.
+        This is the only place stored rule data is decoded. The index is cached by
+        snapshot ID, so each snapshot's data is normally decoded once per process;
+        concurrent first reads may each decode it. Failures are not cached. A
+        cached snapshot's data is not read again, so the caller must know the
+        snapshot cannot be pruned meanwhile: `resolve` has locked it, or it is
+        active, and an active snapshot's data is never pruned.
+
+        Args:
+            snapshot_id: The rules snapshot to read.
+            reader_version: The reader version that stored the snapshot's data.
 
         Raises:
             SnapshotPrunedError: If the snapshot has no rule data.

@@ -1,5 +1,6 @@
 """Verify the semantic checks over gathered annotation facts."""
 
+from collections.abc import Mapping
 from uuid import UUID
 
 import pytest
@@ -12,10 +13,13 @@ from standard_annotation_backend.domain.semantic_validation.checked_ancestors im
     PROTEIN_CONTAINING_COMPLEX,
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
+    AlternateId,
     AnnotationFacts,
+    CurrentTerm,
     EntityFact,
+    ObsoleteTerm,
     TermFact,
-    TermStatus,
+    UnknownId,
 )
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     DatabaseEntry,
@@ -36,7 +40,7 @@ from standard_annotation_backend.domain.validation import ValidationIssue
 
 ENTITY = EntityFact(db_object_taxon_id="NCBITaxon:9606", db_object_type="PR:000000001")
 TERM = "GO:0006915"
-CURRENT = TermFact(TermStatus.CURRENT, checked_ancestors=frozenset({BP_ROOT}))
+CURRENT = CurrentTerm(checked_ancestors=frozenset({BP_ROOT}))
 PEER = UUID("00000000-0000-0000-0000-000000000001")
 RULE_DATA = RuleData(
     databases=(DatabaseEntry("CL"), DatabaseEntry("UniProtKB")),
@@ -65,7 +69,7 @@ def _annotation(**changes: object) -> Annotation:
 
 
 def _facts(
-    terms: dict[str, TermFact] | None = None,
+    terms: Mapping[str, TermFact] | None = None,
     *,
     entity: EntityFact | None = ENTITY,
     peers: tuple[UUID, ...] = (),
@@ -92,7 +96,7 @@ def test_every_field_that_may_hold_a_term_is_checked_where_it_appears() -> None:
         with_or_from=["UniProtKB:Q1", "GO:0003674"],
         interacting_taxon_id=["NCBITaxon:10090"],
     )
-    unknown = TermFact(TermStatus.UNKNOWN)
+    unknown = UnknownId()
     terms = dict.fromkeys(
         (TERM, "CL:0000000", "GO:0003674", "NCBITaxon:10090"), unknown
     )
@@ -137,11 +141,11 @@ def test_each_term_problem_is_reported_at_its_identifier_with_details() -> None:
         ],
     )
     terms = {
-        "GO:0000002": TermFact(
-            TermStatus.OBSOLETE, replaced_by=("GO:0000001",), consider=("GO:0000003",)
+        "GO:0000002": ObsoleteTerm(
+            replaced_by=("GO:0000001",), consider=("GO:0000003",)
         ),
-        "CL:0000001": TermFact(TermStatus.ALTERNATE, primary_id="CL:0000000"),
-        "CL:9999999": TermFact(TermStatus.UNKNOWN),
+        "CL:0000001": AlternateId(primary_id="CL:0000000"),
+        "CL:9999999": UnknownId(),
     }
 
     issues = validate_semantics(annotation, _facts(terms))
@@ -195,7 +199,7 @@ def test_issues_from_every_check_are_returned_in_a_stable_order() -> None:
     follows the catalog and duplicate checks.
     """
     annotation = _annotation(interacting_taxon_id=["NCBITaxon:1"])
-    terms = {TERM: CURRENT, "NCBITaxon:1": TermFact(TermStatus.UNKNOWN)}
+    terms = {TERM: CURRENT, "NCBITaxon:1": UnknownId()}
 
     issues = validate_semantics(annotation, _facts(terms, entity=None, peers=(PEER,)))
 
@@ -215,9 +219,7 @@ def test_a_missing_term_fact_suppresses_only_the_rules_that_need_it() -> None:
         evidence_type="ECO:0000353",
     )
 
-    issues = validate_semantics(
-        annotation, _facts({"GO:0004672": TermFact(TermStatus.UNKNOWN)})
-    )
+    issues = validate_semantics(annotation, _facts({"GO:0004672": UnknownId()}))
 
     assert [(issue["location"], issue["type"]) for issue in issues] == [
         (("annotation", "ontology_class_id"), "unknown_term"),
@@ -286,8 +288,8 @@ def test_issues_follow_the_registry_order() -> None:
     )
     terms = {
         TERM: CURRENT,
-        "CL:0000001": TermFact(TermStatus.ALTERNATE, primary_id="CL:0000000"),
-        "CL:9999999": TermFact(TermStatus.UNKNOWN),
+        "CL:0000001": AlternateId(primary_id="CL:0000000"),
+        "CL:9999999": UnknownId(),
     }
 
     issues = validate_semantics(annotation, _facts(terms, entity=None, peers=(PEER,)))
@@ -301,6 +303,12 @@ def test_issues_follow_the_registry_order() -> None:
         "alternate_term_id",
         "duplicate_annotation",
     ]
+
+
+def test_a_rule_cannot_note_partial_details_without_a_details_shape() -> None:
+    """Saying which issues have details requires naming the shape they follow."""
+    with pytest.raises(ValueError, match="partial_details"):
+        Rule("x", "x", _always("x"), partial_details="only for some issues")
 
 
 def test_a_rule_reporting_another_rules_type_is_an_error(
@@ -339,12 +347,12 @@ def test_report_only_rules_run_only_when_requested(
     [
         (
             "obsolete_term",
-            {TERM: TermFact(TermStatus.OBSOLETE, replaced_by=("GO:1",))},
+            {TERM: ObsoleteTerm(replaced_by=("GO:1",))},
             (),
         ),
         (
             "alternate_term_id",
-            {TERM: TermFact(TermStatus.ALTERNATE, primary_id="GO:1")},
+            {TERM: AlternateId(primary_id="GO:1")},
             (),
         ),
         ("duplicate_annotation", None, (PEER,)),

@@ -258,6 +258,15 @@ def test_invalid_sources_are_rejected(data: dict[str, object]) -> None:
         SourcesFile.model_validate(data)
 
 
+def test_source_keys_are_at_most_64_characters() -> None:
+    """A 64-character key is accepted; a longer one is rejected."""
+    source = {"type": "https", "url": "https://e.org/m"}
+
+    SourcesFile.model_validate(_file(entities={"m" * 64: source}))
+    with pytest.raises(ValidationError):
+        SourcesFile.model_validate(_file(entities={"m" * 65: source}))
+
+
 @pytest.mark.parametrize("text", ["", "authorization: [", "- go-site\n"])
 def test_unreadable_or_malformed_file_is_rejected(tmp_path: Path, text: str) -> None:
     """Empty, unparsable, and non-mapping files are rejected."""

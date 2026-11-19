@@ -28,9 +28,10 @@ from refresh_helpers import (
     source_document,
     start_job,
 )
-from seeding import SHIPPED_SOURCES, active_snapshot
+from seeding import SHIPPED_SOURCES, active_snapshot, seeded_snapshot
 from seeding import create_job as queue_job
 from sqlalchemy import Engine, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain import snapshots as snapshot_vocabulary
@@ -41,12 +42,15 @@ from standard_annotation_backend.domain.refresh import (
     RefreshKindName,
     SourceDocument,
 )
-from standard_annotation_backend.domain.semantic_validation.facts import TermStatus
+from standard_annotation_backend.domain.semantic_validation.facts import (
+    CurrentTerm,
+)
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 from standard_annotation_backend.persistence.models import (
     OntologyTermRecord,
     ReferenceSnapshotRecord,
     RuleDataRecord,
+    RulesSnapshotDetailRecord,
     StoredEntityRecord,
 )
 from standard_annotation_backend.persistence.repositories import SnapshotPrunedError
@@ -382,7 +386,7 @@ def test_a_reader_keeps_its_snapshot_through_two_activations_and_prunes(
         )
 
     assert [job.status for job in jobs] == [JobStatus.SUCCEEDED] * 2
-    assert facts.terms["GO:0006915"].status is TermStatus.CURRENT
+    assert isinstance(facts.terms["GO:0006915"], CurrentTerm)
     _run(
         database_engine,
         unit_of_work_factory,
@@ -436,6 +440,36 @@ def test_validation_reads_entity_facts_from_the_resolved_catalog(
     assert current.entity is None
 
 
+def test_resolve_reads_the_go_site_rules_snapshot(
+    session_factory: sessionmaker[Session],
+    unit_of_work_factory: UnitOfWorkFactory,
+    reference_data: Callable[..., None],
+) -> None:
+    """An active rules snapshot under another key does not affect validation."""
+    with session_factory.begin() as session:
+        seeded_snapshot(session, SnapshotKind.RULES, "other", "rules_refresh")
+    go_site = active_snapshot(session_factory, SnapshotKind.RULES, RULES_SOURCE_KEY)
+
+    with unit_of_work_factory() as unit_of_work:
+        resolved = unit_of_work.snapshots.resolve(SHIPPED_ONTOLOGIES)
+
+    assert go_site is not None
+    assert resolved.rules_snapshot_id == go_site.snapshot_id
+
+
+def test_the_database_rejects_a_source_key_over_64_characters(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A snapshot's source key has the same limit as the sources file."""
+    with session_factory.begin() as session:
+        seeded_snapshot(session, SnapshotKind.ENTITY, "m" * 64, "entity_refresh")
+    with (
+        pytest.raises(IntegrityError, match="source_key_format"),
+        session_factory.begin() as session,
+    ):
+        seeded_snapshot(session, SnapshotKind.ENTITY, "n" * 65, "entity_refresh")
+
+
 def test_undecodable_rule_data_from_an_older_reader_is_unavailable_until_refreshed(
     integration_api_client: TestClient,
     database_engine: Engine,
@@ -463,16 +497,34 @@ def test_undecodable_rule_data_from_an_older_reader_is_unavailable_until_refresh
         RULES_SOURCE_KEY,
         files,
     )
+    # Stored rule data never changes, so the refreshed snapshot is replaced by one
+    # that an earlier reader stored from the same files, as an older release would.
     with session_factory.begin() as session:
-        rules = session.scalars(
+        refreshed = session.scalars(
             select(ReferenceSnapshotRecord).where(
                 ReferenceSnapshotRecord.kind == SnapshotKind.RULES,
                 ReferenceSnapshotRecord.active.is_(True),
             )
         ).one()
-        rules.reader_version = 0
+        refreshed.active = False
+        session.flush([refreshed])
+        older = seeded_snapshot(
+            session, SnapshotKind.RULES, RULES_SOURCE_KEY, "rules_refresh"
+        )
+        older.source_type = refreshed.source_type
+        older.source_locator = refreshed.source_locator
+        older.source_revision = refreshed.source_revision
+        older.source_checksum = refreshed.source_checksum
+        older.reader_version = 0
         undecodable: dict[str, object] = {"unexpected": True}
-        session.get_one(RuleDataRecord, rules.snapshot_id).data = undecodable
+        session.add_all(
+            [
+                RulesSnapshotDetailRecord(
+                    snapshot_id=older.snapshot_id, retracted_publication_count=0
+                ),
+                RuleDataRecord(snapshot_id=older.snapshot_id, data=undecodable),
+            ]
+        )
 
     unavailable = integration_api_client.post("/annotations", json=payload)
     reloaded = _run(

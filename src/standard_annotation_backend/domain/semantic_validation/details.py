@@ -67,3 +67,11 @@ IssueDetails = (
     | AllowedRelationsDetails
 )
 """Any issue's `details`."""
+
+type DetailsShape = (
+    type[ObsoleteTermDetails]
+    | type[PrimaryIdDetails]
+    | type[DuplicatePeersDetails]
+    | type[AllowedRelationsDetails]
+)
+"""One of the shapes above, as a rule declares the shape of its issues' details."""

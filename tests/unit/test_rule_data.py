@@ -1,9 +1,14 @@
 """Verify the pure checks over go-site metadata."""
 
+from typing import cast
+
+import pytest
+
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     DatabaseEntry,
     ExtensionConstraint,
     RuleData,
+    RuleDataIndex,
     unrecognized_extension_namespaces,
 )
 
@@ -35,3 +40,16 @@ def test_only_namespaces_neither_configured_nor_databases_are_reported() -> None
     data = _data(("GO", "MGI", "XAO"), ("ZFA", "CHEBI", "XAO"), ("FBbt",))
 
     assert unrecognized_extension_namespaces(data, {"GO", "ZFA"}) == ("FBbt", "XAO")
+
+
+def test_indexed_rule_data_cannot_be_changed() -> None:
+    """Rule data shared between validations is read-only, and is not hashable."""
+    index = RuleDataIndex.of(_data(("GO",)))
+    # A caller that ignores the `Mapping` type and writes to the lookup anyway.
+    databases = cast("dict[str, DatabaseEntry]", index.databases)
+
+    with pytest.raises(TypeError):
+        databases["XAO"] = DatabaseEntry(database="XAO")
+    with pytest.raises(TypeError):
+        hash(index)
+    assert set(index.databases) == {"MGI", "CHEBI"}

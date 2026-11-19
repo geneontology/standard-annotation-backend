@@ -21,8 +21,10 @@ from pydantic import Field
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.semantic_validation.facts import (
+    AlternateId,
+    CurrentTerm,
+    ObsoleteTerm,
     TermFact,
-    TermStatus,
 )
 from standard_annotation_backend.domain.semantic_validation.identifiers import (
     split_identifier,
@@ -40,11 +42,13 @@ def replacement_step(fact: TermFact) -> str | None:
     An alternative ID is replaced by its primary term. An obsolete term is
     replaced by its `replaced_by` term only when it has exactly one.
     """
-    if fact.status is TermStatus.ALTERNATE:
-        return fact.primary_id
-    if fact.status is TermStatus.OBSOLETE and len(fact.replaced_by) == 1:
-        return fact.replaced_by[0]
-    return None
+    match fact:
+        case AlternateId(primary_id=primary_id):
+            return primary_id
+        case ObsoleteTerm(replaced_by=(replacement,)):
+            return replacement
+        case _:
+            return None
 
 
 def replacement_chain_terms(
@@ -116,7 +120,7 @@ def replacement_for(
         fact = terms.get(current)
         if fact is None:
             return None
-        if fact.status is TermStatus.CURRENT:
+        if isinstance(fact, CurrentTerm):
             return None if current == identifier else current
         following = replacement_step(fact)
         if (

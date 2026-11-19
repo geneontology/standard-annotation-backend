@@ -15,9 +15,9 @@ from standard_annotation_backend.domain.semantic_validation.checked_ancestors im
 )
 from standard_annotation_backend.domain.semantic_validation.facts import (
     AnnotationFacts,
+    CurrentTerm,
     EntityFact,
     TermFact,
-    TermStatus,
 )
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     DatabaseEntry,
@@ -66,10 +66,9 @@ def annotation(evidence: str = "IDA", **changes: object) -> Annotation:
     )
 
 
-def term(*checked_ancestors: str, subsets: Iterable[str] = ()) -> TermFact:
+def term(*checked_ancestors: str, subsets: Iterable[str] = ()) -> CurrentTerm:
     """Return a current term that falls under `checked_ancestors` and is in `subsets`."""
-    return TermFact(
-        TermStatus.CURRENT,
+    return CurrentTerm(
         subsets=frozenset(subsets),
         checked_ancestors=frozenset(checked_ancestors),
     )

@@ -40,6 +40,7 @@ from standard_annotation_backend.domain.change_sets import (
     ChangeSetState,
 )
 from standard_annotation_backend.domain.jobs import JobStatus, JobType
+from standard_annotation_backend.domain.refresh import SOURCE_KEY_PATTERN
 from standard_annotation_backend.domain.snapshots import SnapshotKind
 
 
@@ -480,7 +481,7 @@ class ReferenceSnapshotRecord(Base):
     __table_args__ = (
         CheckConstraint("kind IN ('entity', 'ontology', 'rules')", name="kind_allowed"),
         CheckConstraint(
-            "source_key ~ '^[a-z0-9][a-z0-9_-]*$'", name="source_key_format"
+            f"source_key ~ '{SOURCE_KEY_PATTERN}'", name="source_key_format"
         ),
         CheckConstraint(
             "source_checksum ~ '^[0-9a-f]{64}$'", name="source_checksum_format"
@@ -1073,7 +1074,7 @@ class AnnotationImportRecord(Base):
             "source_checksum ~ '^[0-9a-f]{64}$'", name="source_checksum_format"
         ),
         CheckConstraint(
-            "source_key ~ '^[a-z0-9][a-z0-9_-]*$'", name="source_key_format"
+            f"source_key ~ '{SOURCE_KEY_PATTERN}'", name="source_key_format"
         ),
         CheckConstraint("group_key ~ '[^[:space:]]'", name="group_key_nonblank"),
         CheckConstraint(

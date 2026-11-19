@@ -125,7 +125,12 @@ def test_issue_type_descriptions_name_their_details_shape(schema: dict) -> None:
     assert described["obsolete_term"] == (
         "Term is obsolete (details: ObsoleteTermDetails)"
     )
-    assert "PrimaryIdDetails" in described["gorule_0000030"]
+    assert described["gorule_0000030"].endswith(
+        "details: PrimaryIdDetails, only for an alternative GO_REF)"
+    )
+    assert described["alternate_term_id"] == (
+        "Identifier is an alternative ID (details: PrimaryIdDetails)"
+    )
     assert "details" not in described["unknown_term"]
 
 

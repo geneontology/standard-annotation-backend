@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.semantic_validation.facts import (
+    AlternateId,
+    CurrentTerm,
     EntityFact,
-    TermFact,
-    TermStatus,
+    ObsoleteTerm,
+    UnknownId,
 )
 from standard_annotation_backend.domain.semantic_validation.rule_data import (
     ExtensionConstraint,
@@ -68,12 +70,10 @@ def test_facts_describe_terms_entities_and_peers_from_active_snapshots(
         )
 
     assert first.terms == {
-        "GO:0008150": TermFact(
-            TermStatus.CURRENT, checked_ancestors=frozenset({"GO:0008150"})
-        ),
-        "CL:0000099": TermFact(TermStatus.ALTERNATE, primary_id="CL:0000000"),
-        "CL:9999999": TermFact(TermStatus.UNKNOWN),
-        "GO:0000003": TermFact(TermStatus.OBSOLETE, replaced_by=("GO:0008150",)),
+        "GO:0008150": CurrentTerm(checked_ancestors=frozenset({"GO:0008150"})),
+        "CL:0000099": AlternateId(primary_id="CL:0000000"),
+        "CL:9999999": UnknownId(),
+        "GO:0000003": ObsoleteTerm(replaced_by=("GO:0008150",)),
     }
     assert first.entity == EntityFact("NCBITaxon:7955", "PR:000000001")
     assert first.duplicate_peer_ids == (PEER,)
@@ -116,8 +116,7 @@ def test_go_facts_include_subsets_checked_ancestors_rule_data_and_retracted_pmid
     with unit_of_work_factory() as uow:
         (facts,) = uow.validation_facts.gather([annotation], [()], ONTOLOGIES)
 
-    assert facts.terms["GO:0099991"] == TermFact(
-        TermStatus.CURRENT,
+    assert facts.terms["GO:0099991"] == CurrentTerm(
         subsets=frozenset({"gocheck_obsoletion_candidate"}),
         checked_ancestors=frozenset({"GO:0006915", "GO:0008150"}),
     )

@@ -8,8 +8,11 @@ import pytest
 from standard_annotation_backend.domain.annotations import Annotation
 from standard_annotation_backend.domain.ontology import OntologyCatalog
 from standard_annotation_backend.domain.semantic_validation.facts import (
+    AlternateId,
+    CurrentTerm,
+    ObsoleteTerm,
     TermFact,
-    TermStatus,
+    UnknownId,
 )
 from standard_annotation_backend.domain.snapshots import (
     EntityCatalogUse,
@@ -27,15 +30,15 @@ from standard_annotation_backend.domain.term_replacement import (
 ONTOLOGIES = OntologyCatalog(
     {"go": ("GO",), "cl": ("CL",), "chebi": ("CHEBI",), "ncbitaxon": ("NCBITaxon",)}
 )
-CURRENT = TermFact(TermStatus.CURRENT)
+CURRENT = CurrentTerm()
 
 
 def _obsolete(*replaced_by: str) -> TermFact:
-    return TermFact(TermStatus.OBSOLETE, replaced_by=replaced_by)
+    return ObsoleteTerm(replaced_by=replaced_by)
 
 
 def _alternate(primary_id: str) -> TermFact:
-    return TermFact(TermStatus.ALTERNATE, primary_id=primary_id)
+    return AlternateId(primary_id=primary_id)
 
 
 @pytest.mark.parametrize(
@@ -67,7 +70,7 @@ def test_single_replacements_alt_ids_and_chains_lead_to_a_current_term(
         {"GO:1": _obsolete()},
         {"GO:1": _obsolete("GO:2", "GO:3"), "GO:2": CURRENT, "GO:3": CURRENT},
         {"GO:1": _obsolete("GO:2"), "GO:2": _obsolete()},
-        {"GO:1": _obsolete("GO:2"), "GO:2": TermFact(TermStatus.UNKNOWN)},
+        {"GO:1": _obsolete("GO:2"), "GO:2": UnknownId()},
         {"GO:1": _obsolete("GO:2")},
         {"GO:1": _obsolete("GO:2"), "GO:2": _obsolete("GO:1")},
         {"GO:1": _obsolete("CHEBI:2"), "CHEBI:2": CURRENT},

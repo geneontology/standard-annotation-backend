@@ -47,3 +47,9 @@ def test_changing_the_original_mapping_does_not_change_the_catalog() -> None:
     assert catalog.keys == ("go",)
     assert catalog.key_of("CL") is None
     assert catalog.key_of("GOX") is None
+
+
+def test_a_catalog_is_not_hashable() -> None:
+    """A catalog cannot be used as a set member or dictionary key."""
+    with pytest.raises(TypeError):
+        hash(OntologyCatalog({"go": ("GO",)}))
