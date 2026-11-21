@@ -9,6 +9,7 @@ from time import monotonic
 from typing import Any
 from uuid import UUID
 
+import pytest
 from annotation_refresh_helpers import gpad_bytes, gpad_row
 from psycopg import Cursor
 from refresh_helpers import TEST_SOURCES, apply_in_transaction, source_document
@@ -23,8 +24,13 @@ from standard_annotation_backend.persistence.locks import (
     GLOBAL_ANNOTATION_WRITE_LOCK_KEY,
 )
 from standard_annotation_backend.persistence.models import (
+    AnnotationImportRecord,
     AnnotationMultivaluedFieldValueRecord,
     AnnotationRecord,
+)
+from standard_annotation_backend.persistence.repositories.annotation_imports import (
+    AnnotationImportRepository,
+    StagedImport,
 )
 from standard_annotation_backend.persistence.unit_of_work import UnitOfWorkFactory
 from standard_annotation_backend.services.annotation_refresh_service import (
@@ -213,3 +219,65 @@ def test_publication_hides_its_changes_and_makes_annotation_writes_wait(
         ("import", ["PMID:2"]),
     ]
     assert group_rows(session_factory, "RGD") == [("direct", ["PMID:42"])]
+
+
+def test_imports_for_two_groups_stage_at_once_and_publish_only_their_own_rows(
+    unit_of_work_factory: UnitOfWorkFactory,
+    session_factory: sessionmaker[Session],
+    seed_active_subjects: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Imports for two groups can stage at the same time.
+
+    Each publishes only the annotations in its own file, whichever publishes first.
+    """
+    seed_active_subjects("UniProtKB:P12345", "UniProtKB:Q99999")
+    service = AnnotationRefreshService(TEST_SOURCES)
+    mgi_job = create_job(unit_of_work_factory, source_key="mgi-gpad")
+    rgd_job = create_job(unit_of_work_factory, source_key="rgd-gpad")
+    mgi_document = source_document(
+        "mgi-gpad",
+        gpad_bytes(
+            gpad_row("UniProtKB:P12345", reference="PMID:1"),
+            gpad_row("UniProtKB:P12345", reference="PMID:2"),
+        ),
+    )
+    rgd_document = source_document(
+        "rgd-gpad", gpad_bytes(gpad_row("UniProtKB:Q99999", reference="PMID:3"))
+    )
+    mgi_staged = Event()
+    release_mgi = Event()
+    original_publish = AnnotationImportRepository.publish
+
+    def publish_after_pause(
+        repository: AnnotationImportRepository, staged: StagedImport, *, actor_id: str
+    ) -> AnnotationImportRecord:
+        if staged.job_id == mgi_job.job_id:
+            mgi_staged.set()
+            assert release_mgi.wait(TIMEOUT)
+        return original_publish(repository, staged, actor_id=actor_id)
+
+    monkeypatch.setattr(AnnotationImportRepository, "publish", publish_after_pause)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            mgi = pool.submit(
+                apply_in_transaction,
+                unit_of_work_factory,
+                service,
+                mgi_job,
+                mgi_document,
+            )
+            assert mgi_staged.wait(TIMEOUT)
+            apply_in_transaction(unit_of_work_factory, service, rgd_job, rgd_document)
+            assert group_rows(session_factory, "RGD") == [("import", ["PMID:3"])]
+            assert group_rows(session_factory, "MGI") == []
+        finally:
+            release_mgi.set()
+        mgi.result(timeout=TIMEOUT)
+
+    assert group_rows(session_factory, "MGI") == [
+        ("import", ["PMID:1"]),
+        ("import", ["PMID:2"]),
+    ]
+    assert group_rows(session_factory, "RGD") == [("import", ["PMID:3"])]

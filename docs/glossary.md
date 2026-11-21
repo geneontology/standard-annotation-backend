@@ -159,8 +159,9 @@ progress reports the phases `storing` and `activating`.
 
 **Staging and publication.** What a GPAD refresh or cutover does: it stages the file's
 valid annotations, then publishes them, replacing the group's annotations, versions,
-comments, and change sets. Both happen in the job's transaction. Its progress reports
-the phases `staging` and `publishing`.
+comments, and change sets. Both happen in the job's transaction, and the staged
+annotations are held in temporary tables that are dropped when it ends. Its progress
+reports the phases `staging` and `publishing`.
 
 **Rejected row.** A GPI or GPAD data row that a refresh did not load: it could not be
 read, failed the schema, or, in a GPI file, lists an identifier that another row also

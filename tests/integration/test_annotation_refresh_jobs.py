@@ -19,7 +19,6 @@ from standard_annotation_backend.domain.jobs import JobStatus, JobType
 from standard_annotation_backend.persistence.models import (
     AnnotationImportRecord,
     AnnotationRecord,
-    AnnotationStagingRecord,
 )
 from standard_annotation_backend.persistence.repositories.annotation_imports import (
     AnnotationImportRepository,
@@ -170,7 +169,7 @@ def test_unchanged_file_is_skipped_and_cutover_never_skips(
         "invalid-gzip",
     ],
 )
-def test_terminal_failures_keep_the_group_and_clean_staging(
+def test_terminal_failures_keep_the_group_and_record_no_import(
     jobs: JobService,
     runner_for: Callable[..., JobExecutors],
     unit_of_work_factory: UnitOfWorkFactory,
@@ -181,8 +180,7 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
 ) -> None:
     """A failed job records its failure code and details and keeps the group's data.
 
-    The group stays `gpad_imported`, and the failed job stores no staged
-    annotations and no import.
+    The group stays `gpad_imported`, and the failed job records no import.
     """
     existing = gpad_bytes(gpad_row("UniProtKB:P12345", reference="PMID:7"))
     runner_for(FakeFetchers({SOURCE: existing})).run(_job(unit_of_work_factory))
@@ -201,45 +199,26 @@ def test_terminal_failures_keep_the_group_and_clean_staging(
     with unit_of_work_factory() as uow:
         mode = uow.annotation_imports.group_mode("MGI")
     assert mode is AnnotationManagementMode.GPAD_IMPORTED
-    # Staging rows have no effect any client can see; counting them is the only
-    # way to check that the failed job left none behind.
     with session_factory() as session:
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AnnotationStagingRecord)
-                .where(AnnotationStagingRecord.job_id == job_id)
-            )
-            == 0
-        )
         assert session.get(AnnotationImportRecord, job_id) is None
 
 
-def test_an_error_left_for_retry_leaves_no_staged_annotations(
+def test_an_error_left_for_retry_runs_again_from_the_start(
     jobs: JobService,
     runner_for: Callable[..., JobExecutors],
     unit_of_work_factory: UnitOfWorkFactory,
     session_factory: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unexpected error after staging leaves the job running with nothing staged.
+    """An unexpected error after staging leaves the job running.
 
     Running the job again publishes the file.
     """
     original = AnnotationImportRepository.publish
-    staged: list[int] = []
 
     def lose_connection(
         self: AnnotationImportRepository, *args: object, **kwargs: object
     ) -> AnnotationImportRecord:
-        staged.append(
-            int(
-                self.session.scalar(
-                    select(func.count()).select_from(AnnotationStagingRecord)
-                )
-                or 0
-            )
-        )
         raise RuntimeError("connection lost")
 
     monkeypatch.setattr(AnnotationImportRepository, "publish", lose_connection)
@@ -248,19 +227,7 @@ def test_an_error_left_for_retry_leaves_no_staged_annotations(
     with pytest.raises(RuntimeError, match="connection lost"):
         runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)
 
-    assert staged == [1]
     assert jobs.find(job_id).status is JobStatus.RUNNING
-    # Staging rows have no effect any client can see; counting them is the only
-    # way to check that the failed attempt left none behind.
-    with session_factory() as session:
-        assert (
-            session.scalar(
-                select(func.count())
-                .select_from(AnnotationStagingRecord)
-                .where(AnnotationStagingRecord.job_id == job_id)
-            )
-            == 0
-        )
     monkeypatch.setattr(AnnotationImportRepository, "publish", original)
     runner_for(FakeFetchers({SOURCE: GOOD})).run(job_id)
     assert jobs.find(job_id).status is JobStatus.SUCCEEDED

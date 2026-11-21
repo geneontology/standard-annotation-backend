@@ -106,9 +106,6 @@ LOCK_TIMEOUT = "30s"
 """How long a test connection may wait for a lock before the wait fails."""
 
 APPLICATION_TABLES = (
-    "annotation_staging_duplicate_reference",
-    "annotation_staging_multivalued_value",
-    "annotation_staging",
     "group_annotation_management",
     "annotation_import",
     "entity_record",

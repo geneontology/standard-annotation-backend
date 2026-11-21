@@ -1,6 +1,7 @@
 """Stage and publish GPAD annotation imports in the caller's transaction.
 
-The caller commits.
+Staged annotations are held in temporary tables (`persistence.annotation_staging`)
+that exist only in the caller's transaction. The caller commits.
 """
 
 from collections.abc import Sequence
@@ -35,6 +36,12 @@ from standard_annotation_backend.domain.refresh import (
 from standard_annotation_backend.persistence.annotation_data import (
     prepare_annotation_for_persistence,
 )
+from standard_annotation_backend.persistence.annotation_staging import (
+    STAGED_ANNOTATIONS,
+    STAGED_DUPLICATE_REFERENCES,
+    STAGED_MULTIVALUED_VALUES,
+    create_staging_tables,
+)
 from standard_annotation_backend.persistence.locks import (
     acquire_global_annotation_write_lock,
 )
@@ -44,9 +51,6 @@ from standard_annotation_backend.persistence.models import (
     AnnotationImportRecord,
     AnnotationMultivaluedFieldValueRecord,
     AnnotationRecord,
-    AnnotationStagingDuplicateReferenceRecord,
-    AnnotationStagingMultivaluedValueRecord,
-    AnnotationStagingRecord,
     AnnotationVersionRecord,
     AuditEventRecord,
     ChangeSetRecord,
@@ -116,15 +120,23 @@ class AnnotationImportRepository:
             )
         )
 
-    def stage_annotations(
-        self, job_id: UUID, annotations: Sequence[Record[Annotation]]
-    ) -> None:
-        """Store validated annotations for a job until it publishes.
+    def begin_staging(self) -> None:
+        """Create the staging tables for one import.
+
+        Call it once per import, before `stage_annotations`, in the transaction
+        that will publish. The tables disappear when that transaction ends, whether
+        it commits or rolls back.
+        """
+        create_staging_tables(self.session.connection())
+
+    def stage_annotations(self, annotations: Sequence[Record[Annotation]]) -> None:
+        """Store validated annotations until the import publishes.
 
         Each annotation gets a new SABE identifier now, which it keeps when
         published. Its lookup rows, used to filter by multivalued fields and to
         find duplicates, are staged too, computed the same way as for annotations
-        created directly in SABE.
+        created directly in SABE. `begin_staging` must have been called in this
+        transaction.
         """
         staged: list[dict[str, object]] = []
         multivalued: list[dict[str, object]] = []
@@ -132,19 +144,19 @@ class AnnotationImportRepository:
         for parsed in annotations:
             annotation_id = new_annotation_id()
             data = prepare_annotation_for_persistence(parsed.item)
-            keys = {"job_id": job_id, "annotation_id": annotation_id}
+            key = {"annotation_id": annotation_id}
             staged.append(
-                {**keys, "line_number": parsed.line_number, **data.column_values()}
+                {**key, "line_number": parsed.line_number, **data.column_values()}
             )
-            multivalued.extend({**keys, **row} for row in data.multivalued_rows())
-            references.extend({**keys, **row} for row in data.reference_rows())
-        for model, rows in (
-            (AnnotationStagingRecord, staged),
-            (AnnotationStagingMultivaluedValueRecord, multivalued),
-            (AnnotationStagingDuplicateReferenceRecord, references),
+            multivalued.extend({**key, **row} for row in data.multivalued_rows())
+            references.extend({**key, **row} for row in data.reference_rows())
+        for table, rows in (
+            (STAGED_ANNOTATIONS, staged),
+            (STAGED_MULTIVALUED_VALUES, multivalued),
+            (STAGED_DUPLICATE_REFERENCES, references),
         ):
             for batch in batched(rows, _INSERT_BATCH_SIZE, strict=False):
-                self.session.execute(insert(model), batch)
+                self.session.execute(insert(table), batch)
 
     def last_import(self, group_key: str) -> AnnotationImportRecord | None:
         """Return the group's most recently published import, if any."""
@@ -207,13 +219,13 @@ class AnnotationImportRepository:
         )
 
     def publish(self, staged: StagedImport, *, actor_id: str) -> AnnotationImportRecord:
-        """Replace the group's annotations with the job's staged annotations.
+        """Replace the group's annotations with the staged annotations.
 
         For this group only, deletes the annotations with their versions,
         comments, and lookup rows, the change sets, and the audit events of both.
-        Then inserts the staged annotations as version 1, records the import, and
-        deletes the staging rows. A cutover also moves the group to
-        `sabe_managed`.
+        Then inserts the staged annotations as version 1 and records the import. A
+        cutover also moves the group to `sabe_managed`. The staging tables are
+        dropped when the caller's transaction ends.
 
         Takes the global annotation-write lock in exclusive mode, so every
         annotation write in SABE waits until the caller's transaction ends.
@@ -265,11 +277,6 @@ class AnnotationImportRepository:
             state.mode = AnnotationManagementMode.SABE_MANAGED.value
             state.transitioned_at = now
             state.transition_job_id = staged.job_id
-        self.session.execute(
-            delete(AnnotationStagingRecord).where(
-                AnnotationStagingRecord.job_id == staged.job_id
-            )
-        )
         self.session.flush()
         return record
 
@@ -324,8 +331,8 @@ class AnnotationImportRepository:
     def _copy_staging(
         self, job_id: UUID, group_key: str, actor_id: str, change_source: ChangeSource
     ) -> None:
-        """Insert a job's staged annotations, versions, and lookup rows."""
-        staging = AnnotationStagingRecord
+        """Insert the staged annotations, their versions, and their lookup rows."""
+        staging = STAGED_ANNOTATIONS.c
         job = literal(job_id, PostgreSQLUUID(as_uuid=True))
         self.session.execute(
             insert(AnnotationRecord).from_select(
@@ -364,7 +371,7 @@ class AnnotationImportRepository:
                     staging.evidence_type,
                     staging.annotation_date,
                     staging.assigned_by,
-                ).where(staging.job_id == job_id),
+                ),
             )
         )
         self.session.execute(
@@ -384,19 +391,17 @@ class AnnotationImportRepository:
                     false(),
                     literal(actor_id),
                     literal(change_source.value),
-                ).where(staging.job_id == job_id),
+                ),
             )
         )
-        values = AnnotationStagingMultivaluedValueRecord
+        values = STAGED_MULTIVALUED_VALUES.c
         self.session.execute(
             insert(AnnotationMultivaluedFieldValueRecord).from_select(
                 ["annotation_id", "field_name", "field_value"],
-                select(
-                    values.annotation_id, values.field_name, values.field_value
-                ).where(values.job_id == job_id),
+                select(values.annotation_id, values.field_name, values.field_value),
             )
         )
-        references = AnnotationStagingDuplicateReferenceRecord
+        references = STAGED_DUPLICATE_REFERENCES.c
         self.session.execute(
             insert(AnnotationDuplicateReferenceRecord).from_select(
                 ["annotation_id", "canonical_reference", "duplicate_base_signature"],
@@ -404,6 +409,6 @@ class AnnotationImportRepository:
                     references.annotation_id,
                     references.canonical_reference,
                     references.duplicate_base_signature,
-                ).where(references.job_id == job_id),
+                ),
             )
         )

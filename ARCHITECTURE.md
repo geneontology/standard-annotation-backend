@@ -197,14 +197,6 @@ annotation_duplicate_reference
   one distinct canonical reference per row; indexed by base signature and
   canonical reference for conflict lookup
 
-annotation_staging
-  structurally valid annotations prepared by a GPAD refresh or cutover job and keyed
-  by job ID, isolated from live annotation state until publication
-
-annotation_staging_duplicate_reference
-  per-reference duplicate lookup data prepared for staged annotations and keyed
-  by the same import job ID
-
 annotation_version
   immutable full annotation snapshots, one row per accepted version
 
@@ -249,10 +241,13 @@ authorization_assignment
   roles and scopes such as edit/group, admin/global, or edit/self
 ```
 
-GPAD refreshes and cutovers load into shared staging tables keyed by job ID rather than
-directly into `annotation`. Staged rows are not visible to active queries or
-duplicate-conflict lookups. They enter the main annotation and derived-value tables only
-through the transactional publication process described below.
+GPAD refreshes and cutovers load into staging tables rather than directly into
+`annotation`. Each import creates its own staging tables as PostgreSQL temporary
+tables in the job's transaction, and PostgreSQL drops them when that transaction
+commits or rolls back, so they are not part of the table sketch above. Staged rows are
+not visible to active queries, duplicate-conflict lookups, or other imports. They enter
+the main annotation and derived-value tables only through the transactional
+publication process described below.
 
 Soft deletion should be used for normal deletes. Deleting an annotation marks it
 deleted, creates a new version and audit event, and removes it from normal active
@@ -1031,7 +1026,7 @@ order without blocking normal annotation reads or writes.
 A job parses the source file, structurally validates each record against the Standard
 Annotation model, assigns backend-generated SABE UUIDs outside the Standard Annotation
 payload, and loads the valid canonical records and their duplicate-signature/reference
-lookup data into staging tables keyed by the job ID, along with each annotation's
+lookup data into the job's temporary staging tables, along with each annotation's
 initial immutable version data and source provenance. Structurally invalid records are
 rejected and reported individually. Staging is isolated from live annotation state and
 acquires neither the global annotation-write lock nor per-signature duplicate locks.
@@ -1185,7 +1180,7 @@ developers can run locally and operate in AWS with limited specialized DevOps bu
 | Decision area                                        | Status                                                                                                   | Owner or input needed                                                                                                                      | Implementation impact                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 |------------------------------------------------------|----------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | SABE annotation identifiers                          | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | The backend generates UUIDs as SABE metadata outside the Standard Annotation payload; UUID helpers and persistence may proceed.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Per-group GPAD replacement and cutover               | Settled for the initial implementation                                                                   | Each group's cutover is a global-admin decision; no further input is needed for the mechanism.                                             | Configured GPAD sources replace a `gpad_imported` group's annotations through staging tables keyed by job ID. A group has at most one unfinished GPAD job, enforced by a unique index. The job's one transaction stages the file, takes the global annotation-write lock exclusively, permanently deletes the group's annotations and dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. A cutover does the same with zero rejections allowed and makes the group `sabe_managed` permanently. |
+| Per-group GPAD replacement and cutover               | Settled for the initial implementation                                                                   | Each group's cutover is a global-admin decision; no further input is needed for the mechanism.                                             | Configured GPAD sources replace a `gpad_imported` group's annotations through temporary staging tables that each import creates in its job's transaction. A group has at most one unfinished GPAD job, enforced by a unique index. The job's one transaction stages the file, takes the global annotation-write lock exclusively, permanently deletes the group's annotations and dependent records, inserts the staged annotations, versions, and derived lookup data, and commits. Reads remain available; annotation writes wait during publication. A cutover does the same with zero rejections allowed and makes the group `sabe_managed` permanently. |
 | Duplicate handling during GPAD import                | Settled for the initial implementation                                                                   | No further input is needed.                                                                                                                | Staging and publication perform no duplicate checks or rejection. Staging takes no duplicate locks; publication takes the global annotation-write lock exclusively but takes no signature locks. QC reports apply the settled pairwise predicate to stored annotations and list each annotation's peers rather than grouping duplicates into connected components.                                                                                                                                                                                                           |
 | Initial Protein2GO-aligned pairwise duplicate policy | Settled for the initial implementation                                                                   | No further input is needed. The accepted non-transitivity risk should be reviewed if multi-reference source data becomes material.         | Implementation may proceed with an indexed base signature and per-reference lookup rows. Creates and updates reject any peer as a `duplicate_annotation` issue; soft deletes remove conflicts. Every ordinary annotation mutation uses `READ COMMITTED`, takes the global annotation-write lock in shared mode before ordered signature locks, then freshly re-reads state and peers.                                                                                                                                                                                        |
 | Annotated-entity metadata for GPAD imports           | Settled for GPAD import; alternatives are deferred                                                       | GO domain reviewers must identify any alternative metadata sources and desired later reconciliation behavior before either is implemented. | GPAD imports do not check `db_object_id` against the entity catalog; semantic validation applies to client writes and term replacement writes, and QC reports flag stored annotations whose entity is unknown. No alternative source or reconciliation workflow is implied.                                                                                                                                                                                                                                                                                                  |
