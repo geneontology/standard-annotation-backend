@@ -58,8 +58,7 @@ class AnnotationPersistenceData:
         """Return the stored annotation data and its searchable column values.
 
         The keys are the column names shared by the current annotation table and
-        the import staging table. Callers add the identifying columns, such as
-        `annotation_id` and `job_id`.
+        an import's temporary staging table. Callers add `annotation_id`.
 
         Returns:
             Column names mapped to the values to store.
@@ -79,7 +78,7 @@ class AnnotationPersistenceData:
     def multivalued_rows(self) -> list[dict[str, object]]:
         """Return one row of column values per stored multivalued field value.
 
-        Callers add the identifying columns, such as `annotation_id` and `job_id`.
+        Callers add `annotation_id`.
 
         Returns:
             Rows with `field_name` and `field_value` keys, in the order of
@@ -94,8 +93,7 @@ class AnnotationPersistenceData:
         """Return one row of column values per canonical reference.
 
         These rows let the database find possible duplicates by signature and
-        reference. Callers add the identifying columns, such as `annotation_id`
-        and `job_id`.
+        reference. Callers add `annotation_id`.
 
         Returns:
             Rows with `canonical_reference` and `duplicate_base_signature` keys, in

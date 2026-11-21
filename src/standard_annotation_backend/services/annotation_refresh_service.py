@@ -174,6 +174,7 @@ def _stage(
     """
     builder = RejectionReportBuilder()
     staged = 0
+    imports.begin_staging()
     with ExchangeDocument(GpadReader, text) as document:
         for batch in batched(document.items(), _STAGING_BATCH_SIZE, strict=False):
             parsed: list[Record[Annotation]] = []
@@ -182,7 +183,7 @@ def _stage(
                     builder.add(item)
                 else:
                     parsed.append(item)
-            imports.stage_annotations(job_id, parsed)
+            imports.stage_annotations(parsed)
             staged += len(parsed)
         metadata = document.metadata
         data_rows = document.data_rows
