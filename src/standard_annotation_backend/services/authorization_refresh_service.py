@@ -37,6 +37,7 @@ from standard_annotation_backend.persistence.repositories.auth import (
 )
 from standard_annotation_backend.persistence.unit_of_work import (
     SqlAlchemyUnitOfWork,
+    UnitOfWorkFactory,
 )
 from standard_annotation_backend.refresh.fetchers import SourceError
 from standard_annotation_backend.services.audit_service import AuditService
@@ -224,3 +225,14 @@ def _outcome(result: AuthorizationRefreshResult, *, unchanged: bool) -> RefreshO
         },
         unchanged=unchanged,
     )
+
+
+def authorization_loaded(unit_of_work_factory: UnitOfWorkFactory) -> bool:
+    """Report whether any authorization refresh has been applied to this database.
+
+    Until one has, SABE has no users or grants, so every GitHub sign-in is rejected
+    and nobody can get a token for the admin refresh API. A refresh that failed
+    applied nothing and does not count.
+    """
+    with unit_of_work_factory() as unit_of_work:
+        return unit_of_work.auth.latest_refresh() is not None

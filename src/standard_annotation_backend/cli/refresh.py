@@ -5,7 +5,9 @@
 are recorded the same way. Instead of sending each job to a Celery worker, it
 runs the jobs in this process, one at a time, after they are sent, and waits for
 them. This is the supported way to load authorization into a new database,
-before anyone holds a token for the admin API. Annotation cutovers are available
+before anyone holds a token for the admin API: `--if-never-loaded` refreshes
+authorization only if none has ever been applied, so a deploy can run it every
+time. Annotation cutovers are available
 only through the admin API. After the refreshes, any term replacement jobs they
 queued also run in this process. One whose groups another job of its type is
 already covering is deferred: it stays queued until the next ontology activation
@@ -34,6 +36,9 @@ from standard_annotation_backend.domain.refresh import (
 )
 from standard_annotation_backend.services.annotation_scan import (
     AnnotationScanBusyError,
+)
+from standard_annotation_backend.services.authorization_refresh_service import (
+    authorization_loaded,
 )
 from standard_annotation_backend.services.job_service import Job
 from standard_annotation_backend.services.refresh_start_service import (
@@ -166,13 +171,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Authorization and rules each have a single source and take none."
         ),
     )
+    parser.add_argument(
+        "--if-never-loaded",
+        action="store_true",
+        help=(
+            "Refresh authorization only if no authorization refresh has ever been "
+            "applied to this database, so a deploy can run it every time. Without "
+            "authorization, nobody can sign in to use the admin refresh API."
+        ),
+    )
     arguments = parser.parse_args(argv)
     kind = RefreshKindName(arguments.kind)
     if kind in _SINGLE_SOURCE_KINDS and arguments.source_key is not None:
         parser.error(f"{kind.value} has a single source; omit source_key")
+    if arguments.if_never_loaded and kind is not RefreshKindName.AUTHORIZATION:
+        parser.error("--if-never-loaded applies only to authorization")
     try:
         follow_ups: list[Job] = []
         with worker_runtime(dispatch_follow_up=follow_ups.append) as runtime:
+            if arguments.if_never_loaded and authorization_loaded(
+                runtime.unit_of_work_factory
+            ):
+                print("Authorization is already loaded; not refreshing it")
+                return 0
             jobs, retired = run_refreshes(runtime, kind, arguments.source_key)
             follow_up_jobs, deferred = run_follow_ups(runtime, follow_ups)
             jobs += follow_up_jobs

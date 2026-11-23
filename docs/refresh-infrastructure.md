@@ -122,6 +122,13 @@ created. Cutovers use a separate entry point, `RefreshStartService.start_cutover
 the `POST /admin/annotation-cutovers` route calls. The schedule and CLI never start
 cutovers.
 
+A new database has no users or grants, so nobody can sign in to call the admin API
+until authorization is loaded. Run `python -m standard_annotation_backend.cli.refresh
+authorization --if-never-loaded` for that: it refreshes authorization only when no
+authorization refresh has ever been applied, and otherwise prints that it is already
+loaded and exits without fetching anything, so a deploy can run it every time
+without depending on GitHub after the first deploy. A failed refresh exits nonzero.
+
 ```mermaid
 sequenceDiagram
     participant T as Trigger

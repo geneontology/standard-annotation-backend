@@ -121,6 +121,56 @@ def test_cli_bootstraps_authorization_with_job_and_audit(
         )
 
 
+def test_if_never_loaded_refreshes_a_database_without_authorization(
+    use_runtime: InstallRuntime,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--if-never-loaded` refreshes authorization into a new database."""
+    use_runtime({"go-site": USERS_YAML})
+
+    assert cli.main(["authorization", "--if-never-loaded"]) == 0
+
+    assert "authorization_refresh go-site succeeded" in capsys.readouterr().out
+    with session_factory() as session:
+        assert session.scalar(select(SabeUserRecord.github_login)) == "curator"
+
+
+def test_if_never_loaded_skips_a_database_with_authorization(
+    use_runtime: InstallRuntime,
+    session_factory: sessionmaker[Session],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Once authorization has been loaded, `--if-never-loaded` does nothing.
+
+    It fetches nothing and starts no job, so a deploy that runs it every time does
+    not depend on GitHub after the first.
+    """
+    use_runtime({"go-site": USERS_YAML})
+    assert cli.main(["authorization"]) == 0
+    capsys.readouterr()
+    fetchers = use_runtime({"go-site": USERS_YAML})
+
+    assert cli.main(["authorization", "--if-never-loaded"]) == 0
+
+    assert fetchers.calls == []
+    assert "Authorization is already loaded" in capsys.readouterr().out
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(JobRecord)) == 1
+
+
+@pytest.mark.parametrize("kind", ["rules", "ontology", "entity", "annotation"])
+def test_if_never_loaded_is_a_usage_error_for_other_kinds(
+    kind: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only authorization has a meaning for `--if-never-loaded`."""
+    with pytest.raises(SystemExit) as exited:
+        cli.main([kind, "--if-never-loaded"])
+
+    assert exited.value.code == 2
+    assert "--if-never-loaded applies only to authorization" in capsys.readouterr().err
+
+
 def test_cli_exits_nonzero_and_prints_the_failure_code(
     use_runtime: InstallRuntime, capsys: pytest.CaptureFixture[str]
 ) -> None:
