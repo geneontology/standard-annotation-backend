@@ -26,6 +26,17 @@ then dies. So this must be longer than the longest job. It matters only after a
 worker is killed without its soft shutdown; a stopped worker returns its messages.
 """
 
+BROKER_SOCKET_TIMEOUT_SECONDS = 5
+"""How long a connection to Redis waits to connect, or for an answer, before failing.
+
+Without it, a Redis that accepts connections but never answers blocks a send
+forever, and `JobService.send` keeps the job's row lock and its transaction open
+the whole time. With it, the send raises within seconds and the job is failed or
+left as it is, by the rule in `JobService.send`. The worker's and scheduler's own
+connections reconnect instead of waiting. Redis on the same network answers in
+milliseconds, so this is generous.
+"""
+
 
 def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
     """Return the Celery Beat schedule of refreshes and the all-groups QC report.
@@ -87,6 +98,10 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     worker_concurrency=settings.worker_concurrency,
     worker_soft_shutdown_timeout=settings.worker_soft_shutdown_seconds,
-    broker_transport_options={"visibility_timeout": VISIBILITY_TIMEOUT_SECONDS},
+    broker_transport_options={
+        "visibility_timeout": VISIBILITY_TIMEOUT_SECONDS,
+        "socket_timeout": BROKER_SOCKET_TIMEOUT_SECONDS,
+        "socket_connect_timeout": BROKER_SOCKET_TIMEOUT_SECONDS,
+    },
     beat_schedule=beat_schedule(settings),
 )

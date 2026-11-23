@@ -60,6 +60,12 @@ errors can contain credentials. Then:
 - Any other job is left as it is: an earlier send put it in the broker, or a
   worker already started it, and sending a job twice is harmless.
 
+A send cannot wait on the broker indefinitely: connections to Redis give up after
+`BROKER_SOCKET_TIMEOUT_SECONDS` (5 seconds, `workers/celery_app.py`) without an
+answer, so a Redis that accepts connections but never answers makes the send raise
+within seconds instead of holding the row lock until Redis recovers. A Redis that
+refuses connections fails sooner, after Celery's three quick publish retries.
+
 Because the row lock is held while the job is sent, the code that sends it must
 not wait for the job to run. The refresh CLI, which runs jobs in its own process,
 runs each one after it has been sent.
