@@ -12,6 +12,8 @@ from standard_annotation_backend.config import (
     get_settings,
 )
 from standard_annotation_backend.logging import configure_logging
+from standard_annotation_backend.workers.health import HEARTBEAT_INTERVAL_SECONDS
+from standard_annotation_backend.workers.heartbeat import WorkerHeartbeat
 
 settings = get_settings()
 
@@ -104,4 +106,9 @@ celery_app.conf.update(
         "socket_connect_timeout": BROKER_SOCKET_TIMEOUT_SECONDS,
     },
     beat_schedule=beat_schedule(settings),
+    # Beat writes its health check heartbeat on each pass, and would otherwise wait
+    # up to five minutes between passes when nothing is due.
+    beat_scheduler="standard_annotation_backend.workers.heartbeat:HeartbeatScheduler",
+    beat_max_loop_interval=HEARTBEAT_INTERVAL_SECONDS,
 )
+celery_app.steps["consumer"].add(WorkerHeartbeat)

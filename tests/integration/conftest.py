@@ -3,10 +3,12 @@
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+import redis
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from psycopg import sql
@@ -19,6 +21,7 @@ from standard_annotation_backend.api.dependencies import (
     get_authenticated_context,
     get_unit_of_work_factory,
 )
+from standard_annotation_backend.config import get_settings
 from standard_annotation_backend.domain.annotations import (
     Annotation,
     AnnotationOrigin,
@@ -311,6 +314,23 @@ def truncate_application_tables(database_engine: Engine) -> Iterator[None]:
     with database_engine.begin() as connection:
         table_list = ", ".join(f'"{table}"' for table in APPLICATION_TABLES)
         connection.exec_driver_sql(f"TRUNCATE TABLE {table_list} CASCADE")
+
+
+@pytest.fixture
+def broker_url() -> Iterator[str]:
+    """Return an empty Redis database for a test that starts worker processes.
+
+    Database 15 keeps the test's messages apart from the development stack's,
+    which uses database 0.
+
+    Yields:
+        The database's Redis URL; the database is emptied before and after.
+    """
+    url = urlunsplit(urlsplit(get_settings().redis_url)._replace(path="/15"))
+    client = redis.Redis.from_url(url)
+    client.flushdb()
+    yield url
+    client.flushdb()
 
 
 @pytest.fixture

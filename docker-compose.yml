@@ -40,6 +40,12 @@ services:
   worker:
     build: .
     command: python -m standard_annotation_backend.workers.worker --loglevel=INFO
+    healthcheck:
+      test: ["CMD", "python", "-m", "standard_annotation_backend.workers.health", "worker"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     # Long enough for the worker's soft shutdown (SABE_WORKER_SOFT_SHUTDOWN_SECONDS,
     # 60 seconds unless .env sets it) to return its messages before Compose kills it.
     stop_grace_period: 90s
@@ -60,6 +66,12 @@ services:
   scheduler:
     build: .
     command: celery -A standard_annotation_backend.workers.celery_app:celery_app beat --loglevel=INFO
+    healthcheck:
+      test: ["CMD", "python", "-m", "standard_annotation_backend.workers.health", "scheduler"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     env_file:
       - .env
     environment:
