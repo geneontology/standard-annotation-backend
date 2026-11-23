@@ -87,6 +87,26 @@ error, such as a lost database connection, leaves the job `running`; the task
 logs only its type and retries after 30 seconds. The CLI does not retry: it
 reports the job as still `running`.
 
+### Stopping a worker
+
+Start workers with `python -m standard_annotation_backend.workers.worker`
+(`workers/worker.py`), which sets `REMAP_SIGTERM=SIGQUIT` before starting Celery.
+A worker stopped with SIGTERM, as a deploy stops it, then lets its running jobs
+finish for `SABE_WORKER_SOFT_SHUTDOWN_SECONDS`, cancels any still running, and
+puts their messages back on the queue, where another worker picks them up and runs
+the jobs from the beginning. Without the remapping, Celery waits for running jobs
+however long they take, and the platform kills the worker with its messages still
+unacknowledged.
+
+A worker takes only the messages it is running (`worker_prefetch_multiplier` is 1),
+runs `SABE_WORKER_CONCURRENCY` jobs at once, and so strands no job it never
+started. A message whose worker was killed without its soft shutdown, for example
+for running out of memory, waits until Redis's visibility timeout of six hours
+(`VISIBILITY_TIMEOUT_SECONDS`) before another worker receives it. The timeout is
+longer than any job, because Redis counts from delivery: a job still running when
+the timeout passes would be delivered again, and that duplicate would acknowledge
+the message at the execution lock.
+
 ## Annotation scan jobs
 
 An annotation scan job reads every active annotation of one owning group, or of

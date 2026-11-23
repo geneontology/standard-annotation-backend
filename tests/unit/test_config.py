@@ -110,3 +110,27 @@ def test_source_timeouts_must_be_positive_and_finite(value: float) -> None:
     """Timeouts must be usable by the HTTP client."""
     with pytest.raises(ValidationError):
         _settings(source_read_timeout_seconds=value)
+
+
+def test_workers_run_one_job_at_a_time_and_allow_a_minute_to_finish_by_default() -> (
+    None
+):
+    """Without settings, a worker runs one job and gives it 60 seconds when stopped."""
+    settings = _settings()
+
+    assert settings.worker_concurrency == 1
+    assert settings.worker_soft_shutdown_seconds == 60
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_worker_concurrency_must_be_at_least_one(value: int) -> None:
+    """A worker that may run no jobs stops settings construction."""
+    with pytest.raises(ValidationError):
+        _settings(worker_concurrency=value)
+
+
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+def test_worker_soft_shutdown_must_be_positive_and_finite(value: float) -> None:
+    """A stopped worker must wait a real, bounded time before cancelling its jobs."""
+    with pytest.raises(ValidationError):
+        _settings(worker_soft_shutdown_seconds=value)

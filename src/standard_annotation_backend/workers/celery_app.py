@@ -15,6 +15,17 @@ from standard_annotation_backend.logging import configure_logging
 
 settings = get_settings()
 
+VISIBILITY_TIMEOUT_SECONDS = 6 * 60 * 60
+"""How long Redis waits before giving an unacknowledged message to another worker.
+
+A message stays unacknowledged while its job runs (`task_acks_late`), and Redis
+counts from when it delivered the message. A job that runs longer than this is
+delivered again while still running; the duplicate returns at the job's execution
+lock and acknowledges the message, leaving nothing to recover the job if its worker
+then dies. So this must be longer than the longest job. It matters only after a
+worker is killed without its soft shutdown; a stopped worker returns its messages.
+"""
+
 
 def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
     """Return the Celery Beat schedule of refreshes and the all-groups QC report.
@@ -71,5 +82,11 @@ celery_app.conf.update(
     timezone="UTC",
     task_acks_late=True,
     task_reject_on_worker_lost=True,
+    # A worker reserves no message beyond the ones it is running, so a stopped or
+    # killed worker strands no job it never started.
+    worker_prefetch_multiplier=1,
+    worker_concurrency=settings.worker_concurrency,
+    worker_soft_shutdown_timeout=settings.worker_soft_shutdown_seconds,
+    broker_transport_options={"visibility_timeout": VISIBILITY_TIMEOUT_SECONDS},
     beat_schedule=beat_schedule(settings),
 )
