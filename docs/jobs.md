@@ -119,7 +119,7 @@ The worker and scheduler containers each run a health check:
 `python -m standard_annotation_backend.workers.health worker` (or `scheduler`),
 in `workers/health.py`. It passes while the process's heartbeat file in `/tmp` is
 younger than two minutes, and fails with its reason when the file is older or
-missing. The worker's main process writes its heartbeat every 30 seconds from a
+missing. The worker's main process writes its heartbeat every 2 seconds from a
 step of its Celery consumer, the part that holds the Redis connection, and Beat
 writes its heartbeat on every scheduling pass, which `beat_max_loop_interval` keeps
 at most 30 seconds apart (`workers/heartbeat.py`). A
@@ -130,6 +130,9 @@ The check judges the main process, not the jobs: jobs run in child processes, so
 long job keeps passing, and so does a job stuck inside its own work. A worker that
 loses Redis stops beating until it reconnects, so only an outage longer than the two
 minutes fails its check; the heartbeat resumes as soon as the worker reconnects.
+The worker's interval is short because kombu keeps a cancelled timer entry
+scheduled until its due time, and a reconnecting worker can wait for it before
+taking jobs again; at 2 seconds, that wait is brief.
 
 ## Annotation scan jobs
 

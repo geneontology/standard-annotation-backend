@@ -4,7 +4,8 @@ A container platform such as ECS runs this as the container's health check:
 `python -m standard_annotation_backend.workers.health worker` (or `scheduler`). It
 succeeds when the process's heartbeat file was written recently. The worker's main
 process writes its file every `HEARTBEAT_INTERVAL_SECONDS` from a timer, and Beat
-writes its file on every scheduling pass (`workers/heartbeat.py`). A main process
+writes its file on every scheduling pass, at least every `SCHEDULER_LOOP_SECONDS`
+(`workers/heartbeat.py`). A main process
 whose loop has stopped, for example one stuck reconnecting to Redis, stops writing,
 and the check fails once the file is older than the maximum age.
 
@@ -24,8 +25,14 @@ from pathlib import Path
 
 HEARTBEAT_DIRECTORY = Path("/tmp")
 """Where the heartbeat files are written; local to each container."""
-HEARTBEAT_INTERVAL_SECONDS = 30
-"""How often a process writes its heartbeat."""
+HEARTBEAT_INTERVAL_SECONDS = 2
+"""How often the worker writes its heartbeat.
+
+Short on purpose: see `workers/heartbeat.WorkerHeartbeat`. Writing the file is
+cheap, and the health check's limit does not depend on it.
+"""
+SCHEDULER_LOOP_SECONDS = 30
+"""The longest Beat waits between scheduling passes, each of which writes its heartbeat."""
 MAX_HEARTBEAT_AGE_SECONDS = 120
 """How old a heartbeat may be before the process counts as stuck."""
 

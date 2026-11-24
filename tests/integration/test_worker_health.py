@@ -12,6 +12,8 @@ from worker_processes import start_scheduler, start_worker, stop, wait_for
 
 from standard_annotation_backend.workers import health
 
+RECONNECTED_WITHIN_SECONDS = 10
+"""Seconds a reconnected worker may take to beat again; restarting takes about two."""
 STARTERS: dict[health.Process, Callable[[str, Path], subprocess.Popen[bytes]]] = {
     health.Process.WORKER: start_worker,
     health.Process.SCHEDULER: start_scheduler,
@@ -48,11 +50,12 @@ def test_a_running_process_is_healthy_until_its_main_loop_stops(
 def test_a_worker_beats_again_after_reconnecting_to_redis(
     broker_url: str, tmp_path: Path
 ) -> None:
-    """A worker whose Redis connection drops resumes its heartbeat once reconnected.
+    """A worker whose Redis connection drops beats again within seconds of reconnecting.
 
     Celery restarts the worker's consumer after a lost connection; the heartbeat
     must restart with it, or a worker that recovered from a Redis restart would be
-    replaced for failing its health check.
+    replaced for failing its health check. The restart must also not wait on the
+    heartbeat's timer, or the worker would take no jobs for that long.
     """
     path = health.heartbeat_path(health.Process.WORKER)
     path.unlink(missing_ok=True)
@@ -83,7 +86,8 @@ def test_a_worker_beats_again_after_reconnecting_to_redis(
 
         wait_for(
             path.exists,
-            f"the worker never beat again after reconnecting:\n{log.read_text()}",
+            f"the worker did not beat again soon after reconnecting:\n{log.read_text()}",
+            timeout=RECONNECTED_WITHIN_SECONDS,
         )
     finally:
         stop(worker)

@@ -30,6 +30,13 @@ class WorkerHeartbeat(bootsteps.StartStopStep):
 
     The timer runs in the worker's main process, not in the child processes that
     run jobs, so a long job does not delay it.
+
+    The interval is short because of how kombu's timer cancels an entry: it marks
+    the entry cancelled and leaves it scheduled until its due time. While the
+    consumer restarts, the event loop can sleep until that time before anything
+    else runs, including the step that lets the worker take jobs again. A
+    30-second interval held a reconnected worker idle for up to 30 seconds; two
+    seconds, the interval of Celery's own event heartbeat, keeps it brief.
     """
 
     requires = frozenset({"celery.worker.consumer.connection:Connection"})

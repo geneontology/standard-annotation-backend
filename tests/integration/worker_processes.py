@@ -85,9 +85,11 @@ def stop(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
-def wait_for(condition_met: Callable[[], object], message: str) -> None:
+def wait_for(
+    condition_met: Callable[[], object], message: str, *, timeout: float = TIMEOUT
+) -> None:
     """Poll `condition_met` until it returns true, or fail with `message`."""
-    deadline = monotonic() + TIMEOUT
+    deadline = monotonic() + timeout
     while monotonic() < deadline:
         if condition_met():
             return
