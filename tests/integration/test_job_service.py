@@ -1,6 +1,9 @@
 """Verify job state changes and their audit events."""
 
+import socket
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Barrier, Event
 from uuid import UUID
 
@@ -23,6 +26,7 @@ from standard_annotation_backend.services.job_service import (
     Job,
     JobService,
 )
+from standard_annotation_backend.workers.celery_app import celery_app
 
 
 def _service(factory: UnitOfWorkFactory) -> JobService:
@@ -397,6 +401,55 @@ def test_a_failed_send_fails_a_job_no_send_has_reached(
     assert returned.error == "QC report could not be dispatched"
     assert returned.progress == {"phase": "failed", "failure_code": "dispatch_failed"}
     assert service.find(job.job_id) == returned
+
+
+@contextmanager
+def _broker_that_never_answers() -> Iterator[str]:
+    """Listen on a local port that accepts connections and never replies.
+
+    The operating system completes each connection without the socket accepting
+    it, so a client can connect and write but never reads an answer, as with a
+    hung Redis. Closing the socket resets those connections.
+
+    Yields:
+        A Redis URL for the port.
+    """
+    listener = socket.create_server(("127.0.0.1", 0))
+    try:
+        yield f"redis://127.0.0.1:{listener.getsockname()[1]}/0"
+    finally:
+        listener.close()
+
+
+def test_a_send_to_a_broker_that_never_answers_fails_the_job_within_seconds(
+    unit_of_work_factory: UnitOfWorkFactory,
+) -> None:
+    """A send to a broker that never answers ends within seconds.
+
+    The queued job is failed with `dispatch_failed`, instead of the send holding the
+    job's row lock and its transaction until the broker recovers. The job is
+    published with the Celery app's broker settings, as `dispatch_job` publishes it.
+    """
+    service = _service(unit_of_work_factory)
+    job = _qc_report(unit_of_work_factory)
+
+    # The broker closes before the pool waits for its thread, so a send that never
+    # returns on its own ends when the broker resets its connection.
+    with (
+        ThreadPoolExecutor(max_workers=1) as pool,
+        _broker_that_never_answers() as broker_url,
+    ):
+
+        def publish(sent: Job) -> None:
+            with celery_app.connection_for_write(broker_url) as connection:
+                celery_app.send_task(
+                    "sabe.job.run", args=[str(sent.job_id)], connection=connection
+                )
+
+        returned = pool.submit(service.send, job, dispatch=publish).result(timeout=15)
+
+    assert returned.status is JobStatus.FAILED
+    assert returned.progress == {"phase": "failed", "failure_code": "dispatch_failed"}
 
 
 def test_a_failed_send_leaves_queued_a_job_another_send_reached(

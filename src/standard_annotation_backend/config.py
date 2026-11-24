@@ -65,6 +65,18 @@ class Settings(LoggingSettings):
     sources_file: Path = Path("config/sources.yaml")
     source_connect_timeout_seconds: float = Field(default=10, gt=0, allow_inf_nan=False)
     source_read_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    worker_concurrency: int = Field(default=1, ge=1)
+    """Jobs one worker process runs at once. Each concurrent job needs its own memory."""
+    worker_soft_shutdown_seconds: float = Field(default=20, gt=0, allow_inf_nan=False)
+    """Seconds a stopped worker lets running jobs finish before returning their messages.
+
+    It must be shorter than the time the container platform allows a stopping
+    container (ECS's stop timeout), so the worker can cancel its jobs and return their
+    messages to the queue before it is killed. Otherwise the platform kills the
+    worker mid-wait, and its messages wait for Redis's visibility timeout. The
+    default leaves a margin under ECS's default stop timeout of 30 seconds; raise
+    both together if jobs should get longer to finish.
+    """
     _sources_file: SourcesFile = PrivateAttr()
 
     @field_validator(

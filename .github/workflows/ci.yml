@@ -60,6 +60,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf # 7.4.11
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
@@ -73,3 +82,42 @@ jobs:
         run: uv run --locked alembic upgrade head
       - name: Test
         run: uv run --locked pytest
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      # The package version comes from Git history and tags (hatch-vcs), so the
+      # build needs the full history rather than the default shallow checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: standard-annotation-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+      - name: Check image version
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+            echo "::error::Shallow checkout; the version needs the full Git history"
+            exit 1
+          fi
+          image=$(docker run --rm standard-annotation-backend:ci python -c \
+            "from importlib.metadata import version; print(version('standard-annotation-backend'))")
+          checkout=$(uvx --from hatchling --with hatch-vcs hatchling version)
+          echo "image version:    $image"
+          echo "checkout version: $checkout"
+          if [ "$image" != "$checkout" ]; then
+            echo "::error::Image version $image does not match checkout version $checkout"
+            exit 1
+          fi

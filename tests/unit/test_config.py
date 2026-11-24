@@ -110,3 +110,30 @@ def test_source_timeouts_must_be_positive_and_finite(value: float) -> None:
     """Timeouts must be usable by the HTTP client."""
     with pytest.raises(ValidationError):
         _settings(source_read_timeout_seconds=value)
+
+
+def test_workers_return_their_job_within_the_platform_stop_timeout_by_default() -> None:
+    """Without settings, a worker runs one job and gives it 20 seconds when stopped.
+
+    ECS kills a stopping container 30 seconds after SIGTERM unless configured
+    otherwise, so the default leaves the worker time to cancel its job and return
+    the message before that.
+    """
+    settings = _settings()
+
+    assert settings.worker_concurrency == 1
+    assert settings.worker_soft_shutdown_seconds == 20
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_worker_concurrency_must_be_at_least_one(value: int) -> None:
+    """A worker that may run no jobs stops settings construction."""
+    with pytest.raises(ValidationError):
+        _settings(worker_concurrency=value)
+
+
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+def test_worker_soft_shutdown_must_be_positive_and_finite(value: float) -> None:
+    """A stopped worker must wait a real, bounded time before cancelling its jobs."""
+    with pytest.raises(ValidationError):
+        _settings(worker_soft_shutdown_seconds=value)

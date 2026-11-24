@@ -12,8 +12,32 @@ from standard_annotation_backend.config import (
     get_settings,
 )
 from standard_annotation_backend.logging import configure_logging
+from standard_annotation_backend.workers.health import SCHEDULER_LOOP_SECONDS
+from standard_annotation_backend.workers.heartbeat import WorkerHeartbeat
 
 settings = get_settings()
+
+VISIBILITY_TIMEOUT_SECONDS = 6 * 60 * 60
+"""How long Redis waits before giving an unacknowledged message to another worker.
+
+A message stays unacknowledged while its job runs (`task_acks_late`), and Redis
+counts from when it delivered the message. A job that runs longer than this is
+delivered again while still running; the duplicate returns at the job's execution
+lock and acknowledges the message, leaving nothing to recover the job if its worker
+then dies. So this must be longer than the longest job. It matters only after a
+worker is killed without its soft shutdown; a stopped worker returns its messages.
+"""
+
+BROKER_SOCKET_TIMEOUT_SECONDS = 5
+"""How long a connection to Redis waits to connect, or for an answer, before failing.
+
+Without it, a Redis that accepts connections but never answers blocks a send
+forever, and `JobService.send` keeps the job's row lock and its transaction open
+the whole time. With it, the send raises within seconds and the job is failed or
+left as it is, by the rule in `JobService.send`. The worker's and scheduler's own
+connections reconnect instead of waiting. Redis on the same network answers in
+milliseconds, so this is generous.
+"""
 
 
 def beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
@@ -71,5 +95,20 @@ celery_app.conf.update(
     timezone="UTC",
     task_acks_late=True,
     task_reject_on_worker_lost=True,
+    # A worker reserves no message beyond the ones it is running, so a stopped or
+    # killed worker strands no job it never started.
+    worker_prefetch_multiplier=1,
+    worker_concurrency=settings.worker_concurrency,
+    worker_soft_shutdown_timeout=settings.worker_soft_shutdown_seconds,
+    broker_transport_options={
+        "visibility_timeout": VISIBILITY_TIMEOUT_SECONDS,
+        "socket_timeout": BROKER_SOCKET_TIMEOUT_SECONDS,
+        "socket_connect_timeout": BROKER_SOCKET_TIMEOUT_SECONDS,
+    },
     beat_schedule=beat_schedule(settings),
+    # Beat writes its health check heartbeat on each pass, and would otherwise wait
+    # up to five minutes between passes when nothing is due.
+    beat_scheduler="standard_annotation_backend.workers.heartbeat:HeartbeatScheduler",
+    beat_max_loop_interval=SCHEDULER_LOOP_SECONDS,
 )
+celery_app.steps["consumer"].add(WorkerHeartbeat)

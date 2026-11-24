@@ -13,13 +13,16 @@ def test_tasks_are_redelivered_after_worker_loss_and_retried_without_a_cap() -> 
     """SABE tasks are redelivered after worker loss and retried indefinitely.
 
     Tasks acknowledge late and are rejected back to the broker when their worker
-    dies, so unfinished work is delivered again. SABE tasks have no retry limit, so
+    dies, so unfinished work is delivered again. Redis delivers an unacknowledged
+    message again only after six hours, longer than any job runs, so a job is never
+    delivered twice while it is still running. SABE tasks have no retry limit, so
     infrastructure errors are retried until they succeed.
     """
     celery_app.loader.import_default_modules()
 
     assert celery_app.conf.task_acks_late is True
     assert celery_app.conf.task_reject_on_worker_lost is True
+    assert celery_app.conf.broker_transport_options["visibility_timeout"] == 6 * 3600
     sabe_tasks = [
         task
         for task in celery_app.tasks.values()

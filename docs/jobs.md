@@ -60,6 +60,12 @@ errors can contain credentials. Then:
 - Any other job is left as it is: an earlier send put it in the broker, or a
   worker already started it, and sending a job twice is harmless.
 
+A send cannot wait on the broker indefinitely: connections to Redis give up after
+`BROKER_SOCKET_TIMEOUT_SECONDS` (5 seconds, `workers/celery_app.py`) without an
+answer, so a Redis that accepts connections but never answers makes the send raise
+within seconds instead of holding the row lock until Redis recovers. A Redis that
+refuses connections fails sooner, after Celery's three quick publish retries.
+
 Because the row lock is held while the job is sent, the code that sends it must
 not wait for the job to run. The refresh CLI, which runs jobs in its own process,
 runs each one after it has been sent.
@@ -86,6 +92,48 @@ An error that retrying cannot fix fails the job with a failure code. Any other
 error, such as a lost database connection, leaves the job `running`; the task
 logs only its type and retries after 30 seconds. The CLI does not retry: it
 reports the job as still `running`.
+
+### Stopping a worker
+
+Start workers with `python -m standard_annotation_backend.workers.worker`
+(`workers/worker.py`), which sets `REMAP_SIGTERM=SIGQUIT` before starting Celery.
+A worker stopped with SIGTERM, as a deploy stops it, then lets its running jobs
+finish for `SABE_WORKER_SOFT_SHUTDOWN_SECONDS`, cancels any still running, and
+puts their messages back on the queue, where another worker picks them up and runs
+the jobs from the beginning. Without the remapping, Celery waits for running jobs
+however long they take, and the platform kills the worker with its messages still
+unacknowledged. The soft shutdown must end before the platform's stop timeout for
+the same reason; its default of 20 seconds leaves a margin under ECS's default of 30.
+
+A worker takes only the messages it is running (`worker_prefetch_multiplier` is 1),
+runs `SABE_WORKER_CONCURRENCY` jobs at once, and so strands no job it never
+started. A message whose worker was killed without its soft shutdown, for example
+for running out of memory, waits until Redis's visibility timeout of six hours
+(`VISIBILITY_TIMEOUT_SECONDS`) before another worker receives it. The timeout is
+longer than any job, because Redis counts from delivery: a job still running when
+the timeout passes would be delivered again, and that duplicate would acknowledge
+the message at the execution lock.
+
+### Health checks
+
+The worker and scheduler containers each run a health check:
+`python -m standard_annotation_backend.workers.health worker` (or `scheduler`),
+in `workers/health.py`. It passes while the process's heartbeat file in `/tmp` is
+younger than two minutes, and fails with its reason when the file is older or
+missing. The worker's main process writes its heartbeat every 2 seconds from a
+step of its Celery consumer, the part that holds the Redis connection, and Beat
+writes its heartbeat on every scheduling pass, which `beat_max_loop_interval` keeps
+at most 30 seconds apart (`workers/heartbeat.py`). A
+container whose check keeps failing is replaced by the platform; Compose only
+reports it, in `docker compose ps`.
+
+The check judges the main process, not the jobs: jobs run in child processes, so a
+long job keeps passing, and so does a job stuck inside its own work. A worker that
+loses Redis stops beating until it reconnects, so only an outage longer than the two
+minutes fails its check; the heartbeat resumes as soon as the worker reconnects.
+The worker's interval is short because kombu keeps a cancelled timer entry
+scheduled until its due time, and a reconnecting worker can wait for it before
+taking jobs again; at 2 seconds, that wait is brief.
 
 ## Annotation scan jobs
 
