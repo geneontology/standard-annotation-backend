@@ -112,14 +112,17 @@ def test_source_timeouts_must_be_positive_and_finite(value: float) -> None:
         _settings(source_read_timeout_seconds=value)
 
 
-def test_workers_run_one_job_at_a_time_and_allow_a_minute_to_finish_by_default() -> (
-    None
-):
-    """Without settings, a worker runs one job and gives it 60 seconds when stopped."""
+def test_workers_return_their_job_within_the_platform_stop_timeout_by_default() -> None:
+    """Without settings, a worker runs one job and gives it 20 seconds when stopped.
+
+    ECS kills a stopping container 30 seconds after SIGTERM unless configured
+    otherwise, so the default leaves the worker time to cancel its job and return
+    the message before that.
+    """
     settings = _settings()
 
     assert settings.worker_concurrency == 1
-    assert settings.worker_soft_shutdown_seconds == 60
+    assert settings.worker_soft_shutdown_seconds == 20
 
 
 @pytest.mark.parametrize("value", [0, -1])

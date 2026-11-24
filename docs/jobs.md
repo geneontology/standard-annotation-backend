@@ -102,7 +102,8 @@ finish for `SABE_WORKER_SOFT_SHUTDOWN_SECONDS`, cancels any still running, and
 puts their messages back on the queue, where another worker picks them up and runs
 the jobs from the beginning. Without the remapping, Celery waits for running jobs
 however long they take, and the platform kills the worker with its messages still
-unacknowledged.
+unacknowledged. The soft shutdown must end before the platform's stop timeout for
+the same reason; its default of 20 seconds leaves a margin under ECS's default of 30.
 
 A worker takes only the messages it is running (`worker_prefetch_multiplier` is 1),
 runs `SABE_WORKER_CONCURRENCY` jobs at once, and so strands no job it never

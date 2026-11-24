@@ -47,7 +47,7 @@ services:
       retries: 3
       start_period: 30s
     # Long enough for the worker's soft shutdown (SABE_WORKER_SOFT_SHUTDOWN_SECONDS,
-    # 60 seconds unless .env sets it) to return its messages before Compose kills it.
+    # 20 seconds unless .env sets it) to return its messages before Compose kills it.
     stop_grace_period: 90s
     env_file:
       - .env
